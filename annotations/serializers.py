@@ -5,6 +5,7 @@ from bible.models import Verse
 from bible.services.dbt.client import get_default_dbt_client
 from bible.services.esv.client import get_default_esv_client
 from bible.services.esv.registry import is_esv_fileset
+from bible.utils.bible_books import get_dbt_book_id
 from .models import (
     Note,
     NoteVerse,
@@ -72,12 +73,16 @@ class TagSerializer(serializers.ModelSerializer):
         if request and hasattr(request, 'user'):
             if request.user.is_authenticated:
                 # For authenticated users, only show their own tags
-                self.fields['parent_tag'].queryset = Tag.objects.filter(user=request.user)
+                self.fields['parent_tag'].queryset = Tag.objects.filter(
+                    user=request.user
+                )
             else:
                 # For unauthenticated users, only show guest user tags
                 try:
                     guest_user = User.objects.get(username='guest')
-                    self.fields['parent_tag'].queryset = Tag.objects.filter(user=guest_user)
+                    self.fields['parent_tag'].queryset = Tag.objects.filter(
+                        user=guest_user
+                    )
                 except User.DoesNotExist:
                     self.fields['parent_tag'].queryset = Tag.objects.none()
 
@@ -142,12 +147,16 @@ class NoteSerializer(serializers.ModelSerializer):
         if request and hasattr(request, 'user'):
             if request.user.is_authenticated:
                 # For authenticated users, only show their own tags
-                self.fields['tag'].queryset = Tag.objects.filter(user=request.user)
+                self.fields['tag'].queryset = Tag.objects.filter(
+                    user=request.user
+                )
             else:
                 # For unauthenticated users, only show guest user tags
                 try:
                     guest_user = User.objects.get(username='guest')
-                    self.fields['tag'].queryset = Tag.objects.filter(user=guest_user)
+                    self.fields['tag'].queryset = Tag.objects.filter(
+                        user=guest_user
+                    )
                 except User.DoesNotExist:
                     self.fields['tag'].queryset = Tag.objects.none()
 
@@ -660,8 +669,7 @@ class ReadingPositionSerializer(serializers.ModelSerializer):
 
     def validate_book(self, value):
         """Validate book name against known Bible books."""
-        from bible.utils.book_mappings import BOOK_NAMES
-        if value not in BOOK_NAMES.values():
+        if get_dbt_book_id(value) is None:
             raise serializers.ValidationError(
                 f"Invalid book name: {value}"
             )

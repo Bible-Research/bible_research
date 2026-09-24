@@ -48,7 +48,10 @@ class SerializerTestCase(TestCase):
         
         # Create and validate serializer
         tag_serializer = TagSerializer(data=tag_data, context=self.context)
-        self.assertTrue(tag_serializer.is_valid(), f"Tag validation errors: {tag_serializer.errors}")
+        self.assertTrue(
+            tag_serializer.is_valid(),
+            f"Tag validation errors: {tag_serializer.errors}"
+        )
         
         # Save and verify tag
         tag = tag_serializer.save()
@@ -58,7 +61,7 @@ class SerializerTestCase(TestCase):
         return tag  # Return for use in other tests
 
     def test_note_serializer(self):
-        """Test that NoteSerializer correctly creates a note with verse references."""
+        """NoteSerializer creates a note with verse references."""
         # First create a tag to associate with the note
         tag = self.test_tag_serializer()
         
@@ -73,7 +76,10 @@ class SerializerTestCase(TestCase):
         
         # Create and validate serializer
         note_serializer = NoteSerializer(data=note_data, context=self.context)
-        self.assertTrue(note_serializer.is_valid(), f"Note validation errors: {note_serializer.errors}")
+        self.assertTrue(
+            note_serializer.is_valid(),
+            f"Note validation errors: {note_serializer.errors}"
+        )
         
         # Save and verify note
         note = note_serializer.save()
@@ -916,16 +922,52 @@ class TestPartialReordering(TestCase):
             user=other_user,
             tag_position=99.0
         )
-        
+
         updates = [
             {'note_id': other_note.id, 'position': 50.0},
         ]
-        
+
         response = self.client.post(
             '/api/v1/notes/reorder/',
             {'tag_id': self.tag.id, 'updates': updates},
             format='json'
         )
-        
+
         self.assertEqual(response.status_code, 400)
         self.assertIn('not found', str(response.data))
+
+
+class ReadingPositionViewSetTest(TestCase):
+    """Integration tests for the ReadingPositionViewSet API."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='rdp_user',
+            email='rdp@example.com',
+            password='pass',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.url = '/api/v1/reading-positions/'
+
+    def test_create_position_valid_book(self):
+        """POST with a valid book name upserts a position."""
+        resp = self.client.post(
+            self.url,
+            {'book': 'John', 'chapter': 3, 'verse': 16},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['book'], 'John')
+        self.assertEqual(resp.json()['chapter'], 3)
+        self.assertEqual(resp.json()['verse'], 16)
+
+    def test_create_position_invalid_book(self):
+        """POST with an unknown book name returns 400."""
+        resp = self.client.post(
+            self.url,
+            {'book': 'NotABook', 'chapter': 1, 'verse': 1},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
