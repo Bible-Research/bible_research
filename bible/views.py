@@ -25,6 +25,11 @@ from .services.esv.client import (
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_ERROR_STATUSES = {
+    'rate_limited': status.HTTP_429_TOO_MANY_REQUESTS,
+    'not_found': status.HTTP_404_NOT_FOUND,
+}
+
 
 class BiblePassageView(APIView):
     """
@@ -40,7 +45,8 @@ class BiblePassageView(APIView):
     Example:
         /api/v1/bible/?passage=John+3&fileset_id=ENGESV
         /api/v1/bible/?passage=John+3&fileset_id=LVSGLU8   # LV
-        /api/v1/bible/?passage=Luke+20&fileset_id=GLU8&response_format=audio  # LV audio
+        /api/v1/bible/?passage=Luke+20&fileset_id=GLU8
+          &response_format=audio  # LV audio
     """
 
     def get(self, request, format=None):
@@ -139,6 +145,17 @@ class BiblePassageView(APIView):
                     f"{book_name} {chapter} ({fileset_id})"
                 )
                 body = serializer.to_representation(data)
+                # Provider failures come back with ``error`` /
+                # ``error_code`` fields — surface them with a real
+                # HTTP status so clients can branch on it.
+                if 'error' in body:
+                    return Response(
+                        body,
+                        status=PROVIDER_ERROR_STATUSES.get(
+                            body.get('error_code'),
+                            status.HTTP_502_BAD_GATEWAY,
+                        ),
+                    )
                 # Surface "audio requested but not generated yet" as
                 # a proper 404 instead of a 200 with ``audio_url: None``
                 # so clients can reliably branch on status code.

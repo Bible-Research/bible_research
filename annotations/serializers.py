@@ -1,3 +1,5 @@
+import logging
+
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from rest_framework import serializers
@@ -6,6 +8,7 @@ from bible.services.dbt.client import get_default_dbt_client
 from bible.services.esv.client import get_default_esv_client
 from bible.services.esv.registry import is_esv_fileset
 from bible.utils.bible_books import get_dbt_book_id
+from bible.utils.provider_errors import provider_error_fields
 from .models import (
     Note,
     NoteVerse,
@@ -15,6 +18,8 @@ from .models import (
     ReadingPosition
 )
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
 
 
 class CurrentAuthenticatedUserDefault:
@@ -323,8 +328,10 @@ class NoteSerializer(serializers.ModelSerializer):
                         if h.get('before_verse') in verse_numbers
                     ]
         except Exception as e:
-            print(f"Error fetching verses/headings: {e}")
-            # Fallback: return verses without text
+            logger.error(f"Error fetching verses/headings: {e}")
+            # Surface the provider failure to clients while
+            # keeping the verse references for display.
+            representation.update(provider_error_fields(e))
             for verse in verses:
                 verses_with_text.append({
                     'book': book_name,
