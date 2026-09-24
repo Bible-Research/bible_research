@@ -1,4 +1,6 @@
 import datetime
+from unittest.mock import MagicMock, patch
+
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, APIClient
@@ -10,6 +12,14 @@ from annotations.serializers import (
 )
 from annotations.models import Comment, Note, Tag
 from bible.models import Verse
+
+
+class FakeProviderError(Exception):
+    """Mimics upstream client exceptions carrying an HTTP status."""
+
+    def __init__(self, status):
+        super().__init__(f'HTTP {status}')
+        self.status = status
 
 
 class SerializerTestCase(TestCase):
@@ -971,3 +981,56 @@ class ReadingPositionViewSetTest(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, 400)
+
+
+class NoteProviderErrorTest(TestCase):
+    """Note serialization surfaces provider failures via
+    error/error_code instead of silently empty verse text."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='note_err_user',
+            email='note_err@example.com',
+            password='pass',
+        )
+        self.verse = Verse.objects.create(
+            book='John', chapter=1, verse=1, dbt_book_id='JHN'
+        )
+        self.note = Note.objects.create(
+            user=self.user, note_text='test note'
+        )
+        self.note.verses.add(self.verse)
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_note_includes_error_fields_on_provider_429(
+        self, mock_get
+    ):
+        mock_client = MagicMock()
+        mock_client.get_verses.side_effect = FakeProviderError(429)
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGESV'}
+        ).data
+
+        self.assertEqual(data['error_code'], 'rate_limited')
+        self.assertIn('429', data['error'])
+        # Verse references are still returned so clients can
+        # display which passage failed.
+        self.assertEqual(data['verses'][0]['text'], '')
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_note_includes_error_fields_on_provider_failure(
+        self, mock_get
+    ):
+        mock_client = MagicMock()
+        mock_client.get_verses.side_effect = FakeProviderError(503)
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGESV'}
+        ).data
+
+        self.assertEqual(data['error_code'], 'provider_error')
+        self.assertIn('503', data['error'])

@@ -319,6 +319,20 @@ GET /api/v1/bible/?passage=John+3&fileset_id=ENGESV
 }
 ```
 
+**Provider error response** (upstream Bible provider failed —
+e.g. rate-limited): `verses` is omitted and the payload carries
+`error`/`error_code` describing the failure. HTTP status is `429`
+when `error_code` is `rate_limited`, otherwise `502`.
+```json
+{
+  "book": "JHN",
+  "book_name": "John",
+  "chapter": 3,
+  "error": "Bible provider rate limit exceeded (HTTP 429)",
+  "error_code": "rate_limited"
+}
+```
+
 #### Get Bible Passage (Audio)
 ```
 GET /api/v1/bible/?passage=John+3&response_format=audio&
@@ -480,6 +494,12 @@ Authorization: Token <your-token>
   ]
 }
 ```
+
+When the upstream Bible provider fails while resolving verse
+text for a note (e.g. rate-limited), the note keeps its
+`verses` references with empty `text` and additionally carries
+`error`/`error_code` (`rate_limited` or `provider_error`)
+describing the failure.
 
 **Examples**:
 ```

@@ -12,6 +12,7 @@ from bible.services.sword.registry import (
     is_sword_fileset,
 )
 from bible.services.storage import gcs
+from bible.utils.provider_errors import provider_error_fields
 
 
 logger = logging.getLogger(__name__)
@@ -182,6 +183,5 @@ class BiblePassageSerializer(serializers.Serializer):
                 'book': book_id,
                 'book_name': book_name,
                 'chapter': chapter,
-                'verses': [],
-                'message': 'No verses found for the specified passage',
+                **provider_error_fields(e),
             }

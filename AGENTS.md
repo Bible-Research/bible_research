@@ -63,14 +63,13 @@ Token login: `POST /api/token/`.
 
 ## Error contract
 
-Failures return `{"error": "..."}`; upstream/provider failures are
-surfaced as 502 where the backend can tell them apart from missing
-resources (see `bible/views.py`).
-
-Branch `fix/provider-error-response` adds a richer contract —
-`error` + `error_code` fields (`rate_limited`, `provider_error`) via
-`bible/utils/provider_errors.py`. If that branch is merged, keep
-frontend-visible field names stable; the React app consumes them.
+Provider failures surface as `error` + `error_code` fields built by
+`bible/utils/provider_errors.py`: `rate_limited` → HTTP 429,
+anything else → `provider_error` → HTTP 502 (see
+`bible/views.py`). Note serialization degrades the same way —
+verse refs kept, `text` empty. Keep field names stable; the React
+app branches on `error_code`. Never embed `str(exc)` in `error` —
+exception text can contain request URLs with credentials.
 
 ## Auth quirks
 
