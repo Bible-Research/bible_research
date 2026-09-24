@@ -1,3 +1,5 @@
+import logging
+
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from rest_framework import serializers
@@ -16,6 +18,8 @@ from .models import (
     ReadingPosition
 )
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
 
 
 class CurrentAuthenticatedUserDefault:
@@ -324,7 +328,7 @@ class NoteSerializer(serializers.ModelSerializer):
                         if h.get('before_verse') in verse_numbers
                     ]
         except Exception as e:
-            print(f"Error fetching verses/headings: {e}")
+            logger.error(f"Error fetching verses/headings: {e}")
             # Surface the provider failure to clients while
             # keeping the verse references for display.
             representation.update(provider_error_fields(e))

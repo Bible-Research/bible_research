@@ -71,7 +71,7 @@ bible_research/
 ### Prerequisites
 - Python 3.8+
 - PostgreSQL (for production) or SQLite (for development)
-- DBT API key (from [Bible Brain](https://www.faithcomesbyhearing.com/bible-brain/api-reference))
+- DBT API key (from [Bible Brain][dbt-api])
 
 ### Installation
 
@@ -321,8 +321,10 @@ GET /api/v1/bible/?passage=John+3&fileset_id=ENGESV
 
 **Provider error response** (upstream Bible provider failed —
 e.g. rate-limited): `verses` is omitted and the payload carries
-`error`/`error_code` describing the failure. HTTP status is `429`
-when `error_code` is `rate_limited`, otherwise `502`.
+`error`/`error_code` describing the failure. HTTP status is `404`
+when `error_code` is `not_found` (the passage does not exist
+upstream), `429` when `error_code` is `rate_limited`, otherwise
+`502` (`provider_error`).
 ```json
 {
   "book": "JHN",
@@ -498,8 +500,8 @@ Authorization: Token <your-token>
 When the upstream Bible provider fails while resolving verse
 text for a note (e.g. rate-limited), the note keeps its
 `verses` references with empty `text` and additionally carries
-`error`/`error_code` (`rate_limited` or `provider_error`)
-describing the failure.
+`error`/`error_code` (`rate_limited`, `not_found`, or
+`provider_error`) describing the failure.
 
 **Examples**:
 ```
@@ -914,8 +916,10 @@ message**:
 
 - [Django Documentation](https://docs.djangoproject.com/)
 - [Django REST Framework](https://www.django-rest-framework.org/)
-- [DBT API Documentation](https://www.faithcomesbyhearing.com/bible-brain/api-reference)
+- [DBT API Documentation][dbt-api]
 - [PostgreSQL Documentation](https://www.postgresql.org/docs/)
+
+[dbt-api]: https://www.faithcomesbyhearing.com/bible-brain/api-reference
 
 ---
 

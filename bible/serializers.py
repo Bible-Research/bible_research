@@ -12,7 +12,10 @@ from bible.services.sword.registry import (
     is_sword_fileset,
 )
 from bible.services.storage import gcs
-from bible.utils.provider_errors import provider_error_fields
+from bible.utils.provider_errors import (
+    PassageNotFoundError,
+    provider_error_fields,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -151,6 +154,11 @@ class BiblePassageSerializer(serializers.Serializer):
             passage_data = dbt_client.get_verses(
                 book_id, str(chapter), bible_id=fileset_id
             )
+            if not passage_data.get('data'):
+                raise PassageNotFoundError(
+                    f"No verses found for {book_id} {chapter} "
+                    f"in fileset_id={fileset_id}"
+                )
             audio_format = 'path' in passage_data['data'][0]
             if audio_format:
                 audio_data = passage_data['data'][0]

@@ -25,6 +25,11 @@ from .services.esv.client import (
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_ERROR_STATUSES = {
+    'rate_limited': status.HTTP_429_TOO_MANY_REQUESTS,
+    'not_found': status.HTTP_404_NOT_FOUND,
+}
+
 
 class BiblePassageView(APIView):
     """
@@ -146,10 +151,9 @@ class BiblePassageView(APIView):
                 if 'error' in body:
                     return Response(
                         body,
-                        status=(
-                            status.HTTP_429_TOO_MANY_REQUESTS
-                            if body.get('error_code') == 'rate_limited'
-                            else status.HTTP_502_BAD_GATEWAY
+                        status=PROVIDER_ERROR_STATUSES.get(
+                            body.get('error_code'),
+                            status.HTTP_502_BAD_GATEWAY,
                         ),
                     )
                 # Surface "audio requested but not generated yet" as

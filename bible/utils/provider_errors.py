@@ -8,6 +8,18 @@ failures from any provider.
 from typing import Dict, Optional
 
 
+class PassageNotFoundError(ValueError):
+    """The provider has no such book/chapter/passage.
+
+    Raised for missing content detected without an upstream HTTP
+    status (e.g. a SWORD book/chapter lookup, or a DBT response
+    with empty ``data``) so serializers can report ``not_found``
+    instead of a generic ``provider_error``. Subclasses
+    ``ValueError`` for backward compatibility with callers that
+    caught the previous exception type.
+    """
+
+
 def upstream_status_code(exc: Exception) -> Optional[int]:
     """Extract the HTTP status an upstream provider returned.
 
@@ -24,7 +36,9 @@ def upstream_status_code(exc: Exception) -> Optional[int]:
 def provider_error_fields(exc: Exception) -> Dict[str, str]:
     """Build ``error``/``error_code`` fields for a provider failure.
 
-    ``error_code`` is ``rate_limited`` for upstream HTTP 429 and
+    ``error_code`` is ``rate_limited`` for upstream HTTP 429,
+    ``not_found`` when the passage does not exist upstream
+    (``PassageNotFoundError`` or upstream HTTP 404), and
     ``provider_error`` for any other failure.
 
     ``str(exc)`` is never embedded in ``error``: exception text can
@@ -39,6 +53,12 @@ def provider_error_fields(exc: Exception) -> Dict[str, str]:
             'error':
                 'Bible provider rate limit exceeded (HTTP 429)',
             'error_code': 'rate_limited',
+        }
+    if isinstance(exc, PassageNotFoundError) or status == 404:
+        detail = f' (HTTP {status})' if status else ''
+        return {
+            'error': f'Passage not found{detail}',
+            'error_code': 'not_found',
         }
     if status:
         return {

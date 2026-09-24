@@ -1034,3 +1034,18 @@ class NoteProviderErrorTest(TestCase):
 
         self.assertEqual(data['error_code'], 'provider_error')
         self.assertIn('503', data['error'])
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_note_includes_not_found_on_provider_404(
+        self, mock_get
+    ):
+        mock_client = MagicMock()
+        mock_client.get_verses.side_effect = FakeProviderError(404)
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGESV'}
+        ).data
+
+        self.assertEqual(data['error_code'], 'not_found')
+        self.assertIn('404', data['error'])

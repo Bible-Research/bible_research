@@ -65,11 +65,13 @@ Token login: `POST /api/token/`.
 
 Provider failures surface as `error` + `error_code` fields built by
 `bible/utils/provider_errors.py`: `rate_limited` → HTTP 429,
-anything else → `provider_error` → HTTP 502 (see
-`bible/views.py`). Note serialization degrades the same way —
-verse refs kept, `text` empty. Keep field names stable; the React
-app branches on `error_code`. Never embed `str(exc)` in `error` —
-exception text can contain request URLs with credentials.
+`not_found` (missing passage, upstream 404, or
+`PassageNotFoundError`) → HTTP 404, anything else →
+`provider_error` → HTTP 502 (see `bible/views.py`). Note
+serialization degrades the same way — verse refs kept, `text`
+empty. Keep field names stable; the React app branches on
+`error_code`. Never embed `str(exc)` in `error` — exception text
+can contain request URLs with credentials.
 
 ## Auth quirks
 

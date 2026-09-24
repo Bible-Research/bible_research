@@ -11,6 +11,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from bible.serializers import BiblePassageSerializer
+from bible.utils.provider_errors import PassageNotFoundError
 
 
 class FakeProviderError(Exception):
@@ -121,6 +122,57 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertNotIn('SECRET', result['error'])
         self.assertNotIn('url:', result['error'])
 
+    @patch('bible.serializers.get_default_dbt_client')
+    def test_404_returns_not_found_fields(self, mock_get):
+        mock_client = MagicMock()
+        mock_client.get_verses.side_effect = FakeProviderError(404)
+        mock_get.return_value = mock_client
+
+        data = _passage_data()
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertNotIn('verses', result)
+        self.assertEqual(result['error_code'], 'not_found')
+        self.assertIn('404', result['error'])
+
+    @patch('bible.serializers.get_default_dbt_client')
+    def test_empty_dbt_data_returns_not_found(self, mock_get):
+        """A successful upstream response with empty ``data`` is
+        missing content, not a provider failure."""
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {'data': []}
+        mock_get.return_value = mock_client
+
+        data = _passage_data()
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertNotIn('verses', result)
+        self.assertEqual(result['error_code'], 'not_found')
+
+    @patch('bible.serializers.get_default_sword_client')
+    def test_sword_missing_chapter_returns_not_found(
+        self, mock_get
+    ):
+        mock_client = MagicMock()
+        mock_client.get_chapter_verses.side_effect = (
+            PassageNotFoundError(
+                'No verses found for JHN 99 in fileset_id=LVSGLU8'
+            )
+        )
+        mock_get.return_value = mock_client
+
+        data = _passage_data(fileset_id='LVSGLU8')
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertNotIn('verses', result)
+        self.assertEqual(result['error_code'], 'not_found')
+
 
 class ProviderErrorViewTests(TestCase):
     """The view must map provider failures to real HTTP statuses."""
@@ -154,4 +206,20 @@ class ProviderErrorViewTests(TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(
             response.data['error_code'], 'provider_error'
+        )
+
+    @patch('bible.serializers.get_default_dbt_client')
+    def test_view_returns_404_for_missing_passage(self, mock_get):
+        mock_client = MagicMock()
+        mock_client.get_verses.side_effect = FakeProviderError(404)
+        mock_get.return_value = mock_client
+
+        response = APIClient().get(
+            '/api/v1/bible/',
+            {'passage': 'John 3', 'fileset_id': 'ENGESV'},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            response.data['error_code'], 'not_found'
         )
