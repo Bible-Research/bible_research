@@ -1,5 +1,8 @@
 """Utility functions for Bible books and standard abbreviations."""
 
+import difflib
+import re
+
 # Book data: (book_name, book_code, testament)
 # Testament: 'OT' = Old Testament, 'NT' = New Testament
 _BIBLE_BOOKS = [
@@ -118,6 +121,77 @@ def normalize_sword_book_name(name: str) -> str:
     return normalized
 
 
+# Alternate titles and frequent misspellings resolved explicitly so
+# they never depend on (or get stolen by) fuzzy matching — e.g.
+# 'canticles' is closer to '1/2 chronicles' than to its real target.
+_BOOK_ALIASES = {
+    'isiah': 'isaiah',
+    'issiah': 'isaiah',
+    'isaih': 'isaiah',
+    'jhon': 'john',
+    'song of songs': 'song of solomon',
+    'canticles': 'song of solomon',
+    'apocalypse': 'revelation',
+}
+
+_NUMBER_WORDS = {'first': '1', 'second': '2', 'third': '3'}
+
+_ORDINAL_RE = re.compile(r'\b([123])(?:st|nd|rd|th)\b')
+
+# Minimum similarity for fuzzy book-name matching. 0.8 catches
+# single-character typos in longer names ('genisis' -> 'genesis')
+# without guessing on unrelated input.
+_FUZZY_CUTOFF = 0.8
+
+
+def _normalize_for_lookup(book_name):
+    """Normalise free-text book input for lookup.
+
+    Builds on ``normalize_sword_book_name`` (lowercase, whitespace,
+    Roman numerals, 'revelation of john') and additionally handles
+    ordinal suffixes ('1st Kings') and number words
+    ('First Samuel').
+    """
+    normalized = normalize_sword_book_name(book_name)
+    normalized = _ORDINAL_RE.sub(r'\1', normalized)
+    first, _, rest = normalized.partition(' ')
+    if first in _NUMBER_WORDS:
+        normalized = ' '.join(
+            p for p in [_NUMBER_WORDS[first], rest] if p
+        )
+    return normalized
+
+
+def _fuzzy_book_id(normalized):
+    """Fuzzy-match a normalised book name to a DBT book ID.
+
+    A leading digit locks matching to books with that number so
+    e.g. '3 samuel' does not resolve to '2 samuel'; unnumbered
+    input only matches unnumbered books so 'peter' stays
+    ambiguous instead of guessing '2 peter'.
+    """
+    number, _, rest = normalized.partition(' ')
+    if number.isdigit() and rest:
+        candidates = {
+            name.split(' ', 1)[1]: code
+            for name, code in DBT_BOOK_NAME_TO_ID.items()
+            if name.startswith(f'{number} ')
+        }
+    else:
+        rest = normalized
+        candidates = {
+            name: code
+            for name, code in DBT_BOOK_NAME_TO_ID.items()
+            if not name[0].isdigit()
+        }
+    matches = difflib.get_close_matches(
+        rest, list(candidates), n=1, cutoff=_FUZZY_CUTOFF
+    )
+    if matches:
+        return candidates[matches[0]]
+    return None
+
+
 def get_dbt_book_id(book_name):
     """Convert a book name to its standard book ID.
 
@@ -126,9 +200,21 @@ def get_dbt_book_id(book_name):
 
     Returns:
         str: The standard book ID (e.g., '2CH'), or None if not found
+
+    Matching is tolerant: after normalisation it tries an exact
+    match, then common misspellings/alternate titles ('isiah',
+    'song of songs'), then a fuzzy match so minor typos like
+    'genisis' still resolve.
     """
-    normalized = ' '.join(book_name.lower().strip().split())
-    return DBT_BOOK_NAME_TO_ID.get(normalized, None)
+    normalized = _normalize_for_lookup(book_name)
+    book_id = DBT_BOOK_NAME_TO_ID.get(normalized)
+    if book_id is None:
+        book_id = DBT_BOOK_NAME_TO_ID.get(
+            _BOOK_ALIASES.get(normalized, '')
+        )
+    if book_id is None:
+        book_id = _fuzzy_book_id(normalized)
+    return book_id
 
 
 def get_testament(book_id):
