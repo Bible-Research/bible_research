@@ -2,6 +2,7 @@
 import logging
 import re
 import threading
+from html.parser import HTMLParser
 from typing import Any, Dict, List
 
 import requests
@@ -11,11 +12,9 @@ from bible.utils.bible_books import get_book_name_from_id
 
 logger = logging.getLogger(__name__)
 
-ESV_BASE_URL = "https://api.esv.org/v3/passage/text/"
+ESV_HTML_BASE_URL = "https://api.esv.org/v3/passage/html/"
 ESV_AUDIO_BASE_URL = "https://api.esv.org/v3/passage/audio/"
 ESV_SEARCH_BASE_URL = "https://api.esv.org/v3/passage/search/"
-
-_VERSE_MARKER = re.compile(r"\[(\d+)\]")
 
 
 class ESVClient:
@@ -37,16 +36,13 @@ class ESVClient:
         params = {
             "q": f"{book_name} {chapter}",
             "include-headings": "true",
-            "include-verse-numbers": "true",
             "include-footnotes": "false",
             "include-passage-references": "false",
             "include-short-copyright": "false",
-            "include-first-verse-numbers": "true",
-            "include-passage-horizontal-lines": "false",
-            "include-heading-horizontal-lines": "false",
+            "include-audio-link": "false",
         }
         r = self.session.get(
-            ESV_BASE_URL, params=params, timeout=10
+            ESV_HTML_BASE_URL, params=params, timeout=10
         )
         r.raise_for_status()
         return r.json()
@@ -177,146 +173,101 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _parse_passage(passage: str) -> Dict[str, Any]:
-    """Parse ESV plain-text passage into verses and headings.
+class _PassageHTMLParser(HTMLParser):
+    """Extract verses and section headings from ESV HTML.
 
-    ESV format (with our request params):
+    ESV markup (with our request params):
 
-    - Headings appear as their own paragraph (blank-line
-      delimited) with no ``[N]`` marker, and are NOT indented.
-    - Verse text has inline ``[N]`` markers; multiple verses
-      may share one paragraph.
-    - Text before the first ``[N]`` in a verse paragraph is
-      treated as a heading for the first verse in that block.
-    - Poetry and quoted scripture may span multiple blocks
-      within a single verse (between verse markers) and are
-      typically indented. These should be appended to the
-      current verse, not treated as headings.
+    - Section headings are ``<h3>`` elements. A heading attaches
+      to the next verse number that follows it.
+    - Verse boundaries are ``<b class="verse-num">`` elements
+      (or ``verse-num inline``) whose text is the verse number;
+      the chapter's first verse uses ``<b class="chapter-num">``
+      with ``CHAPTER:VERSE`` text.
+    - All other markup (poetry ``<span class="line">``,
+      words-of-Christ ``<span class="woc">``, ``<br />``) is
+      verse text and is flattened into the current verse.
     """
-    verses: List[Dict[str, Any]] = []
-    headings: List[Dict[str, Any]] = []
-    pending_heading: List[str] = []
-    pending_verse_text: List[str] = []
-    current_verse_num: int | None = None
 
-    blocks = re.split(r"\n{2,}", passage.strip())
+    _HEADING_TAGS = {"h2", "h3", "h4"}
 
-    for block_raw in blocks:
-        block = block_raw.strip()
-        if not block:
-            continue
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.verses: List[Dict[str, Any]] = []
+        self.headings: List[Dict[str, Any]] = []
+        self._verse_num: "int | None" = None
+        self._verse_parts: List[str] = []
+        self._pending_headings: List[str] = []
+        self._in_heading = False
+        self._heading_parts: List[str] = []
+        self._in_verse_marker = False
 
-        # Check if block is indented (poetry/quote continuation)
-        is_indented = block_raw.startswith((' ', '\t'))
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag in self._HEADING_TAGS:
+            self._in_heading = True
+            self._heading_parts = []
+        elif tag == "b":
+            classes = dict(attrs).get("class", "")
+            if "verse-num" in classes or "chapter-num" in classes:
+                self._in_verse_marker = True
 
-        first_marker = _VERSE_MARKER.search(block)
-        if first_marker is None:
-            # Block has no verse marker
-            if current_verse_num is not None and is_indented:
-                # Indented block after verse start = continuation
-                pending_verse_text.append(_normalise(block))
-            elif current_verse_num is not None:
-                # Non-indented block after verse = new heading
-                # Flush current verse first
-                if pending_verse_text:
-                    full_text = _normalise(
-                        " ".join(pending_verse_text)
-                    )
-                    if full_text:
-                        verses.append({
-                            "verse_start": current_verse_num,
-                            "verse_text": full_text,
-                        })
-                    pending_verse_text = []
-                current_verse_num = None
-                pending_heading.append(_normalise(block))
-            else:
-                # No verse started yet = heading
-                pending_heading.append(_normalise(block))
-            continue
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._HEADING_TAGS:
+            self._in_heading = False
+            text = _normalise(" ".join(self._heading_parts))
+            if text:
+                self._pending_headings.append(text)
+        elif tag == "b":
+            self._in_verse_marker = False
 
-        # Block has at least one verse marker
-        pre = block[:first_marker.start()].strip()
-        if pre:
-            if is_indented and current_verse_num is not None:
-                # Indented pre-text is continuation of current
-                # verse
-                pending_verse_text.append(_normalise(pre))
-            else:
-                # Non-indented pre-text is a heading
-                # Flush current verse first if any
-                if current_verse_num is not None and pending_verse_text:
-                    full_text = _normalise(
-                        " ".join(pending_verse_text)
-                    )
-                    if full_text:
-                        verses.append({
-                            "verse_start": current_verse_num,
-                            "verse_text": full_text,
-                        })
-                    pending_verse_text = []
-                    current_verse_num = None
-                pending_heading.append(_normalise(pre))
-        elif current_verse_num is not None and pending_verse_text:
-            # No pre-text, but we have a pending verse - flush
-            # it
-            full_text = _normalise(" ".join(pending_verse_text))
-            if full_text:
-                verses.append({
-                    "verse_start": current_verse_num,
-                    "verse_text": full_text,
-                })
-            pending_verse_text = []
-            current_verse_num = None
+    def handle_data(self, data: str) -> None:
+        if self._in_heading:
+            self._heading_parts.append(data)
+        elif self._in_verse_marker:
+            self._start_verse(data)
+            self._in_verse_marker = False
+        elif self._verse_num is not None:
+            self._verse_parts.append(data)
 
-        rest = block[first_marker.start():]
-        parts = _VERSE_MARKER.split(rest)
-        i = 1
-        while i + 1 < len(parts):
-            v_num = int(parts[i])
-            v_text = _normalise(parts[i + 1])
+    def _start_verse(self, marker_text: str) -> None:
+        """Begin a new verse; attach pending headings to it."""
+        # chapter-num carries "7:1"; verse-num carries "13".
+        num_text = _normalise(marker_text).split(":")[-1]
+        try:
+            num = int(num_text)
+        except ValueError:
+            return
+        self._flush_verse()
+        for heading in self._pending_headings:
+            self.headings.append(
+                {"before_verse": num, "text": heading}
+            )
+        self._pending_headings = []
+        self._verse_num = num
+        self._verse_parts = []
 
-            # Flush any pending verse before starting new one
-            if current_verse_num is not None and pending_verse_text:
-                full_text = _normalise(
-                    " ".join(pending_verse_text)
-                )
-                if full_text:
-                    verses.append({
-                        "verse_start": current_verse_num,
-                        "verse_text": full_text,
-                    })
-                pending_verse_text = []
-
-            # Process any pending heading for this new verse
-            if pending_heading:
-                h_text = _normalise(
-                    " ".join(pending_heading)
-                )
-                if h_text:
-                    headings.append({
-                        "before_verse": v_num,
-                        "text": h_text,
-                    })
-                pending_heading = []
-
-            # Start collecting text for this verse
-            current_verse_num = v_num
-            if v_text:
-                pending_verse_text.append(v_text)
-
-            i += 2
-
-    # Flush final verse if any
-    if current_verse_num is not None and pending_verse_text:
-        full_text = _normalise(" ".join(pending_verse_text))
-        if full_text:
-            verses.append({
-                "verse_start": current_verse_num,
-                "verse_text": full_text,
+    def _flush_verse(self) -> None:
+        if self._verse_num is None:
+            return
+        text = _normalise(" ".join(self._verse_parts))
+        if text:
+            self.verses.append({
+                "verse_start": self._verse_num,
+                "verse_text": text,
             })
 
-    return {"verses": verses, "headings": headings}
+    def result(self) -> Dict[str, Any]:
+        self._flush_verse()
+        self._verse_num = None
+        return {"verses": self.verses, "headings": self.headings}
+
+
+def _parse_passage(passage: str) -> Dict[str, Any]:
+    """Parse an ESV HTML passage into verses and headings."""
+    parser = _PassageHTMLParser()
+    parser.feed(passage)
+    parser.close()
+    return parser.result()
 
 
 _default_client: "ESVClient | None" = None
