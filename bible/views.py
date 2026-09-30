@@ -180,6 +180,11 @@ class BiblePassageView(APIView):
             logger.exception(
                 f"Error processing Bible passage request: {passage} - {e}"
             )
+            # Provider failures never reach this handler — they
+            # are classified inside the serializer and returned
+            # above. Only client-input errors (bad passage
+            # format, unknown book, invalid chapter) land here,
+            # so embedding str(e) in the 400 body is safe.
             return Response(
                 {"error": str(e)},
                 status=status.HTTP_400_BAD_REQUEST

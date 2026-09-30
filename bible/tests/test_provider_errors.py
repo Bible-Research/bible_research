@@ -153,6 +153,25 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertNotIn('verses', result)
         self.assertEqual(result['error_code'], 'not_found')
 
+    @patch('bible.serializers.get_default_esv_client')
+    def test_esv_empty_verses_returns_not_found(self, mock_get):
+        """A successful-but-empty ESV body parses to no verses —
+        missing content, not a silent empty chapter."""
+        mock_client = MagicMock()
+        mock_client.get_chapter_with_headings.return_value = {
+            'verses': [],
+            'headings': [],
+        }
+        mock_get.return_value = mock_client
+
+        data = _passage_data(fileset_id='ENGESV_API')
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertNotIn('verses', result)
+        self.assertEqual(result['error_code'], 'not_found')
+
     @patch('bible.serializers.get_default_sword_client')
     def test_sword_missing_chapter_returns_not_found(
         self, mock_get

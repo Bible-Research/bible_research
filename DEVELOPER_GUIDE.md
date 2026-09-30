@@ -501,7 +501,10 @@ When the upstream Bible provider fails while resolving verse
 text for a note (e.g. rate-limited), the note keeps its
 `verses` references with empty `text` and additionally carries
 `error`/`error_code` (`rate_limited`, `not_found`, or
-`provider_error`) describing the failure.
+`provider_error`) describing the failure. A successful-but-
+empty provider response (no verse rows returned) is reported
+the same way as a missing passage: `error_code` is
+`not_found`.
 
 **Examples**:
 ```

@@ -1049,3 +1049,60 @@ class NoteProviderErrorTest(TestCase):
 
         self.assertEqual(data['error_code'], 'not_found')
         self.assertIn('404', data['error'])
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_note_includes_not_found_on_empty_dbt_data(
+        self, mock_get
+    ):
+        """A successful-but-empty DBT body is missing content,
+        not a silent empty verse list."""
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {'data': []}
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGESV'}
+        ).data
+
+        self.assertEqual(data['error_code'], 'not_found')
+        self.assertIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], '')
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_note_includes_not_found_on_dbt_rows_without_text(
+        self, mock_get
+    ):
+        """DBT rows that all lack ``verse_text`` must surface
+        not_found instead of empty note verses."""
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {
+            'data': [{'verse_start': 1}]
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGESV'}
+        ).data
+
+        self.assertEqual(data['error_code'], 'not_found')
+        self.assertEqual(data['verses'][0]['text'], '')
+
+    @patch('annotations.serializers.get_default_esv_client')
+    def test_note_includes_not_found_on_empty_esv_verses(
+        self, mock_get
+    ):
+        """A successful-but-empty ESV body parses to no verses —
+        missing content, not a silent empty verse list."""
+        mock_client = MagicMock()
+        mock_client.get_chapter_with_headings.return_value = {
+            'verses': [],
+            'headings': [],
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGESV_API'}
+        ).data
+
+        self.assertEqual(data['error_code'], 'not_found')
+        self.assertEqual(data['verses'][0]['text'], '')

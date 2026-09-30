@@ -8,7 +8,10 @@ from bible.services.dbt.client import get_default_dbt_client
 from bible.services.esv.client import get_default_esv_client
 from bible.services.esv.registry import is_esv_fileset
 from bible.utils.bible_books import get_dbt_book_id
-from bible.utils.provider_errors import provider_error_fields
+from bible.utils.provider_errors import (
+    PassageNotFoundError,
+    provider_error_fields,
+)
 from .models import (
     Note,
     NoteVerse,
@@ -254,6 +257,14 @@ class NoteSerializer(serializers.ModelSerializer):
                 parsed = esv_client.get_chapter_with_headings(
                     dbt_book_id, chapter
                 )
+                # A successful-but-empty ESV body is missing
+                # content, not a usable chapter — surface
+                # not_found instead of silent empty text.
+                if not parsed.get('verses'):
+                    raise PassageNotFoundError(
+                        f"No verses found for {dbt_book_id} "
+                        f"{chapter} in fileset_id={fileset_id}"
+                    )
 
                 # Extract verses in range
                 for verse in verses:
@@ -296,11 +307,20 @@ class NoteSerializer(serializers.ModelSerializer):
                 verse_text = dbt_client.get_verses(
                     dbt_book_id, chapter, **kwargs
                 )
+                # A successful-but-empty DBT body (or rows that
+                # all lack ``verse_text``) is missing content —
+                # surface not_found instead of silent empty text.
+                data_rows = verse_text.get('data') or []
+                if not any('verse_text' in v for v in data_rows):
+                    raise PassageNotFoundError(
+                        f"No verses found for {dbt_book_id} "
+                        f"{chapter} in fileset_id={fileset_id}"
+                    )
 
                 for verse in verses:
                     matching_verse = next(
                         (
-                            v for v in verse_text['data']
+                            v for v in data_rows
                             if v['verse_start'] == verse.verse
                         ),
                         None
@@ -328,7 +348,9 @@ class NoteSerializer(serializers.ModelSerializer):
                         if h.get('before_verse') in verse_numbers
                     ]
         except Exception as e:
-            logger.error(f"Error fetching verses/headings: {e}")
+            # Catch-all also covers response-shaping bugs; they
+            # surface as provider_error rather than crashing GETs.
+            logger.exception(f"Error fetching verses/headings: {e}")
             # Surface the provider failure to clients while
             # keeping the verse references for display.
             representation.update(provider_error_fields(e))
