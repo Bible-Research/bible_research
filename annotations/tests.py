@@ -1,4 +1,5 @@
 import datetime
+from unittest.mock import patch
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, APIClient
@@ -8,7 +9,7 @@ from annotations.serializers import (
     NoteSerializer,
     build_comment_tree,
 )
-from annotations.models import Comment, Note, Tag
+from annotations.models import Comment, Note, NoteVerse, Tag
 from bible.models import Verse
 
 
@@ -797,6 +798,98 @@ class BulkNoteCreateTest(TestCase):
         self.assertEqual(
             Note.objects.filter(tag=self.tag).count(), 0
         )
+
+
+class NoteUpdateVerseReferencesTest(TestCase):
+    """Tests for PATCH /api/v1/notes/<id>/ with verse_references."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='upd_user',
+            email='upd@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='UpdateTag',
+        )
+        self.v316, _ = Verse.objects.get_or_create(
+            book='John',
+            chapter=3,
+            verse=16,
+        )
+        self.v317, _ = Verse.objects.get_or_create(
+            book='John',
+            chapter=3,
+            verse=17,
+        )
+        self.note = Note.objects.create(
+            user=self.user,
+            tag=self.tag,
+            note_text='Original text',
+        )
+        NoteVerse.objects.create(note=self.note, verse=self.v316)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        # Keep tests offline: force the serializer's verse
+        # enrichment into its fallback (empty verse text).
+        patcher = patch(
+            'annotations.serializers.get_default_dbt_client',
+            side_effect=ValueError('DBT disabled in tests'),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.url = f'/api/v1/notes/{self.note.id}/'
+
+    def test_patch_replaces_verse_links(self):
+        resp = self.client.patch(
+            self.url,
+            {
+                'verse_references': [
+                    {'book': 'John', 'chapter': 3, 'verse': 17},
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        verses = list(self.note.verses.order_by('verse'))
+        self.assertEqual(len(verses), 1)
+        self.assertEqual(verses[0].verse, 17)
+
+    def test_patch_without_references_keeps_links(self):
+        resp = self.client.patch(
+            self.url,
+            {'note_text': 'Edited text'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.note.verses.count(), 1)
+        self.note.refresh_from_db()
+        self.assertEqual(self.note.note_text, 'Edited text')
+
+    def test_patch_empty_references_clears_links(self):
+        resp = self.client.patch(
+            self.url,
+            {'verse_references': []},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.note.verses.count(), 0)
+
+    def test_patch_missing_verse_returns_400(self):
+        resp = self.client.patch(
+            self.url,
+            {
+                'verse_references': [
+                    {'book': 'John', 'chapter': 99, 'verse': 99},
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        # Existing links are preserved when validation fails.
+        self.assertEqual(self.note.verses.count(), 1)
 
 
 class TestPartialReordering(TestCase):
