@@ -27,6 +27,7 @@ from .pagination import NotesPagination
 from .serializers import (
     TagSerializer,
     NoteSerializer,
+    LinkedNotesRequestSerializer,
     BulkNoteCreateSerializer,
     CommentSerializer,
     ImageSerializer,
@@ -179,6 +180,7 @@ class NoteViewSet(viewsets.ModelViewSet):
     - GET /api/v1/notes/?page={page} - Paginate results
     - GET /api/v1/notes/?page_size={size} - Set page size
     - GET /api/v1/notes/?fileset_id={fileset_id} - Bible translation
+    - POST /api/v1/notes/linked/ - Notes sharing given verses
     """
     serializer_class = NoteSerializer
     pagination_class = NotesPagination
@@ -471,6 +473,55 @@ class NoteViewSet(viewsets.ModelViewSet):
         return Response(
             output.data,
             status=drf_status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=['post'], url_path='linked')
+    def linked(self, request):
+        """
+        List the requesting user's notes linked to any of the
+        given verses.
+
+        POST /api/v1/notes/linked/
+        {
+          "verse_references": [
+            {"book": "John", "chapter": 3, "verse": 16}
+          ]
+        }
+
+        A note counts as linked when it references at least one
+        requested verse. Returns {"count": N, "results": [...]};
+        anonymous requests get an empty result set.
+        """
+        serializer = LinkedNotesRequestSerializer(
+            data=request.data
+        )
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        if not user.is_authenticated:
+            return Response({'count': 0, 'results': []})
+
+        query = Q()
+        for ref in serializer.validated_data['verse_references']:
+            query |= Q(
+                verses__book__iexact=ref['book'],
+                verses__chapter=ref['chapter'],
+                verses__verse=ref['verse'],
+            )
+        notes = (
+            Note.objects
+            .filter(user=user)
+            .filter(query)
+            .distinct()
+            .order_by('-created_at')
+        )
+        output = NoteSerializer(
+            notes,
+            many=True,
+            context=self.get_serializer_context(),
+        )
+        return Response(
+            {'count': notes.count(), 'results': output.data}
         )
 
     @action(detail=False, methods=['post'], url_path='reorder')

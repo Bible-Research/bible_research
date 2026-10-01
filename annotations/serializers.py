@@ -114,6 +114,19 @@ class NoteVerseReferenceSerializer(serializers.Serializer):
     )
 
 
+class LinkedNotesRequestSerializer(serializers.Serializer):
+    """Validates POST /api/v1/notes/linked/ request bodies."""
+    verse_references = serializers.ListField(
+        child=NoteVerseReferenceSerializer(),
+        min_length=1,
+        max_length=500,
+        help_text=(
+            "Verses to match against; a note is linked when "
+            "it references at least one of them."
+        ),
+    )
+
+
 class NoteSerializer(serializers.ModelSerializer):
     """Serializes Note model data.
     - For POST/PUT: Accepts tag UUID and a list of verse

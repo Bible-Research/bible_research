@@ -565,6 +565,44 @@ DELETE /api/v1/notes/{note_id}/
 Authorization: Token <your-token>
 ```
 
+#### List Linked Notes
+```
+POST /api/v1/notes/linked/
+Authorization: Token <your-token>
+Content-Type: application/json
+
+{
+  "verse_references": [
+    {
+      "book": "John",
+      "chapter": 3,
+      "verse": 16
+    }
+  ]
+}
+```
+
+Returns the requesting user's notes that reference at least one
+of the given verses (1–500 references per request; book matching
+is case-insensitive). Used by the note creation form to show
+existing notes on the selected verses.
+
+**Response**:
+```json
+{
+  "count": 1,
+  "results": [
+    {
+      "id": "NOT123...",
+      "note_text": "...",
+      "verses": [...],
+      "tag": {...},
+      "created_at": "2025-12-28T03:51:55Z"
+    }
+  ]
+}
+```
+
 ---
 
 ## Database Schema
