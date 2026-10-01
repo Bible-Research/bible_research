@@ -550,14 +550,27 @@ Authorization: Token <your-token>
 #### Update Note
 ```
 PUT /api/v1/notes/{note_id}/
+PATCH /api/v1/notes/{note_id}/
 Authorization: Token <your-token>
 Content-Type: application/json
 
 {
   "note_text": "Updated note text...",
-  "public": true
+  "public": true,
+  "verse_references": [
+    {
+      "book": "John",
+      "chapter": 3,
+      "verse": 17
+    }
+  ]
 }
 ```
+
+`verse_references` is optional: when present it replaces all of the
+note's verse links (send `[]` to clear them); when omitted the
+existing links are left untouched. Unknown verses return 400 and
+leave the note unchanged.
 
 #### Delete Note
 ```

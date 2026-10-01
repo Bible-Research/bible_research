@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import serializers
 from bible.models import Verse
@@ -214,6 +215,57 @@ class NoteSerializer(serializers.ModelSerializer):
 
             # Bulk create the intermediary NoteVerse instances for efficiency
             NoteVerse.objects.bulk_create(note_verse_instances)
+
+        return note
+
+    def update(self, instance, validated_data):
+        """
+        Overrides the default update method so a note's verse links
+        can be replaced via 'verse_references'. When the field is
+        present in the payload, every existing NoteVerse link is
+        replaced by the given references; omitting the field leaves
+        the links untouched.
+        """
+        verse_references_data = validated_data.pop(
+            'verse_references', None
+        )
+
+        # Resolve all references before any write so a missing
+        # verse fails without touching the note or its links.
+        verse_instances = None
+        if verse_references_data is not None:
+            verse_instances = []
+            for verse_ref_data in verse_references_data:
+                try:
+                    verse_instances.append(Verse.objects.get(
+                        book__iexact=verse_ref_data['book'],
+                        chapter=verse_ref_data['chapter'],
+                        verse=verse_ref_data['verse']
+                    ))
+                except Verse.DoesNotExist:
+                    error_msg = (
+                        f"Verse not found for "
+                        f"'{verse_ref_data['book']} "
+                        f"{verse_ref_data['chapter']}:"
+                        f"{verse_ref_data['verse']}'. "
+                        f"Please ensure the verse exists "
+                        f"in your database."
+                    )
+                    raise serializers.ValidationError(error_msg)
+                except Exception as e:
+                    raise serializers.ValidationError(
+                        f"Error processing verse reference: {e}"
+                    )
+
+        note = super().update(instance, validated_data)
+
+        if verse_instances is not None:
+            with transaction.atomic():
+                note.verses.clear()
+                NoteVerse.objects.bulk_create([
+                    NoteVerse(note=note, verse=verse_instance)
+                    for verse_instance in verse_instances
+                ])
 
         return note
 
