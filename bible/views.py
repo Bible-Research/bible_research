@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from bible.utils.bible_books import get_dbt_book_id
+from bible.utils.provider_errors import provider_error_fields
 from bible.services.google_tts.registry import get_tts_config
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import (
@@ -29,6 +30,23 @@ PROVIDER_ERROR_STATUSES = {
     'rate_limited': status.HTTP_429_TOO_MANY_REQUESTS,
     'not_found': status.HTTP_404_NOT_FOUND,
 }
+
+
+def provider_error_response(exc):
+    """Build an error ``Response`` for an upstream provider failure.
+
+    Uses ``provider_error_fields`` so raw exception text — which can
+    contain request URLs carrying credentials (e.g. DBT's ``?key=``
+    query param) — never reaches the response body.
+    """
+    fields = provider_error_fields(exc)
+    return Response(
+        fields,
+        status=PROVIDER_ERROR_STATUSES.get(
+            fields['error_code'],
+            status.HTTP_502_BAD_GATEWAY,
+        ),
+    )
 
 
 class BiblePassageView(APIView):
@@ -244,10 +262,7 @@ class AudioTimestampView(APIView):
                         "Failed to read timestamps for %s %s %s",
                         canon, book_id, chapter,
                     )
-                    return Response(
-                        {"error": f"Timestamps unavailable: {exc}"},
-                        status=status.HTTP_502_BAD_GATEWAY,
-                    )
+                    return provider_error_response(exc)
                 return Response({"data": payload.get("data", [])})
 
             dbt_client = get_default_dbt_client()
@@ -270,10 +285,7 @@ class AudioTimestampView(APIView):
             logger.exception(
                 "Error fetching timestamps: %s", e
             )
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return provider_error_response(e)
 
 
 class CopyrightView(APIView):
@@ -312,10 +324,7 @@ class CopyrightView(APIView):
             logger.exception(
                 "Error fetching copyright: %s", e
             )
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return provider_error_response(e)
 
 
 @extend_schema(
@@ -457,10 +466,7 @@ class BibleSearchView(APIView):
             logger.exception(
                 "Error in BibleSearchView: %s", e
             )
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return provider_error_response(e)
 
     def _esv_search(self, query, limit, page):
         """Search using ESV API passage search endpoint."""
@@ -679,7 +685,4 @@ class TranslationListView(APIView):
                 f"Error fetching translations for "
                 f"language_iso: {language_iso} - {e}"
             )
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return provider_error_response(e)

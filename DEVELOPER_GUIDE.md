@@ -335,6 +335,13 @@ upstream), `429` when `error_code` is `rate_limited`, otherwise
 }
 ```
 
+The other provider-backed endpoints — `/api/v1/bible/timestamps/`,
+`/api/v1/bible/copyright/`, `/api/v1/bible/search/`, and
+`/api/v1/bible/translations/` — surface upstream failures with the
+same `error`/`error_code` fields and the same HTTP status mapping
+(`429`/`404`/`502`). Raw exception text is never embedded in
+`error` because it can contain request URLs with credentials.
+
 #### Get Bible Passage (Audio)
 ```
 GET /api/v1/bible/?passage=John+3&response_format=audio&

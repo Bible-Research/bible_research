@@ -161,7 +161,7 @@ class BiblePassageSerializer(serializers.Serializer):
             passage_data = dbt_client.get_verses(
                 book_id, str(chapter), bible_id=fileset_id
             )
-            if not passage_data.get('data'):
+            if not (passage_data or {}).get('data'):
                 raise PassageNotFoundError(
                     f"No verses found for {book_id} {chapter} "
                     f"in fileset_id={fileset_id}"

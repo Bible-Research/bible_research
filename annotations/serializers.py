@@ -310,7 +310,7 @@ class NoteSerializer(serializers.ModelSerializer):
                 # A successful-but-empty DBT body (or rows that
                 # all lack ``verse_text``) is missing content —
                 # surface not_found instead of silent empty text.
-                data_rows = verse_text.get('data') or []
+                data_rows = (verse_text or {}).get('data') or []
                 if not any('verse_text' in v for v in data_rows):
                     raise PassageNotFoundError(
                         f"No verses found for {dbt_book_id} "

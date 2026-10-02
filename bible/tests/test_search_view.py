@@ -304,3 +304,80 @@ def test_esv_search_handles_malformed_references(
     verses = response.data['data']['verses']
     assert len(verses) == 1  # Only valid reference should be included
     assert verses[0]['book_id'] == 'JHN'
+
+
+class FakeProviderError(Exception):
+    """Mimics the DBT OpenAPI ``ApiException`` (``exc.status``)."""
+
+    def __init__(self, status_code):
+        super().__init__(f'HTTP {status_code}')
+        self.status = status_code
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_dbt_search_provider_error_no_credential_leak(
+    mock_get_client, mock_is_sword, factory
+):
+    """A DBT search failure surfaces provider error fields — raw
+    exception text can carry ``?key=`` credentials and must never
+    reach the response body."""
+    mock_get_client.return_value.search.side_effect = (
+        ConnectionError(
+            'Max retries exceeded with url: /search?key=SECRET'
+        )
+    )
+
+    request = factory.get('/fake-url/', {
+        'query': 'loved',
+        'fileset_id': 'ENGESV',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
+    assert 'SECRET' not in response.data['error']
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_dbt_search_rate_limited(
+    mock_get_client, mock_is_sword, factory
+):
+    """An upstream 429 maps to HTTP 429 + rate_limited."""
+    mock_get_client.return_value.search.side_effect = (
+        FakeProviderError(429)
+    )
+
+    request = factory.get('/fake-url/', {
+        'query': 'loved',
+        'fileset_id': 'ENGESV',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+    assert response.data['error_code'] == 'rate_limited'
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_esv_client')
+def test_esv_search_failure_surfaces_provider_error(
+    mock_get_esv_client, factory
+):
+    """An ESV search failure also goes through provider error
+    fields instead of embedding str(exc)."""
+    mock_get_esv_client.return_value.search.side_effect = (
+        Exception("ESV exploded")
+    )
+
+    request = factory.get('/fake-url/', {
+        'query': 'love',
+        'fileset_id': 'ENGESV_API',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
+    assert 'ESV exploded' not in response.data['error']
