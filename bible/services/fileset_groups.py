@@ -44,9 +44,20 @@ Grouping rules (see
    anywhere marks the covered testaments partial.
 4. When two group members claim the same testament prefer complete
    over partial, and a non-``P`` lettered id over a ``P`` one.
+   Precedence is applied per codec slot, so ``partial`` and
+   ``coverage_label`` reflect the winning member of each slot —
+   a partial ``opus16`` winner marks the testament partial even
+   when a complete ``mp3`` sibling exists (``opus16`` is the
+   preferred codec).
 5. Text grouping keeps only ``type == 'text_plain'`` (``text_usx``
    /``text_json``/``text_format`` are ignored) and merges all of
    them into a single ``by_testament`` map.
+
+``by_testament`` codec keys are an open set, not an enum: DBT
+members use ``mp3``/``opus16``, SWORD TTS uses ``generated``,
+ESV uses ``api`` and merged text options use ``text``. Filesets
+whose ``size`` yields no recognizable testament coverage are
+skipped so options never advertise a dead testament map.
 """
 import re
 
@@ -209,6 +220,11 @@ def group_filesets(translation):
             continue
         fs_type = fileset.get('type') or ''
         member = _make_member(fileset)
+        if not member['testaments']:
+            # A missing/unrecognized ``size`` yields no coverage —
+            # grouping it would produce an option that can never
+            # resolve to a concrete fileset.
+            continue
 
         if fs_type == TEXT_TYPE:
             member['codec'] = 'text'

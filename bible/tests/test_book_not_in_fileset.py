@@ -6,10 +6,12 @@ the resolved fileset does not carry the requested book — for both
 text and audio requests — so clients can fall back deterministically.
 """
 import pytest
+import requests
 from unittest.mock import patch
 from rest_framework import status
 from rest_framework.test import APIRequestFactory
 
+from bible.services.dbt.client import ApiException
 from bible.views import BiblePassageView, TranslationListView
 
 
@@ -29,13 +31,22 @@ def _assert_not_in_fileset(response):
     assert response.data['error']
 
 
+def _http_error(status_code):
+    """A requests.HTTPError carrying a real response object."""
+    resp = requests.Response()
+    resp.status_code = status_code
+    return requests.HTTPError(
+        f'HTTP {status_code}', response=resp
+    )
+
+
 @pytest.mark.django_db
 @patch('bible.serializers.get_default_dbt_client')
 def test_dbt_404_text_request(mock_get_client, factory):
     """DBT ApiException 404 on a text request → 404 body."""
-    error = Exception('not found')
-    error.status = 404
-    mock_get_client.return_value.get_verses.side_effect = error
+    mock_get_client.return_value.get_verses.side_effect = (
+        ApiException(status=404, reason='Not Found')
+    )
 
     response = _get(factory, {
         'passage': 'Genesis 1',
@@ -48,9 +59,9 @@ def test_dbt_404_text_request(mock_get_client, factory):
 @patch('bible.serializers.get_default_dbt_client')
 def test_dbt_404_audio_request(mock_get_client, factory):
     """DBT ApiException 404 on an audio request → 404 body."""
-    error = Exception('not found')
-    error.status = 404
-    mock_get_client.return_value.get_verses.side_effect = error
+    mock_get_client.return_value.get_verses.side_effect = (
+        ApiException(status=404, reason='Not Found')
+    )
 
     response = _get(factory, {
         'passage': 'Genesis 1',
@@ -115,7 +126,7 @@ def test_audio_request_with_null_path_returns_404(
 @patch('bible.serializers.get_tts_config')
 @patch('bible.serializers.gcs.chapter_audio_exists')
 def test_sword_audio_missing_chapter_404(exists, tts_cfg, factory):
-    """SWORD audio not yet generated → 404 + error_code."""
+    """SWORD audio not yet generated → canonical 404 body."""
     tts_cfg.return_value = {'voice_name': 'lv-LV-test'}
     exists.return_value = False
 
@@ -125,6 +136,106 @@ def test_sword_audio_missing_chapter_404(exists, tts_cfg, factory):
         'response_format': 'audio',
     })
     _assert_not_in_fileset(response)
+    # Same body shape as the DBT path: no legacy
+    # format/audio_url/message fields.
+    assert set(response.data) == {
+        'book', 'book_name', 'chapter', 'error', 'error_code'
+    }
+
+
+@pytest.mark.django_db
+@patch('bible.serializers.get_default_sword_client')
+def test_sword_text_missing_book_404(mock_sword, factory):
+    """SWORD text ValueError (book absent) → 404 body."""
+    mock_sword.return_value.get_chapter_verses.side_effect = (
+        ValueError('Book GEN not present in fileset LVSGLU8')
+    )
+
+    response = _get(factory, {
+        'passage': 'Genesis 1',
+        'fileset_id': 'LVSGLU8',
+    })
+    _assert_not_in_fileset(response)
+
+
+@pytest.mark.django_db
+@patch('bible.serializers.get_default_sword_client')
+def test_sword_text_missing_chapter_404(mock_sword, factory):
+    """SWORD text ValueError (no verses) → 404 body."""
+    mock_sword.return_value.get_chapter_verses.side_effect = (
+        ValueError('No verses found for GEN 99 in fileset_id=LVSGLU8')
+    )
+
+    response = _get(factory, {
+        'passage': 'Genesis 99',
+        'fileset_id': 'LVSGLU8',
+    })
+    _assert_not_in_fileset(response)
+
+
+@pytest.mark.django_db
+@patch('bible.serializers.get_default_sword_client')
+def test_sword_infra_error_keeps_200_message(mock_sword, factory):
+    """A missing module zip (OSError) stays on the legacy path."""
+    mock_sword.return_value.get_chapter_verses.side_effect = (
+        FileNotFoundError('SWORD module zip not found')
+    )
+
+    response = _get(factory, {
+        'passage': 'Genesis 1',
+        'fileset_id': 'LVSGLU8',
+    })
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data['verses'] == []
+    assert 'book_not_in_fileset' != response.data.get('error_code')
+
+
+@pytest.mark.django_db
+@patch('bible.serializers.get_default_esv_client')
+def test_esv_audio_404_returns_not_in_fileset(mock_esv, factory):
+    """ESV audio HTTPError 404 → 404 body."""
+    mock_esv.return_value.get_chapter_audio_url.side_effect = (
+        _http_error(404)
+    )
+
+    response = _get(factory, {
+        'passage': 'Genesis 1',
+        'fileset_id': 'ENGESV_API',
+        'response_format': 'audio',
+    })
+    _assert_not_in_fileset(response)
+
+
+@pytest.mark.django_db
+@patch('bible.serializers.get_default_esv_client')
+def test_esv_text_404_returns_not_in_fileset(mock_esv, factory):
+    """ESV text HTTPError 404 → 404 body."""
+    mock_esv.return_value.get_chapter_with_headings.side_effect = (
+        _http_error(404)
+    )
+
+    response = _get(factory, {
+        'passage': 'Genesis 1',
+        'fileset_id': 'ENGESV_API',
+    })
+    _assert_not_in_fileset(response)
+
+
+@pytest.mark.django_db
+@patch('bible.serializers.get_default_esv_client')
+def test_esv_other_error_keeps_200_message(mock_esv, factory):
+    """Non-404 ESV failures keep the legacy 200 + message."""
+    mock_esv.return_value.get_chapter_audio_url.side_effect = (
+        _http_error(500)
+    )
+
+    response = _get(factory, {
+        'passage': 'Genesis 1',
+        'fileset_id': 'ENGESV_API',
+        'response_format': 'audio',
+    })
+    assert response.status_code == status.HTTP_200_OK
+    assert 'book_not_in_fileset' != response.data.get('error_code')
 
 
 @pytest.mark.django_db
@@ -265,3 +376,47 @@ def test_service_groups_dbt_filesets(
         }
     }
     assert entry['text_options'] == []
+
+
+def test_process_translations_passes_codec_and_bitrate():
+    """DBT ``codec``/``bitrate`` fields pass through untouched."""
+    from bible.services.translation_service import (
+        TranslationService,
+    )
+    translations = [{
+        'abbr': 'LAVNLI',
+        'filesets': {
+            'dbp': [
+                {
+                    'id': 'LATBSLN1DA',
+                    'type': 'audio',
+                    'size': 'NT',
+                    'codec': 'mp3',
+                    'bitrate': '64',
+                },
+                {
+                    'id': 'LATBSLN1DA-opus16',
+                    'type': 'audio',
+                    'size': 'NT',
+                },
+            ],
+        },
+    }]
+
+    processed = TranslationService._process_translations(
+        translations
+    )
+
+    assert processed[0]['filesets'][0] == {
+        'id': 'LATBSLN1DA',
+        'type': 'audio',
+        'size': 'NT',
+        'codec': 'mp3',
+        'bitrate': '64',
+    }
+    # Absent codec/bitrate keys add nothing to the entry.
+    assert processed[0]['filesets'][1] == {
+        'id': 'LATBSLN1DA-opus16',
+        'type': 'audio',
+        'size': 'NT',
+    }

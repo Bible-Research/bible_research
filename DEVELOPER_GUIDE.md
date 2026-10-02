@@ -71,7 +71,8 @@ bible_research/
 ### Prerequisites
 - Python 3.8+
 - PostgreSQL (for production) or SQLite (for development)
-- DBT API key (from [Bible Brain](https://www.faithcomesbyhearing.com/bible-brain/api-reference))
+- DBT API key from Bible Brain
+  (https://www.faithcomesbyhearing.com/bible-brain/api-reference)
 
 ### Installation
 
@@ -363,10 +364,10 @@ can fall back to another fileset:
 ```
 
 This covers a DBT 404 (or empty `data`) from
-`v4_bible_filesets_show_chapter` and audio requests that resolve
-to `audio_url: null` (including SWORD chapters not yet
-generated). Other failures keep the legacy `{"verses": [],
-"message": "..."}` 200 body.
+`v4_bible_filesets_show_chapter`, SWORD misses (a book/chapter
+outside the module, or generated audio not yet uploaded), and
+ESV API 404s for both text and audio requests. Other failures
+keep the legacy `{"verses": [], "message": "..."}` 200 body.
 
 #### List Available Translations
 ```
@@ -961,7 +962,8 @@ message**:
 
 - [Django Documentation](https://docs.djangoproject.com/)
 - [Django REST Framework](https://www.django-rest-framework.org/)
-- [DBT API Documentation](https://www.faithcomesbyhearing.com/bible-brain/api-reference)
+- DBT API documentation:
+  https://www.faithcomesbyhearing.com/bible-brain/api-reference
 - [PostgreSQL Documentation](https://www.postgresql.org/docs/)
 
 ---

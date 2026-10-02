@@ -246,3 +246,24 @@ def test_audio_only_translation_has_no_text_option():
 def test_empty_filesets_yield_empty_options():
     result = group_filesets({'abbr': 'XXX', 'filesets': []})
     assert result == {'text_options': [], 'audio_options': []}
+
+
+@pytest.mark.parametrize('size', [None, '', 'X', 'foo'])
+def test_fileset_without_coverage_is_skipped(size):
+    """Unparseable ``size`` must not produce a dead option."""
+    result = group_filesets(_translation([
+        _fs('TSTX1DA', size=size),
+        _fs('TSTN1DA', size='NT'),
+    ]))
+    options = result['audio_options']
+    assert len(options) == 1
+    assert options[0]['by_testament'] == {
+        'NT': {'mp3': 'TSTN1DA'}
+    }
+
+
+def test_text_fileset_without_coverage_is_skipped():
+    result = group_filesets(_translation([
+        _fs('TSTTXT', 'text_plain', None),
+    ]))
+    assert result['text_options'] == []

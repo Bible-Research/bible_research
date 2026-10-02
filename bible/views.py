@@ -37,11 +37,11 @@ class BiblePassageView(APIView):
           (e.g. LVSGLU8). SWORD translations also accept listing ``abbr``
           (e.g. GLU8 for Latvian Glück).
 
-    Example:
+    Examples:
         /api/v1/bible/?passage=John+3&fileset_id=ENGESV
-        /api/v1/bible/?passage=John+3&fileset_id=LVSGLU8   # LV
-        /api/v1/bible/?passage=Luke+20&fileset_id=GLU8
-            &response_format=audio   # LV audio
+        /api/v1/bible/?passage=John+3&fileset_id=LVSGLU8 (LV text)
+        # LV audio:
+        /api/v1/bible/?passage=Luke+20&fileset_id=GLU8&response_format=audio
     """
 
     def get(self, request, format=None):
@@ -147,20 +147,27 @@ class BiblePassageView(APIView):
                     return Response(
                         body, status=status.HTTP_404_NOT_FOUND
                     )
-                # Surface "audio requested but not generated yet" as
-                # a proper 404 instead of a 200 with ``audio_url: None``
-                # so clients can reliably branch on status code.
+                # Defensive: a serializer path reporting an audio
+                # miss as ``audio_url: None`` without the canonical
+                # error body still answers 404 with the stable
+                # error code and the same body shape.
                 if (
                     body.get('format') == 'audio'
                     and body.get('audio_url') is None
                 ):
-                    body['error_code'] = 'book_not_in_fileset'
-                    body.setdefault(
-                        'error',
-                        'Audio not available for this passage',
-                    )
                     return Response(
-                        body, status=status.HTTP_404_NOT_FOUND
+                        {
+                            'book': body.get('book'),
+                            'book_name': body.get('book_name'),
+                            'chapter': body.get('chapter'),
+                            'error': body.get(
+                                'message',
+                                'Audio not available for this '
+                                'passage',
+                            ),
+                            'error_code': 'book_not_in_fileset',
+                        },
+                        status=status.HTTP_404_NOT_FOUND,
                     )
                 return Response(body)
 
