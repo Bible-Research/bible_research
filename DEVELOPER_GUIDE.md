@@ -567,7 +567,7 @@ Authorization: Token <your-token>
 
 #### List Linked Notes
 ```
-POST /api/v1/notes/linked/
+POST /api/v1/notes/linked/?fileset_id=ENGKJV
 Authorization: Token <your-token>
 Content-Type: application/json
 
@@ -586,6 +586,12 @@ Returns the requesting user's notes that reference at least one
 of the given verses (1–500 references per request; book matching
 is case-insensitive). Used by the note creation form to show
 existing notes on the selected verses.
+
+`fileset_id` is an optional query parameter selecting the Bible
+translation, as on the other note endpoints. Each note's
+`verses` entries carry coordinates only — this endpoint never
+enriches verse text from the upstream Bible provider, so
+`text` is always empty and `headings` is always `[]`.
 
 **Response**:
 ```json

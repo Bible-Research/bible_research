@@ -235,9 +235,19 @@ class NoteSerializer(serializers.ModelSerializer):
         Overrides the default representation for GET requests to
         include nested tag and verse data with content from
         Bible provider, plus section headings.
+
+        Set 'include_verse_text' to False in the serializer
+        context to skip the blocking upstream provider call;
+        verses then carry only book/chapter/verse coordinates
+        (empty 'text') and 'headings' is empty.
         """
         representation = super().to_representation(instance)
-        verses = list(instance.verses.all().order_by('verse'))
+        # Sort in Python so a prefetch_related('verses') cache is
+        # reused; .order_by() on the related manager would issue
+        # a fresh query per note.
+        verses = sorted(
+            instance.verses.all(), key=lambda v: v.verse
+        )
         if not verses:
             return representation
 
@@ -255,9 +265,24 @@ class NoteSerializer(serializers.ModelSerializer):
         verses_with_text = []
         headings = []
 
+        include_verse_text = self.context.get(
+            'include_verse_text', True
+        )
+
         try:
+            if not include_verse_text:
+                # Coordinates only — e.g. POST
+                # /api/v1/notes/linked/ does not display
+                # verse text, so skip the provider call.
+                for verse in verses:
+                    verses_with_text.append({
+                        'book': book_name,
+                        'chapter': chapter,
+                        'verse': verse.verse,
+                        'text': ''
+                    })
             # Use ESV client if fileset is ENGESV_API
-            if is_esv_fileset(fileset_id):
+            elif is_esv_fileset(fileset_id):
                 esv_client = get_default_esv_client()
                 parsed = esv_client.get_chapter_with_headings(
                     dbt_book_id, chapter

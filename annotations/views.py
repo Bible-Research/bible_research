@@ -475,6 +475,34 @@ class NoteViewSet(viewsets.ModelViewSet):
             status=drf_status.HTTP_201_CREATED,
         )
 
+    @extend_schema(
+        request=LinkedNotesRequestSerializer,
+        parameters=[
+            OpenApiParameter(
+                name='fileset_id',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description=(
+                    'Bible translation fileset. Accepted for '
+                    'parity with other note endpoints; linked '
+                    'results are not enriched with verse text.'
+                ),
+                required=False,
+            ),
+        ],
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'count': {'type': 'integer'},
+                    'results': {
+                        'type': 'array',
+                        'items': {'type': 'object'},
+                    },
+                },
+            },
+        },
+    )
     @action(detail=False, methods=['post'], url_path='linked')
     def linked(self, request):
         """
@@ -489,8 +517,9 @@ class NoteViewSet(viewsets.ModelViewSet):
         }
 
         A note counts as linked when it references at least one
-        requested verse. Returns {"count": N, "results": [...]};
-        anonymous requests get an empty result set.
+        requested verse. Returns {"count": N, "results": [...]}
+        where each result carries verse coordinates only — no
+        upstream provider call is made per note.
         """
         serializer = LinkedNotesRequestSerializer(
             data=request.data
@@ -498,6 +527,10 @@ class NoteViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         user = request.user
+        # Defense-in-depth: under production settings a truly
+        # anonymous request is rejected earlier by the default
+        # IsAuthenticated permission (and the device middleware
+        # auto-provisions a user for almost every request).
         if not user.is_authenticated:
             return Response({'count': 0, 'results': []})
 
@@ -512,16 +545,23 @@ class NoteViewSet(viewsets.ModelViewSet):
             Note.objects
             .filter(user=user)
             .filter(query)
+            .select_related('tag')
+            .prefetch_related('verses')
             .distinct()
             .order_by('-created_at')
         )
+        context = self.get_serializer_context()
+        # The linked-notes UI only needs verse coordinates;
+        # skipping text enrichment avoids one blocking upstream
+        # Bible-provider call per note.
+        context['include_verse_text'] = False
         output = NoteSerializer(
             notes,
             many=True,
-            context=self.get_serializer_context(),
+            context=context,
         )
         return Response(
-            {'count': notes.count(), 'results': output.data}
+            {'count': len(output.data), 'results': output.data}
         )
 
     @action(detail=False, methods=['post'], url_path='reorder')

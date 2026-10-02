@@ -928,6 +928,38 @@ class LinkedNotesTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()['count'], 0)
 
+    def test_no_upstream_calls_and_no_n_plus_1(self):
+        """linked/ makes no per-note provider calls and issues a
+        fixed number of DB queries regardless of note count."""
+        self._note(self.user, 'Note A', [self.v316])
+        self._note(self.user, 'Note B', [self.v317])
+        refs = [
+            {'book': 'John', 'chapter': 3, 'verse': 16},
+            {'book': 'John', 'chapter': 3, 'verse': 17},
+        ]
+        with patch(
+            'annotations.serializers.get_default_dbt_client'
+        ) as dbt_client, patch(
+            'annotations.serializers.get_default_esv_client'
+        ) as esv_client:
+            # One query for notes (+ joined tag), one prefetch
+            # for verses — not one per note.
+            with self.assertNumQueries(2):
+                resp = self._post(refs)
+        dbt_client.assert_not_called()
+        esv_client.assert_not_called()
+
+        data = resp.json()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(data['count'], 2)
+        verse = data['results'][0]['verses'][0]
+        self.assertEqual(verse['book'], 'John')
+        self.assertEqual(verse['chapter'], 3)
+        self.assertEqual(verse['text'], '')
+        self.assertEqual(data['results'][0]['headings'], [])
+        tag = data['results'][0]['tag']
+        self.assertEqual(tag['name'], 'LinkedTag')
+
 
 class TestPartialReordering(TestCase):
     """Tests for partial note reordering with DB-level uniqueness."""
