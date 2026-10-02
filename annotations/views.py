@@ -27,6 +27,7 @@ from .pagination import NotesPagination
 from .serializers import (
     TagSerializer,
     NoteSerializer,
+    LinkedNotesRequestSerializer,
     BulkNoteCreateSerializer,
     CommentSerializer,
     ImageSerializer,
@@ -179,6 +180,7 @@ class NoteViewSet(viewsets.ModelViewSet):
     - GET /api/v1/notes/?page={page} - Paginate results
     - GET /api/v1/notes/?page_size={size} - Set page size
     - GET /api/v1/notes/?fileset_id={fileset_id} - Bible translation
+    - POST /api/v1/notes/linked/ - Notes sharing given verses
     """
     serializer_class = NoteSerializer
     pagination_class = NotesPagination
@@ -471,6 +473,95 @@ class NoteViewSet(viewsets.ModelViewSet):
         return Response(
             output.data,
             status=drf_status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        request=LinkedNotesRequestSerializer,
+        parameters=[
+            OpenApiParameter(
+                name='fileset_id',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description=(
+                    'Bible translation fileset. Accepted for '
+                    'parity with other note endpoints; linked '
+                    'results are not enriched with verse text.'
+                ),
+                required=False,
+            ),
+        ],
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'count': {'type': 'integer'},
+                    'results': {
+                        'type': 'array',
+                        'items': {'type': 'object'},
+                    },
+                },
+            },
+        },
+    )
+    @action(detail=False, methods=['post'], url_path='linked')
+    def linked(self, request):
+        """
+        List the requesting user's notes linked to any of the
+        given verses.
+
+        POST /api/v1/notes/linked/
+        {
+          "verse_references": [
+            {"book": "John", "chapter": 3, "verse": 16}
+          ]
+        }
+
+        A note counts as linked when it references at least one
+        requested verse. Returns {"count": N, "results": [...]}
+        where each result carries verse coordinates only — no
+        upstream provider call is made per note.
+        """
+        serializer = LinkedNotesRequestSerializer(
+            data=request.data
+        )
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        # Defense-in-depth: under production settings a truly
+        # anonymous request is rejected earlier by the default
+        # IsAuthenticated permission (and the device middleware
+        # auto-provisions a user for almost every request).
+        if not user.is_authenticated:
+            return Response({'count': 0, 'results': []})
+
+        query = Q()
+        for ref in serializer.validated_data['verse_references']:
+            query |= Q(
+                verses__book__iexact=ref['book'],
+                verses__chapter=ref['chapter'],
+                verses__verse=ref['verse'],
+            )
+        notes = (
+            Note.objects
+            .filter(user=user)
+            .filter(query)
+            .select_related('tag')
+            .prefetch_related('verses')
+            .distinct()
+            .order_by('-created_at')
+        )
+        context = self.get_serializer_context()
+        # The linked-notes UI only needs verse coordinates;
+        # skipping text enrichment avoids one blocking upstream
+        # Bible-provider call per note.
+        context['include_verse_text'] = False
+        output = NoteSerializer(
+            notes,
+            many=True,
+            context=context,
+        )
+        return Response(
+            {'count': len(output.data), 'results': output.data}
         )
 
     @action(detail=False, methods=['post'], url_path='reorder')
