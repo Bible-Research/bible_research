@@ -6,6 +6,14 @@ from rest_framework.test import APIRequestFactory
 from bible.views import CopyrightView
 
 
+class FakeProviderError(Exception):
+    """Mimics the DBT OpenAPI ``ApiException`` (``exc.status``)."""
+
+    def __init__(self, status_code):
+        super().__init__(f'HTTP {status_code}')
+        self.status = status_code
+
+
 @pytest.fixture
 def factory():
     return APIRequestFactory()
@@ -100,6 +108,47 @@ def test_get_copyright_dbt_exception(
     view = CopyrightView.as_view()
     response = view(request)
 
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert 'error' in response.data
-    assert response.data['error'] == "DBT Error"
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
+    assert 'DBT Error' not in response.data['error']
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+def test_get_copyright_rate_limited(mock_get_client, factory):
+    """An upstream 429 maps to HTTP 429 + rate_limited."""
+    mock_get_client.return_value.get_copyright.side_effect = (
+        FakeProviderError(429)
+    )
+
+    request = factory.get(
+        '/fake-url/', {'bible_id': 'ENGESV'}
+    )
+    response = CopyrightView.as_view()(request)
+
+    assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+    assert response.data['error_code'] == 'rate_limited'
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+def test_get_copyright_error_does_not_leak_credentials(
+    mock_get_client, factory
+):
+    """Exception text can carry ``?key=`` credentials — it must
+    never reach the response body."""
+    mock_get_client.return_value.get_copyright.side_effect = (
+        ConnectionError(
+            'Max retries exceeded with url: '
+            '/copyright?key=SECRET'
+        )
+    )
+
+    request = factory.get(
+        '/fake-url/', {'bible_id': 'ENGESV'}
+    )
+    response = CopyrightView.as_view()(request)
+
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
+    assert 'SECRET' not in response.data['error']

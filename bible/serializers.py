@@ -12,6 +12,10 @@ from bible.services.sword.registry import (
     is_sword_fileset,
 )
 from bible.services.storage import gcs
+from bible.utils.provider_errors import (
+    PassageNotFoundError,
+    provider_error_fields,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +71,13 @@ class BiblePassageSerializer(serializers.Serializer):
                     get_default_esv_client()
                     .get_chapter_with_headings(book_id, chapter)
                 )
+                # A successful-but-empty ESV body parses to no
+                # verses — missing content, not provider_error.
+                if not parsed['verses']:
+                    raise PassageNotFoundError(
+                        f"No verses found for {book_id} "
+                        f"{chapter} in fileset_id={fileset_id}"
+                    )
                 return {
                     'book': book_id,
                     'book_name': book_name,
@@ -150,6 +161,11 @@ class BiblePassageSerializer(serializers.Serializer):
             passage_data = dbt_client.get_verses(
                 book_id, str(chapter), bible_id=fileset_id
             )
+            if not (passage_data or {}).get('data'):
+                raise PassageNotFoundError(
+                    f"No verses found for {book_id} {chapter} "
+                    f"in fileset_id={fileset_id}"
+                )
             audio_format = 'path' in passage_data['data'][0]
             if audio_format:
                 audio_data = passage_data['data'][0]
@@ -177,11 +193,10 @@ class BiblePassageSerializer(serializers.Serializer):
                 ],
             }
         except Exception as e:
-            logger.error(f"Error fetching Bible passage: {str(e)}")
+            logger.exception(f"Error fetching Bible passage: {e}")
             return {
                 'book': book_id,
                 'book_name': book_name,
                 'chapter': chapter,
-                'verses': [],
-                'message': 'No verses found for the specified passage',
+                **provider_error_fields(e),
             }
