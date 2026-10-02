@@ -71,7 +71,8 @@ bible_research/
 ### Prerequisites
 - Python 3.8+
 - PostgreSQL (for production) or SQLite (for development)
-- DBT API key (from [Bible Brain](https://www.faithcomesbyhearing.com/bible-brain/api-reference))
+- DBT API key from Bible Brain
+  (https://www.faithcomesbyhearing.com/bible-brain/api-reference)
 
 ### Installation
 
@@ -346,6 +347,28 @@ GET /api/v1/bible/?passage=John+3&response_format=audio&
   - For text: Use translation codes like "ENGESV", "ENGKJV"
   - For audio: Use audio fileset codes like "ENGESVN2DA"
 
+**Error contract** — when the requested book/chapter is not
+covered by the fileset, the endpoint returns HTTP 404 with a
+stable error code (for both text and audio requests) so clients
+can fall back to another fileset:
+
+```json
+{
+  "book": "JHN",
+  "book_name": "John",
+  "chapter": 3,
+  "error": "Book JHN chapter 3 is not available in fileset
+           ENGNASN_ET",
+  "error_code": "book_not_in_fileset"
+}
+```
+
+This covers a DBT 404 (or empty `data`) from
+`v4_bible_filesets_show_chapter`, SWORD misses (a book/chapter
+outside the module, or generated audio not yet uploaded), and
+ESV API 404s for both text and audio requests. Other failures
+keep the legacy `{"verses": [], "message": "..."}` 200 body.
+
 #### List Available Translations
 ```
 GET /api/v1/bible/translations/
@@ -362,17 +385,62 @@ GET /api/v1/bible/translations/
       "filesets": [
         {
           "id": "ENGESV",
-          "type": "text_plain"
+          "type": "text_plain",
+          "size": "C"
         },
         {
           "id": "ENGESVN2DA",
-          "type": "audio_drama"
+          "type": "audio_drama",
+          "size": "NT"
+        }
+      ],
+      "text_options": [
+        {
+          "id": "ESV:text:1",
+          "kind": "text",
+          "by_testament": {
+            "OT": {"text": "ENGESVO_ET"},
+            "NT": {"text": "ENGESVN_ET"}
+          },
+          "coverage_label": "Full Bible",
+          "partial": {"OT": false, "NT": false}
+        }
+      ],
+      "audio_options": [
+        {
+          "id": "ESV:audio_drama:1",
+          "kind": "audio_drama",
+          "by_testament": {
+            "NT": {
+              "mp3": "ENGESVN2DA",
+              "opus16": "ENGESVN2DA-opus16"
+            }
+          },
+          "coverage_label": "New Testament only",
+          "partial": {"OT": false, "NT": false}
         }
       ]
     }
   ]
 }
 ```
+
+**Normalized options** — each translation also carries
+`text_options` (at most one entry, `kind: "text"`) and
+`audio_options` (one per listening experience; `kind` is
+`"audio"`, `"audio_drama"`, or `"generated"` for SWORD TTS).
+Grouping rules (see `bible/services/fileset_groups.py`):
+
+- `-opus16` ids pair with their `mp3` base id under a shared
+  `by_testament` codec map.
+- Audio filesets group by `(type, digit)` from the trailing
+  `[CONPS]\dDA` suffix: `1` = plain reading, `2` = dramatized.
+- Ids that do not match (SWORD `LVSGLU8C1DA`, `ENGESV_API`)
+  become singleton options.
+- Coverage comes from `size` (`C` → OT+NT; `NT`/`OT` substrings;
+  `P` marks partial), not the id letter.
+- `filesets` remains in the response unchanged for backwards
+  compatibility.
 
 **Query Parameters**:
 - `language_iso` (optional): Filter by ISO language code
@@ -894,7 +962,8 @@ message**:
 
 - [Django Documentation](https://docs.djangoproject.com/)
 - [Django REST Framework](https://www.django-rest-framework.org/)
-- [DBT API Documentation](https://www.faithcomesbyhearing.com/bible-brain/api-reference)
+- DBT API documentation:
+  https://www.faithcomesbyhearing.com/bible-brain/api-reference
 - [PostgreSQL Documentation](https://www.postgresql.org/docs/)
 
 ---

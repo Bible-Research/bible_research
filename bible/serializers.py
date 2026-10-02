@@ -1,4 +1,6 @@
 import logging
+
+import requests
 from django.conf import settings
 from rest_framework import serializers
 
@@ -15,6 +17,38 @@ from bible.services.storage import gcs
 
 
 logger = logging.getLogger(__name__)
+
+
+def _book_not_in_fileset_body(book_id, book_name, chapter,
+                              fileset_id, error=None):
+    """Error body for a passage the fileset does not cover.
+
+    ``BiblePassageView`` turns any body carrying
+    ``error_code == 'book_not_in_fileset'`` into HTTP 404 so
+    clients can deterministically fall back to another fileset.
+    Field names follow the ``error``/``error_code`` contract used
+    for provider failures. ``error`` overrides the default
+    message when the caller knows a more specific cause.
+    """
+    return {
+        'book': book_id,
+        'book_name': book_name,
+        'chapter': chapter,
+        'error': error or (
+            f"Book {book_id} chapter {chapter} is not available "
+            f"in fileset {fileset_id}"
+        ),
+        'error_code': 'book_not_in_fileset',
+    }
+
+
+def _is_http_404(exc):
+    """True when ``exc`` carries an HTTP 404 response."""
+    response = getattr(exc, 'response', None)
+    return (
+        response is not None
+        and getattr(response, 'status_code', None) == 404
+    )
 
 
 class BiblePassageSerializer(serializers.Serializer):
@@ -51,36 +85,46 @@ class BiblePassageSerializer(serializers.Serializer):
 
         try:
             if is_esv_fileset(fileset_id):
-                if response_format == 'audio':
-                    audio_url = (
+                try:
+                    if response_format == 'audio':
+                        audio_url = (
+                            get_default_esv_client()
+                            .get_chapter_audio_url(book_id, chapter)
+                        )
+                        return {
+                            'book': book_id,
+                            'book_name': book_name,
+                            'chapter': chapter,
+                            'format': 'audio',
+                            'audio_url': audio_url,
+                        }
+                    parsed = (
                         get_default_esv_client()
-                        .get_chapter_audio_url(book_id, chapter)
+                        .get_chapter_with_headings(book_id, chapter)
                     )
                     return {
                         'book': book_id,
                         'book_name': book_name,
                         'chapter': chapter,
-                        'format': 'audio',
-                        'audio_url': audio_url,
+                        'format': 'text',
+                        'verses': [
+                            {
+                                'verse': v['verse_start'],
+                                'text': v['verse_text'],
+                            }
+                            for v in parsed['verses']
+                        ],
+                        'headings': parsed['headings'],
                     }
-                parsed = (
-                    get_default_esv_client()
-                    .get_chapter_with_headings(book_id, chapter)
-                )
-                return {
-                    'book': book_id,
-                    'book_name': book_name,
-                    'chapter': chapter,
-                    'format': 'text',
-                    'verses': [
-                        {
-                            'verse': v['verse_start'],
-                            'text': v['verse_text'],
-                        }
-                        for v in parsed['verses']
-                    ],
-                    'headings': parsed['headings'],
-                }
+                except requests.HTTPError as e:
+                    # A 404 from api.esv.org means the passage is
+                    # not covered; other HTTP failures keep the
+                    # legacy catch-all behaviour.
+                    if _is_http_404(e):
+                        return _book_not_in_fileset_body(
+                            book_id, book_name, chapter, fileset_id
+                        )
+                    raise
 
             if is_sword_fileset(fileset_id) and response_format == 'audio':
                 canon = canonical_sword_fileset_id(fileset_id)
@@ -88,16 +132,13 @@ class BiblePassageSerializer(serializers.Serializer):
                 if not gcs.chapter_audio_exists(
                     canon, book_id, chapter, voice_name,
                 ):
-                    return {
-                        'book': book_id,
-                        'book_name': book_name,
-                        'chapter': chapter,
-                        'format': 'audio',
-                        'audio_url': None,
-                        'message': (
-                            'Audio not yet generated for this chapter'
+                    return _book_not_in_fileset_body(
+                        book_id, book_name, chapter, fileset_id,
+                        error=(
+                            'Audio not yet generated for this '
+                            'chapter'
                         ),
-                    }
+                    )
                 timestamps = gcs.read_timestamps_json(
                     canon, book_id, chapter, voice_name,
                 )
@@ -132,9 +173,23 @@ class BiblePassageSerializer(serializers.Serializer):
                 }
 
             if is_sword_fileset(fileset_id):
-                verses = get_default_sword_client().get_chapter_verses(
-                    fileset_id, book_id, chapter
-                )
+                try:
+                    verses = (
+                        get_default_sword_client()
+                        .get_chapter_verses(
+                            fileset_id, book_id, chapter
+                        )
+                    )
+                except ValueError:
+                    # ``is_sword_fileset`` guarantees the fileset
+                    # is known, so a ValueError here means the
+                    # book/chapter is outside the module's
+                    # coverage. FileNotFoundError (a missing
+                    # module zip) is an OSError and still falls
+                    # through to the generic catch.
+                    return _book_not_in_fileset_body(
+                        book_id, book_name, chapter, fileset_id
+                    )
                 return {
                     'book': book_id,
                     'book_name': book_name,
@@ -147,12 +202,34 @@ class BiblePassageSerializer(serializers.Serializer):
                 }
 
             dbt_client = get_default_dbt_client()
-            passage_data = dbt_client.get_verses(
-                book_id, str(chapter), bible_id=fileset_id
-            )
-            audio_format = 'path' in passage_data['data'][0]
+            try:
+                passage_data = dbt_client.get_verses(
+                    book_id, str(chapter), bible_id=fileset_id
+                )
+            except Exception as e:
+                # DBT answers 404 when the fileset does not carry
+                # the requested book/chapter. Other failures keep
+                # the previous behaviour (generic catch below).
+                if getattr(e, 'status', None) == 404:
+                    return _book_not_in_fileset_body(
+                        book_id, book_name, chapter, fileset_id
+                    )
+                raise
+            rows = passage_data.get('data') or []
+            if not rows:
+                return _book_not_in_fileset_body(
+                    book_id, book_name, chapter, fileset_id
+                )
+            audio_format = 'path' in rows[0]
             if audio_format:
-                audio_data = passage_data['data'][0]
+                audio_data = rows[0]
+                if (
+                    response_format == 'audio'
+                    and not audio_data.get('path')
+                ):
+                    return _book_not_in_fileset_body(
+                        book_id, book_name, chapter, fileset_id
+                    )
                 return {
                     'book': book_id,
                     'book_name': book_name,
@@ -162,6 +239,12 @@ class BiblePassageSerializer(serializers.Serializer):
                     'file_size_bytes': audio_data.get('filesize_in_bytes'),
                     'format': 'audio',
                 }
+            if response_format == 'audio':
+                # The fileset has no audio rows for this passage
+                # (e.g. an audio request against a text fileset).
+                return _book_not_in_fileset_body(
+                    book_id, book_name, chapter, fileset_id
+                )
             return {
                 'book': book_id,
                 'book_name': book_name,
@@ -172,7 +255,7 @@ class BiblePassageSerializer(serializers.Serializer):
                         'verse': v['verse_start'],
                         'text': v.get('verse_text', ''),
                     }
-                    for v in passage_data['data']
+                    for v in rows
                     if 'verse_text' in v
                 ],
             }
