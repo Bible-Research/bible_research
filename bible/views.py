@@ -40,7 +40,8 @@ class BiblePassageView(APIView):
     Example:
         /api/v1/bible/?passage=John+3&fileset_id=ENGESV
         /api/v1/bible/?passage=John+3&fileset_id=LVSGLU8   # LV
-        /api/v1/bible/?passage=Luke+20&fileset_id=GLU8&response_format=audio  # LV audio
+        /api/v1/bible/?passage=Luke+20&fileset_id=GLU8
+            &response_format=audio   # LV audio
     """
 
     def get(self, request, format=None):
@@ -139,6 +140,13 @@ class BiblePassageView(APIView):
                     f"{book_name} {chapter} ({fileset_id})"
                 )
                 body = serializer.to_representation(data)
+                # A fileset that does not carry the requested book
+                # surfaces as a real 404 with a stable error code so
+                # clients can fall back to another fileset.
+                if body.get('error_code') == 'book_not_in_fileset':
+                    return Response(
+                        body, status=status.HTTP_404_NOT_FOUND
+                    )
                 # Surface "audio requested but not generated yet" as
                 # a proper 404 instead of a 200 with ``audio_url: None``
                 # so clients can reliably branch on status code.
@@ -146,6 +154,11 @@ class BiblePassageView(APIView):
                     body.get('format') == 'audio'
                     and body.get('audio_url') is None
                 ):
+                    body['error_code'] = 'book_not_in_fileset'
+                    body.setdefault(
+                        'error',
+                        'Audio not available for this passage',
+                    )
                     return Response(
                         body, status=status.HTTP_404_NOT_FOUND
                     )
@@ -644,6 +657,8 @@ class TranslationListView(APIView):
                     'language': t['language'],
                     'language_iso': t['iso'],
                     'filesets': t['filesets'],
+                    'text_options': t.get('text_options', []),
+                    'audio_options': t.get('audio_options', []),
                 }
                 for t in translations
             ]
