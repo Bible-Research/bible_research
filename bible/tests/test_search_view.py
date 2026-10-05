@@ -304,3 +304,331 @@ def test_esv_search_handles_malformed_references(
     verses = response.data['data']['verses']
     assert len(verses) == 1  # Only valid reference should be included
     assert verses[0]['book_id'] == 'JHN'
+
+
+# --- group_by=book tests -------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_invalid_group_by_rejected(factory):
+    """group_by=<anything but book> → 400 with error."""
+    request = factory.get('/fake-url/', {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'group_by': 'chapter',
+    })
+    response = BibleSearchView.as_view()(request)
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'group_by' in response.data['error']
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_dbt_grouped_search_groups_by_book(
+    mock_get_client, mock_is_sword, factory
+):
+    """group_by=book → groups keyed by book_id in canonical
+    order, verses sorted by (chapter, verse_start)."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {
+            'data': [
+                {
+                    'book_id': 'JHN',
+                    'chapter': 3,
+                    'verse_start': 17,
+                    'verse_text': 'sent his son',
+                },
+                {
+                    'book_id': 'JHN',
+                    'chapter': 3,
+                    'verse_start': 16,
+                    'verse_text': 'loved the world',
+                },
+                {
+                    'book_id': 'GEN',
+                    'chapter': 22,
+                    'verse_start': 2,
+                    'verse_text': 'your only son',
+                },
+            ]
+        },
+        'meta': {'pagination': {'total': 3}},
+    }
+
+    request = factory.get('/fake-url/', {
+        'query': 'son',
+        'fileset_id': 'ENGESV',
+        'group_by': 'book',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    data = response.data['data']
+    assert 'verses' not in data
+    groups = data['groups']
+    # Canonical order: GEN before JHN though JHN arrived first
+    assert [g['book_id'] for g in groups] == ['GEN', 'JHN']
+    assert groups[0]['count'] == 1
+    assert groups[1]['count'] == 2
+    # Verses within a group sorted by verse_start
+    assert [
+        v['verse_start'] for v in groups[1]['verses']
+    ] == [16, 17]
+    assert data['meta'] == {'total': 3, 'truncated': False}
+
+    mock_get_client.return_value.search.assert_called_once_with(
+        'ENGESV', 'son', limit=5000, books=None,
+    )
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_dbt_grouped_search_sets_truncated(
+    mock_get_client, mock_is_sword, factory
+):
+    """DBT total > fetched items → meta.truncated is True."""
+    mock_get_client.return_value.search.side_effect = [
+        {
+            'verses': {
+                'data': [
+                    {
+                        'book_id': 'JHN',
+                        'chapter': 3,
+                        'verse_start': 16,
+                        'verse_text': 'loved the world',
+                    },
+                ]
+            },
+            'meta': {'pagination': {'total': 10}},
+        },
+        {'verses': {'data': []}},
+    ]
+
+    request = factory.get('/fake-url/', {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'group_by': 'book',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    meta = response.data['data']['meta']
+    assert meta['total'] == 10
+    assert meta['truncated'] is True
+    assert mock_get_client.return_value.search.call_count == 2
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_dbt_grouped_search_passes_books(
+    mock_get_client, mock_is_sword, factory
+):
+    """Grouped DBT search forwards the books filter."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {'data': []},
+        'meta': {'pagination': {'total': 0}},
+    }
+
+    request = factory.get('/fake-url/', {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'group_by': 'book',
+        'books': 'JHN,ROM',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    mock_get_client.return_value.search.assert_called_once_with(
+        'ENGESV', 'love', limit=5000, books='JHN,ROM',
+    )
+    assert response.data['data']['groups'] == []
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_esv_client')
+def test_esv_grouped_search_fetches_all_pages(
+    mock_get_esv_client, factory
+):
+    """Grouped ESV search fetches every result page and groups
+    matches canonically."""
+    client = mock_get_esv_client.return_value
+    client.search.side_effect = [
+        {
+            'page': 1,
+            'total_results': 3,
+            'total_pages': 2,
+            'results': [
+                {
+                    'reference': 'Genesis 1:1',
+                    'content': 'In the beginning God',
+                },
+                {
+                    'reference': 'John 3:16',
+                    'content': 'For God so loved',
+                },
+            ],
+        },
+        {
+            'page': 2,
+            'total_results': 3,
+            'total_pages': 2,
+            'results': [
+                {
+                    'reference': 'John 3:17',
+                    'content': 'For God did not send',
+                },
+            ],
+        },
+    ]
+
+    request = factory.get('/fake-url/', {
+        'query': 'God',
+        'fileset_id': 'ENGESV_API',
+        'group_by': 'book',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    groups = response.data['data']['groups']
+    assert [g['book_id'] for g in groups] == ['GEN', 'JHN']
+    assert groups[0]['count'] == 1
+    assert groups[1]['count'] == 2
+    assert response.data['data']['meta'] == {
+        'total': 3, 'truncated': False,
+    }
+    assert client.search.call_count == 2
+    client.search.assert_any_call('God', 1, 100)
+    client.search.assert_any_call('God', 2, 100)
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_esv_client')
+def test_esv_grouped_search_truncates_at_max_pages(
+    mock_get_esv_client, factory
+):
+    """ESV total_pages > MAX_ESV_PAGES → meta.truncated True."""
+    client = mock_get_esv_client.return_value
+    client.search.return_value = {
+        'page': 1,
+        'total_results': 10000,
+        'total_pages': 100,
+        'results': [],
+    }
+
+    request = factory.get('/fake-url/', {
+        'query': 'God',
+        'fileset_id': 'ENGESV_API',
+        'group_by': 'book',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    meta = response.data['data']['meta']
+    assert meta['total'] == 10000
+    assert meta['truncated'] is True
+    # Page 1 + pages 2..30 = 30 calls
+    assert client.search.call_count == 30
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=True)
+@patch('bible.views.get_default_sword_client')
+def test_sword_grouped_search(
+    mock_get_sword, mock_is_sword, factory
+):
+    """Grouped SWORD search scans everything; never truncated."""
+    mock_sword = mock_get_sword.return_value
+    mock_sword.list_chapters.return_value = [
+        ('GEN', 1), ('MAT', 1)
+    ]
+    mock_sword.get_chapter_verses.side_effect = [
+        [
+            {'verse_start': 1, 'verse_text': 'love one'},
+            {'verse_start': 2, 'verse_text': 'no match'},
+        ],
+        [
+            {'verse_start': 5, 'verse_text': 'love wins'},
+        ],
+    ]
+
+    request = factory.get('/fake-url/', {
+        'query': 'love',
+        'fileset_id': 'LVSGLU8',
+        'group_by': 'book',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    groups = response.data['data']['groups']
+    assert [g['book_id'] for g in groups] == ['GEN', 'MAT']
+    assert groups[0]['count'] == 1
+    assert groups[1]['count'] == 1
+    assert response.data['data']['meta'] == {
+        'total': 2, 'truncated': False,
+    }
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=True)
+@patch('bible.views.get_default_sword_client')
+def test_sword_grouped_books_filter(
+    mock_get_sword, mock_is_sword, factory
+):
+    """Grouped SWORD search honors the books filter."""
+    mock_sword = mock_get_sword.return_value
+    mock_sword.list_chapters.return_value = [
+        ('GEN', 1), ('EXO', 1), ('MAT', 1)
+    ]
+    mock_sword.get_chapter_verses.return_value = [
+        {'verse_start': 1, 'verse_text': 'love'}
+    ]
+
+    request = factory.get('/fake-url/', {
+        'query': 'love',
+        'fileset_id': 'LVSGLU8',
+        'group_by': 'book',
+        'books': 'MAT',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert mock_sword.get_chapter_verses.call_count == 1
+    groups = response.data['data']['groups']
+    assert [g['book_id'] for g in groups] == ['MAT']
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_non_grouped_search_still_paginated(
+    mock_get_client, mock_is_sword, factory
+):
+    """No group_by → unchanged paginated 'verses' response."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {
+            'data': [
+                {
+                    'book_id': 'JHN',
+                    'chapter': 3,
+                    'verse_start': 16,
+                    'verse_text': 'For God so loved the world',
+                }
+            ]
+        },
+        'meta': {'pagination': {'total': 1}},
+    }
+
+    request = factory.get('/fake-url/', {
+        'query': 'loved',
+        'fileset_id': 'ENGESV',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    data = response.data['data']
+    assert 'groups' not in data
+    assert len(data['verses']) == 1
+    assert data['meta']['pagination']['total'] == 1
