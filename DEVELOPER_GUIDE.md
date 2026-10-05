@@ -395,7 +395,9 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
 - `limit`: Max results per page (default 15)
 - `page`: Result page number (default 1)
 - `sort_by`: Sort field (DBT only)
-- `books`: Comma-separated USFM book IDs (e.g. `JHN,ROM`)
+- `books`: Comma-separated USFM book IDs (e.g. `JHN,ROM`);
+  honored for DBT and SWORD only — the ESV API has no book
+  filter
 - `group_by`: Set to `book` to return every match grouped by
   book instead of a paginated list
 

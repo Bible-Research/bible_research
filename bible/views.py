@@ -423,28 +423,9 @@ class BibleSearchView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            limit = int(
-                request.query_params.get('limit', 15)
-            )
-        except (TypeError, ValueError):
-            return Response(
-                {"error": "limit must be an integer."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            page = int(
-                request.query_params.get('page', 1)
-            )
-        except (TypeError, ValueError):
-            return Response(
-                {"error": "page must be an integer."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        sort_by = request.query_params.get('sort_by')
-        books = request.query_params.get('books')
-
+        # ``group_by`` is validated and dispatched before
+        # limit/page parsing: pagination params are meaningless
+        # in grouped mode, so e.g. ``page=abc`` must not 400.
         group_by = request.query_params.get('group_by')
         if group_by and group_by != 'book':
             return Response(
@@ -452,11 +433,34 @@ class BibleSearchView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        sort_by = request.query_params.get('sort_by')
+        books = request.query_params.get('books')
+
         try:
             if group_by == 'book':
                 return self._grouped_search(
                     fileset_id, query, books
                 )
+
+            try:
+                limit = int(
+                    request.query_params.get('limit', 15)
+                )
+            except (TypeError, ValueError):
+                return Response(
+                    {"error": "limit must be an integer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                page = int(
+                    request.query_params.get('page', 1)
+                )
+            except (TypeError, ValueError):
+                return Response(
+                    {"error": "page must be an integer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             if is_esv_fileset(fileset_id):
                 return self._esv_search(query, limit, page)
             if is_sword_fileset(fileset_id):

@@ -3,6 +3,7 @@ from unittest.mock import patch
 from rest_framework import status
 from rest_framework.test import APIRequestFactory
 
+from bible.services.search_grouping import group_verses_by_book
 from bible.views import BibleSearchView
 
 
@@ -632,3 +633,196 @@ def test_non_grouped_search_still_paginated(
     assert 'groups' not in data
     assert len(data['verses']) == 1
     assert data['meta']['pagination']['total'] == 1
+
+
+# --- grouped-search edge cases -------------------------------------------
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_grouped_search_provider_error_returns_400(
+    mock_get_client, mock_is_sword, factory
+):
+    """Provider client raising in grouped mode → 400 error."""
+    mock_get_client.return_value.search.side_effect = (
+        Exception("DBT exploded")
+    )
+
+    request = factory.get('/fake-url/', {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'group_by': 'book',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'DBT exploded' in response.data['error']
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_grouped_search_ignores_bad_page_param(
+    mock_get_client, mock_is_sword, factory
+):
+    """group_by=book&page=abc → page is never parsed, no 400."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {'data': []},
+        'meta': {'pagination': {'total': 0}},
+    }
+
+    request = factory.get('/fake-url/', {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'group_by': 'book',
+        'page': 'abc',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_dbt_grouped_search_uses_reported_page_size(
+    mock_get_client, mock_is_sword, factory
+):
+    """Page 1 reports per_page below the requested limit →
+    page 2 is fetched at the effective size so no results
+    are skipped."""
+    mock_get_client.return_value.search.side_effect = [
+        {
+            'verses': {
+                'data': [
+                    {
+                        'book_id': 'JHN',
+                        'chapter': 3,
+                        'verse_start': 16,
+                        'verse_text': 'loved the world',
+                    },
+                    {
+                        'book_id': 'JHN',
+                        'chapter': 3,
+                        'verse_start': 17,
+                        'verse_text': 'sent his son',
+                    },
+                ]
+            },
+            'meta': {
+                'pagination': {'total': 3, 'per_page': 2},
+            },
+        },
+        {
+            'verses': {
+                'data': [
+                    {
+                        'book_id': 'JHN',
+                        'chapter': 3,
+                        'verse_start': 18,
+                        'verse_text': 'not perish',
+                    },
+                ]
+            },
+            'meta': {
+                'pagination': {'total': 3, 'per_page': 2},
+            },
+        },
+    ]
+
+    request = factory.get('/fake-url/', {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'group_by': 'book',
+    })
+    response = BibleSearchView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    groups = response.data['data']['groups']
+    assert len(groups) == 1
+    assert groups[0]['count'] == 3
+    assert [
+        v['verse_start'] for v in groups[0]['verses']
+    ] == [16, 17, 18]
+    assert response.data['data']['meta'] == {
+        'total': 3, 'truncated': False,
+    }
+    # Follow-up page requested at the effective page size.
+    mock_get_client.return_value.search.assert_any_call(
+        'ENGESV', 'love', limit=2, page=2, books=None,
+    )
+
+
+def test_unknown_book_id_sorts_last():
+    """An unmapped book_id lands in a trailing group."""
+    groups = group_verses_by_book([
+        {
+            'book_id': 'XXX',
+            'chapter': 1,
+            'verse_start': 1,
+            'verse_text': 'odd',
+        },
+        {
+            'book_id': 'GEN',
+            'chapter': 1,
+            'verse_start': 1,
+            'verse_text': 'beginning',
+        },
+    ])
+    assert [g['book_id'] for g in groups] == ['GEN', 'XXX']
+
+
+def test_verse_missing_book_id_is_skipped():
+    """Verses without a string book_id are dropped."""
+    groups = group_verses_by_book([
+        {
+            'book_id': None,
+            'chapter': 1,
+            'verse_start': 1,
+            'verse_text': 'orphan',
+        },
+        {
+            'chapter': 1,
+            'verse_start': 2,
+            'verse_text': 'no id at all',
+        },
+        {
+            'book_id': 'GEN',
+            'chapter': 1,
+            'verse_start': 1,
+            'verse_text': 'beginning',
+        },
+    ])
+    assert [g['book_id'] for g in groups] == ['GEN']
+    assert groups[0]['count'] == 1
+
+
+def test_duplicate_verses_collapse():
+    """Duplicate (book_id, chapter, verse_start) verses dedupe
+    to the first occurrence."""
+    groups = group_verses_by_book([
+        {
+            'book_id': 'JHN',
+            'chapter': 3,
+            'verse_start': 16,
+            'verse_text': 'range 16-18 text',
+        },
+        {
+            'book_id': 'JHN',
+            'chapter': 3,
+            'verse_start': 16,
+            'verse_text': 'single verse text',
+        },
+        {
+            'book_id': 'JHN',
+            'chapter': 3,
+            'verse_start': 17,
+            'verse_text': 'next verse',
+        },
+    ])
+    assert len(groups) == 1
+    assert groups[0]['count'] == 2
+    assert groups[0]['verses'][0]['verse_text'] == (
+        'range 16-18 text'
+    )

@@ -79,7 +79,7 @@ def _book_order(book_id):
         return len(BOOK_ORDER_MAP) + 1
     try:
         name = get_book_name_from_id(book_id)
-    except ValueError:
+    except (ValueError, TypeError, AttributeError):
         return len(BOOK_ORDER_MAP) + 1
     return BOOK_ORDER_MAP.get(name, len(BOOK_ORDER_MAP) + 1)
 
@@ -90,10 +90,27 @@ def group_verses_by_book(verses):
     Returns ``[{book_id, count, verses: [...]}, ...]`` with the
     groups sorted in canonical book order and the verses inside
     each group sorted by ``(chapter, verse_start)``.
+
+    Verses without a string ``book_id`` are dropped, and
+    duplicates on ``(book_id, chapter, verse_start)`` collapse
+    to the first occurrence — overlapping ranges like
+    "John 3:16-18" normalize to verse_start=16 and can repeat.
     """
     by_book = {}
+    seen = set()
     for verse in verses:
-        by_book.setdefault(verse.get('book_id'), []).append(verse)
+        book_id = verse.get('book_id')
+        if not isinstance(book_id, str) or not book_id:
+            continue
+        key = (
+            book_id,
+            verse.get('chapter'),
+            verse.get('verse_start'),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        by_book.setdefault(book_id, []).append(verse)
 
     groups = []
     for book_id, items in by_book.items():
@@ -131,12 +148,25 @@ def fetch_dbt_matches(client, fileset_id, query, books):
     pagination = raw_meta.get('pagination') or {}
     total = pagination.get('total') or len(items)
 
+    # The provider may cap the actual page size below the
+    # requested ``limit``. Follow-up pages must request the
+    # *effective* page size observed on page 1, otherwise the
+    # server offsets by its own cap and rows get skipped.
+    per_page = min(
+        pagination.get('per_page') or len(items),
+        len(items),
+    )
+
     page = 1
-    while len(items) < MAX_RESULTS and len(items) < total:
+    while (
+        per_page
+        and len(items) < MAX_RESULTS
+        and len(items) < total
+    ):
         page += 1
         result = client.search(
             fileset_id, query,
-            limit=MAX_RESULTS, page=page, books=books,
+            limit=per_page, page=page, books=books,
         )
         more = (result.get('verses') or {}).get('data') or []
         if not more:
@@ -168,6 +198,9 @@ def fetch_esv_matches(client, query):
 
     last_page = min(total_pages, MAX_ESV_PAGES)
     if last_page > 1:
+        # The client's shared requests.Session is only used for
+        # read-only GETs here; urllib3 hands each worker its own
+        # pooled connection, so no session state is mutated.
         with ThreadPoolExecutor(
             max_workers=ESV_PAGE_WORKERS
         ) as pool:
