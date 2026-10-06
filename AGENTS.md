@@ -7,8 +7,9 @@ editing; trust the code over any doc that disagrees with it.
 
 Django 5.2 + Django REST Framework API serving a Bible reading/study
 app (`reactive-bible` frontend). Deployed on Google App Engine at
-`https://bible-research-489314.ey.r.appspot.com`; PostgreSQL in prod,
-SQLite for dev/tests.
+`https://bible-research-489314.ey.r.appspot.com`; PostgreSQL in prod.
+Local dev's `config.yaml` also points at prod via a read-only user;
+tests run on SQLite.
 
 ## Layout
 
@@ -83,6 +84,29 @@ frontend-visible field names stable; the React app consumes them.
 - Serializers scope tag/note querysets to `request.user`, else to the
   `guest` user.
 
+## Databases
+
+- Local `config.yaml` `DATABASES.default` connects to the
+  **production** Aiven PostgreSQL (`defaultdb`) as `ai_agent`, a
+  **read-only** user — `manage.py runserver` and `manage.py shell`
+  operate on live production data.
+- Read-only investigation is expected and encouraged: ORM reads work
+  as usual, and raw SQL via:
+
+  ```python
+  from django.db import connection
+  with connection.cursor() as cur:
+      cur.execute("SELECT ...")
+  ```
+
+- Writes and DDL fail with `InsufficientPrivilege` — never attempt
+  them. `manage.py dbshell` needs a local `psql` client (not
+  installed); prefer `manage.py shell` or a `psycopg2` script built
+  on `settings.DATABASES`.
+- For a writable local database, repoint `config.yaml`'s `default`
+  to SQLite (`ENGINE: django.db.backends.sqlite3`,
+  `NAME: db.sqlite3` — a file already exists in the repo root).
+
 ## Models / IDs
 
 Prefixed string PKs: `TAG…`, `CMNT_…`, `IMG_…`, etc.
@@ -99,7 +123,10 @@ python -m pytest annotations/tests.py -q   # or a single class
 ```
 
 conftest.py configures Django settings for pytest; tests run on
-SQLite in-memory — no `config.yaml`, no DB setup needed.
+SQLite in-memory — no `config.yaml`, no DB setup needed, and they
+never touch the production database. `manage.py test` also stays
+off prod: `settings.py` overrides `DATABASES` to local SQLite
+(`db.sqlite3`) whenever `'test'` is in `sys.argv`.
 `bible/services/dbt/dbt_integration_test.py` hits the live DBT API —
 skip unless you have a real `DBT_KEY`.
 
