@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from bible.utils.bible_books import get_dbt_book_id
+from bible.utils.provider_errors import provider_error_fields
 from bible.services.google_tts.registry import get_tts_config
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import (
@@ -32,6 +33,28 @@ from .services.esv.client import (
 )
 
 logger = logging.getLogger(__name__)
+
+PROVIDER_ERROR_STATUSES = {
+    'rate_limited': status.HTTP_429_TOO_MANY_REQUESTS,
+    'not_found': status.HTTP_404_NOT_FOUND,
+}
+
+
+def provider_error_response(exc):
+    """Build an error ``Response`` for an upstream provider failure.
+
+    Uses ``provider_error_fields`` so raw exception text — which can
+    contain request URLs carrying credentials (e.g. DBT's ``?key=``
+    query param) — never reaches the response body.
+    """
+    fields = provider_error_fields(exc)
+    return Response(
+        fields,
+        status=PROVIDER_ERROR_STATUSES.get(
+            fields['error_code'],
+            status.HTTP_502_BAD_GATEWAY,
+        ),
+    )
 
 
 class BiblePassageView(APIView):
@@ -148,6 +171,17 @@ class BiblePassageView(APIView):
                     f"{book_name} {chapter} ({fileset_id})"
                 )
                 body = serializer.to_representation(data)
+                # Provider failures come back with ``error`` /
+                # ``error_code`` fields — surface them with a real
+                # HTTP status so clients can branch on it.
+                if 'error' in body:
+                    return Response(
+                        body,
+                        status=PROVIDER_ERROR_STATUSES.get(
+                            body.get('error_code'),
+                            status.HTTP_502_BAD_GATEWAY,
+                        ),
+                    )
                 # Surface "audio requested but not generated yet" as
                 # a proper 404 instead of a 200 with ``audio_url: None``
                 # so clients can reliably branch on status code.
@@ -172,6 +206,11 @@ class BiblePassageView(APIView):
             logger.exception(
                 f"Error processing Bible passage request: {passage} - {e}"
             )
+            # Provider failures never reach this handler — they
+            # are classified inside the serializer and returned
+            # above. Only client-input errors (bad passage
+            # format, unknown book, invalid chapter) land here,
+            # so embedding str(e) in the 400 body is safe.
             return Response(
                 {"error": str(e)},
                 status=status.HTTP_400_BAD_REQUEST
@@ -231,10 +270,7 @@ class AudioTimestampView(APIView):
                         "Failed to read timestamps for %s %s %s",
                         canon, book_id, chapter,
                     )
-                    return Response(
-                        {"error": f"Timestamps unavailable: {exc}"},
-                        status=status.HTTP_502_BAD_GATEWAY,
-                    )
+                    return provider_error_response(exc)
                 return Response({"data": payload.get("data", [])})
 
             dbt_client = get_default_dbt_client()
@@ -257,10 +293,7 @@ class AudioTimestampView(APIView):
             logger.exception(
                 "Error fetching timestamps: %s", e
             )
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return provider_error_response(e)
 
 
 class CopyrightView(APIView):
@@ -299,10 +332,7 @@ class CopyrightView(APIView):
             logger.exception(
                 "Error fetching copyright: %s", e
             )
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return provider_error_response(e)
 
 
 @extend_schema(
@@ -475,10 +505,7 @@ class BibleSearchView(APIView):
             logger.exception(
                 "Error in BibleSearchView: %s", e
             )
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return provider_error_response(e)
 
     def _esv_search(self, query, limit, page):
         """Search using ESV API passage search endpoint."""
@@ -665,7 +692,4 @@ class TranslationListView(APIView):
                 f"Error fetching translations for "
                 f"language_iso: {language_iso} - {e}"
             )
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return provider_error_response(e)

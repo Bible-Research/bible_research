@@ -165,7 +165,10 @@ The project uses two special accounts:
 - Support for multiple Bible translations
 - Text and audio format responses
 - Chapter-level retrieval
-- Automatic book name normalization
+- Automatic book name normalization — `get_dbt_book_id` accepts
+  exact names plus common misspellings/alternate titles (e.g.
+  "Isiah", "Song of Songs") and falls back to fuzzy matching for
+  minor typos
 
 **Implementation**:
 - `BiblePassageView` (APIView)
@@ -318,6 +321,29 @@ GET /api/v1/bible/?passage=John+3&fileset_id=ENGESV
   ]
 }
 ```
+
+**Provider error response** (upstream Bible provider failed —
+e.g. rate-limited): `verses` is omitted and the payload carries
+`error`/`error_code` describing the failure. HTTP status is `404`
+when `error_code` is `not_found` (the passage does not exist
+upstream), `429` when `error_code` is `rate_limited`, otherwise
+`502` (`provider_error`).
+```json
+{
+  "book": "JHN",
+  "book_name": "John",
+  "chapter": 3,
+  "error": "Bible provider rate limit exceeded (HTTP 429)",
+  "error_code": "rate_limited"
+}
+```
+
+The other provider-backed endpoints — `/api/v1/bible/timestamps/`,
+`/api/v1/bible/copyright/`, `/api/v1/bible/search/`, and
+`/api/v1/bible/translations/` — surface upstream failures with the
+same `error`/`error_code` fields and the same HTTP status mapping
+(`429`/`404`/`502`). Raw exception text is never embedded in
+`error` because it can contain request URLs with credentials.
 
 #### Get Bible Passage (Audio)
 ```
@@ -555,6 +581,15 @@ Authorization: Token <your-token>
   ]
 }
 ```
+
+When the upstream Bible provider fails while resolving verse
+text for a note (e.g. rate-limited), the note keeps its
+`verses` references with empty `text` and additionally carries
+`error`/`error_code` (`rate_limited`, `not_found`, or
+`provider_error`) describing the failure. A successful-but-
+empty provider response (no verse rows returned) is reported
+the same way as a missing passage: `error_code` is
+`not_found`.
 
 **Examples**:
 ```
