@@ -38,7 +38,7 @@ def test_audio_response_returns_signed_url(
     get_client.return_value = client
 
     resp = auth_client.get(
-        "/bible/",
+        "/api/v1/bible/",
         {"passage": "Luke 20", "fileset_id": "GLU8",
          "response_format": "audio"},
     )

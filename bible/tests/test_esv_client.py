@@ -418,9 +418,10 @@ class ESVClientSearchTests(TestCase):
         # Verify the API was called correctly
         mock_get.assert_called_once()
         call_args = mock_get.call_args
-        self.assertIn("q=love", call_args[1]['params'])
-        self.assertIn("page=1", call_args[1]['params'])
-        self.assertIn("page-size=50", call_args[1]['params'])
+        params = call_args[1]['params']
+        self.assertEqual(params['q'], 'love')
+        self.assertEqual(params['page'], '1')
+        self.assertEqual(params['page-size'], '50')
 
         # Verify the result
         self.assertEqual(result["total_results"], 2)
@@ -441,7 +442,7 @@ class ESVClientSearchTests(TestCase):
         # to 100
 
         call_args = mock_get.call_args
-        self.assertIn("page-size=100", call_args[1]['params'])
+        self.assertEqual(call_args[1]['params']['page-size'], '100')
 
     @override_settings(ESV_KEY="test-key")
     @patch("bible.services.esv.client.requests.Session.get")
