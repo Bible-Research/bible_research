@@ -17,7 +17,7 @@ jobs:
   automerge:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.actor == 'dependabot[bot]'
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     concurrency:
       group: >-
         dependabot-automerge-${{ github.event.pull_request.number }}
@@ -39,24 +39,57 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          # CI registers check runs a few seconds after PR open;
-          # wait for at least one before --watch so a zero-check
-          # first poll can't slip a merge through untested.
+          # Poll check runs directly: this job's own "automerge"
+          # check appears on the PR, so `gh pr checks --watch`
+          # would wait for itself forever. Also poll legacy
+          # commit statuses (which never include check runs).
           sha=$(gh pr view "$PR_URL" --json headRefOid \
             -q .headRefOid)
-          for i in 1 2 3 4 5 6; do
-            count=$(gh api \
+          ok=0
+          for i in $(seq 1 55); do
+            res=$(gh api \
               "repos/$REPO/commits/$sha/check-runs" \
-              -q .total_count)
-            [ "$count" -gt 0 ] && break
+              --jq '[.check_runs[] | select(.name != "automerge")]
+                    as $c |
+                    if ($c | length) == 0 then "none"
+                    elif ([$c[] | select(.status != "completed")]
+                          | length) > 0 then "pending"
+                    elif ([$c[] | select(.conclusion != "success"
+                          and .conclusion != "skipped"
+                          and .conclusion != "neutral")] | length)
+                         > 0 then "failed"
+                    else "passed" end')
+            st=$(gh api "repos/$REPO/commits/$sha/statuses" \
+              --jq 'if length == 0 then "none"
+                    elif (map(select(.state == "error" or
+                          .state == "failure")) | length) > 0
+                    then "failed"
+                    elif (map(select(.state == "pending"))
+                          | length) > 0 then "pending"
+                    else "passed" end')
+            if [ "$res" = "failed" ] || [ "$st" = "failed" ]; then
+              echo "A PR check failed"; exit 1
+            fi
+            if [ "$res" != "pending" ] && [ "$st" != "pending" ] \
+               && { [ "$res" = "passed" ] \
+                    || [ "$st" = "passed" ]; }; then
+              ok=1; break
+            fi
             sleep 10
           done
-          gh pr checks "$PR_URL" --watch
+          if [ "$ok" != "1" ]; then
+            echo "Timed out waiting for checks"; exit 1
+          fi
 
+      # Approval is best-effort: it needs the repo setting
+      # "Allow GitHub Actions to create and approve pull
+      # requests". Merge still runs — it fails visibly only if
+      # branch protection truly requires a review.
       - name: Approve PR
         if: >
           steps.metadata.outputs.update-type !=
           'version-update:semver-major'
+        continue-on-error: true
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -69,4 +102,16 @@ jobs:
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr merge "$PR_URL" --squash
+        run: |
+          out=$(gh pr merge "$PR_URL" --squash 2>&1) || {
+            echo "$out"
+            if echo "$out" | grep -q "not up to date"; then
+              # Protection requires up-to-date branches: update
+              # from base; the synchronize event re-runs this
+              # job, which then merges.
+              gh pr update-branch "$PR_URL"
+              exit 0
+            fi
+            exit 1
+          }
+          echo "$out"
