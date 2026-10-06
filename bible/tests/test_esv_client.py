@@ -19,17 +19,20 @@ from bible.serializers import BiblePassageSerializer
 User = get_user_model()
 
 _SIMPLE_PASSAGE = (
-    "[1] In the beginning God created the heavens and the "
-    "earth.\n\n[2] The earth was without form and void, and "
-    "darkness was over the face of the deep."
+    '<p><b class="chapter-num">1:1&nbsp;</b>In the beginning '
+    'God created the heavens and the earth. '
+    '<b class="verse-num">2&nbsp;</b>The earth was without form '
+    'and void, and darkness was over the face of the deep.</p>'
 )
 
 _HEADED_PASSAGE = (
-    "The Sermon on the Mount\n\n"
-    "[1] Seeing the crowds, he went up on the mountain.\n\n"
-    "The Beatitudes\n\n"
-    "[3] Blessed are the poor in spirit.\n"
-    "[4] Blessed are those who mourn."
+    '<h3>The Sermon on the Mount</h3>\n'
+    '<p><b class="chapter-num">5:1&nbsp;</b>Seeing the crowds, '
+    'he went up on the mountain.</p>\n'
+    '<h3>The Beatitudes</h3>\n'
+    '<p><b class="verse-num">3&nbsp;</b>Blessed are the poor in '
+    'spirit. <b class="verse-num">4&nbsp;</b>Blessed are those '
+    'who mourn.</p>'
 )
 
 
@@ -304,8 +307,9 @@ class ESVTranslationsEndpointTests(TestCase):
 class ParsePassageHeadingsTests(TestCase):
     def test_parse_extracts_headings_at_chapter_start(self):
         passage = (
-            "The Sermon on the Mount\n\n"
-            "[1] Seeing the crowds, he went up."
+            '<h3>The Sermon on the Mount</h3>\n'
+            '<p><b class="chapter-num">5:1&nbsp;</b>Seeing the '
+            'crowds, he went up.</p>'
         )
         result = _parse_passage(passage)
         self.assertEqual(len(result["headings"]), 1)
@@ -467,105 +471,149 @@ class ESVClientSearchTests(TestCase):
 
 
 # ============================================================
-# Issue #66 — Poetry and quoted scripture incorrectly
-# parsed as headings
+# Issue #66 — Poetry, quoted scripture, and headings must
+# not be confused
 # ============================================================
 
 class ParsePassagePoetryAndQuotesTests(TestCase):
     """Test cases for GitHub issue #66.
 
-    The ESV API returns poetry (like Daniel 7:13) and quoted
-    scripture (like Luke 4:8-12) in a format that was being
-    incorrectly parsed as section headings.
+    Daniel 7:13-15 poetry and Luke 4:8-12 quoted scripture
+    must stay inside their verses, while the real section
+    heading between them must be extracted as a heading —
+    not glued onto the preceding verse text.
     """
 
+    # Mirrors the actual api.esv.org passage/html markup.
+    _DANIEL_7 = (
+        '<h3>The Son of Man Is Given Dominion</h3>\n'
+        '<p><b class="verse-num">13&nbsp;</b>“I saw in the '
+        'night visions,</p>\n'
+        '<p class="block-indent">'
+        '<span class="begin-line-group"></span>\n'
+        '<span class="line">&nbsp;&nbsp;and behold, with the '
+        'clouds of heaven</span><br />'
+        '<span class="indent line">&nbsp;&nbsp;&nbsp;&nbsp;'
+        'there came one like a son of man,</span><br />'
+        '<span class="line">&nbsp;&nbsp;and he came to the '
+        'Ancient of Days</span><br />'
+        '<span class="indent line">&nbsp;&nbsp;&nbsp;&nbsp;'
+        'and was presented before him.</span><br />'
+        '<span class="line"><b class="verse-num inline">'
+        '14&nbsp;</b>&nbsp;&nbsp;And to him was given '
+        'dominion</span><br />'
+        '<span class="indent line">&nbsp;&nbsp;&nbsp;&nbsp;'
+        'and glory and a kingdom,</span><br />'
+        '<span class="line">&nbsp;&nbsp;that all peoples, '
+        'nations, and languages</span><br />'
+        '<span class="indent line">&nbsp;&nbsp;&nbsp;&nbsp;'
+        'should serve him;</span><br />'
+        '<span class="line">&nbsp;&nbsp;his dominion is an '
+        'everlasting dominion,</span><br />'
+        '<span class="indent line">&nbsp;&nbsp;&nbsp;&nbsp;'
+        'which shall not pass away,</span><br />'
+        '<span class="line">&nbsp;&nbsp;and his kingdom one'
+        '</span><br />'
+        '<span class="indent line">&nbsp;&nbsp;&nbsp;&nbsp;'
+        'that shall not be destroyed.</span><br />'
+        '<span class="end-line-group"></span>\n'
+        '</p>'
+        '<h3>Daniel’s Vision Interpreted</h3>\n'
+        '<p><b class="verse-num">15&nbsp;</b>“As for me, '
+        'Daniel, my spirit within me was anxious, and the '
+        'visions of my head alarmed me.</p>'
+    )
+
     def test_daniel_7_verse_13_continuation_not_heading(self):
-        """Daniel 7:13 poetry continuation should not be a
-        heading."""
-        # Simulates ESV API response for Daniel 7:13-14
-        passage = (
-            "The Son of Man Is Given Dominion\n\n"
-            "  [13] \"I saw in the night visions,\n\n"
-            "    and behold, with the clouds of heaven\n"
-            "        there came one like a son of man,\n"
-            "    and he came to the Ancient of Days\n"
-            "        and was presented before him.\n"
-            "    [14] And to him was given dominion\n"
-            "        and glory and a kingdom,\n"
-            "    that all peoples, nations, and languages\n"
-            "        should serve him;\n"
-            "    his dominion is an everlasting dominion,\n"
-            "        which shall not pass away,\n"
-            "    and his kingdom one\n"
-            "        that shall not be destroyed."
-        )
-        result = _parse_passage(passage)
+        """Daniel 7:13-14 poetry stays in the verses."""
+        result = _parse_passage(self._DANIEL_7)
 
-        # Should have exactly 1 heading (the actual section
-        # heading)
-        headings = result["headings"]
-        self.assertEqual(len(headings), 1)
-        self.assertEqual(
-            headings[0]["text"],
-            "The Son of Man Is Given Dominion"
-        )
-        self.assertEqual(headings[0]["before_verse"], 13)
-
-        # Should have 2 verses
         verses = result["verses"]
-        self.assertEqual(len(verses), 2)
-        self.assertEqual(verses[0]["verse_start"], 13)
-        self.assertEqual(verses[1]["verse_start"], 14)
+        verse_nums = [v["verse_start"] for v in verses]
+        self.assertEqual(verse_nums, [13, 14, 15])
 
-        # Verse 13 should contain the full poetry text
         verse_13_text = verses[0]["verse_text"]
         self.assertIn("I saw in the night visions", verse_13_text)
         self.assertIn("and behold", verse_13_text)
         self.assertIn("clouds of heaven", verse_13_text)
+        self.assertIn("presented before him", verse_13_text)
+
+        verse_14_text = verses[1]["verse_text"]
+        self.assertIn("given dominion", verse_14_text)
+        self.assertIn("shall not be destroyed", verse_14_text)
+
+    def test_daniel_7_mid_poetry_heading_not_in_verse(self):
+        """'Daniel's Vision Interpreted' is a heading before
+        verse 15 — it must NOT be glued onto verse 14."""
+        result = _parse_passage(self._DANIEL_7)
+
+        headings = result["headings"]
+        texts = {h["before_verse"]: h["text"] for h in headings}
+        self.assertEqual(
+            texts.get(13), "The Son of Man Is Given Dominion"
+        )
+        self.assertEqual(
+            texts.get(15), "Daniel’s Vision Interpreted"
+        )
+
+        verse_14 = next(
+            v for v in result["verses"] if v["verse_start"] == 14
+        )
+        self.assertNotIn("Interpreted", verse_14["verse_text"])
 
     def test_luke_4_quoted_scripture_not_headings(self):
         """Luke 4:8-12 quoted scripture should not be parsed
         as headings."""
-        # Simulates ESV API response for Luke 4:8-12
+        # Mirrors the actual api.esv.org passage/html markup.
         passage = (
-            "  [8] And Jesus answered him, \"It is written,\n\n"
-            "    \"'You shall worship the Lord your God,\n"
-            "        and him only shall you serve.'\"\n"
-            "    \n"
-            "    \n"
-            "      [9] And he took him to Jerusalem and set "
-            "him on the pinnacle of the temple and said to "
-            "him, \"If you are the Son of God, throw yourself "
-            "down from here, [10] for it is written,\n\n"
-            "    \"'He will command his angels concerning you,\n"
-            "        to guard you,'\n"
-            "    \n"
-            "    \n"
-            "      [11] and\n\n"
-            "    \"'On their hands they will bear you up,\n"
-            "        lest you strike your foot against a "
-            "stone.'\"\n"
-            "    \n"
-            "    \n"
-            "      [12] And Jesus answered him, \"It is said, "
-            "'You shall not put the Lord your God to the "
-            "test.'\""
+            '<p class="virtual">'
+            '<b class="verse-num">8&nbsp;</b>And Jesus answered '
+            'him, <span class="woc">“It is written,</span></p>\n'
+            '<p class="block-indent">'
+            '<span class="begin-line-group"></span>\n'
+            '<span class="line">&nbsp;&nbsp;<span class="woc">'
+            '“‘You shall worship the Lord your God,</span>'
+            '</span><br />'
+            '<span class="indent line"><span class="woc">'
+            '&nbsp;&nbsp;&nbsp;&nbsp;and him only shall you '
+            'serve.’”</span></span><br />'
+            '<span class="end-line-group"></span>\n'
+            '</p><p class="same-paragraph">'
+            '<b class="verse-num">9&nbsp;</b>And he took him to '
+            'Jerusalem and said to him, “If you are the Son of '
+            'God, throw yourself down from here, '
+            '<b class="verse-num">10&nbsp;</b>for it is written,'
+            '</p>\n'
+            '<p class="block-indent">'
+            '<span class="line">&nbsp;&nbsp;“‘He will command '
+            'his angels concerning you,</span><br />'
+            '<span class="indent line">&nbsp;&nbsp;&nbsp;&nbsp;'
+            'to guard you,’</span><br />'
+            '<span class="end-line-group"></span>\n'
+            '</p><p class="same-paragraph">'
+            '<b class="verse-num">11&nbsp;</b>and</p>\n'
+            '<p class="block-indent">'
+            '<span class="line">&nbsp;&nbsp;“‘On their hands '
+            'they will bear you up,</span><br />'
+            '<span class="indent line">&nbsp;&nbsp;&nbsp;&nbsp;'
+            'lest you strike your foot against a stone.’”'
+            '</span><br />'
+            '<span class="end-line-group"></span>\n'
+            '</p><p class="same-paragraph">'
+            '<b class="verse-num">12&nbsp;</b>And Jesus '
+            'answered him, <span class="woc">“It is said, '
+            '‘You shall not put the Lord your God to the '
+            'test.’”</span></p>'
         )
         result = _parse_passage(passage)
 
         # Should have NO headings (all text is part of verses)
-        headings = result["headings"]
-        self.assertEqual(len(headings), 0)
+        self.assertEqual(result["headings"], [])
 
         # Should have 5 verses (8, 9, 10, 11, 12)
         verses = result["verses"]
         verse_nums = [v["verse_start"] for v in verses]
-        self.assertEqual(len(verses), 5)
-        self.assertIn(8, verse_nums)
-        self.assertIn(9, verse_nums)
-        self.assertIn(10, verse_nums)
-        self.assertIn(11, verse_nums)
-        self.assertIn(12, verse_nums)
+        self.assertEqual(verse_nums, [8, 9, 10, 11, 12])
 
         # Verse 8 should include the quoted scripture
         verse_8 = next(v for v in verses if v["verse_start"] == 8)
