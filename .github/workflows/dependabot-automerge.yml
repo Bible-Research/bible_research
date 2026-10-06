@@ -1,0 +1,72 @@
+name: Dependabot auto-merge
+
+# pull_request_target runs in the base-repo context with a writable
+# GITHUB_TOKEN, which Dependabot's regular pull_request runs do not
+# get. Safe here because the PR code is never checked out.
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.actor == 'dependabot[bot]'
+    concurrency:
+      group: >-
+        dependabot-automerge-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Skip major version bumps; they need human review.
+      - name: Wait for checks to pass
+        if: >
+          steps.metadata.outputs.update-type !=
+          'version-update:semver-major'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # CI registers check runs a few seconds after PR open;
+          # wait for at least one before --watch so a zero-check
+          # first poll can't slip a merge through untested.
+          sha=$(gh pr view "$PR_URL" --json headRefOid \
+            -q .headRefOid)
+          for i in 1 2 3 4 5 6; do
+            count=$(gh api \
+              "repos/$REPO/commits/$sha/check-runs" \
+              -q .total_count)
+            [ "$count" -gt 0 ] && break
+            sleep 10
+          done
+          gh pr checks "$PR_URL" --watch
+
+      - name: Approve PR
+        if: >
+          steps.metadata.outputs.update-type !=
+          'version-update:semver-major'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr review --approve "$PR_URL"
+
+      - name: Merge PR
+        if: >
+          steps.metadata.outputs.update-type !=
+          'version-update:semver-major'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge "$PR_URL" --squash
