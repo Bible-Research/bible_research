@@ -17,7 +17,7 @@ jobs:
   automerge:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.actor == 'dependabot[bot]'
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     concurrency:
       group: >-
         dependabot-automerge-${{ github.event.pull_request.number }}
