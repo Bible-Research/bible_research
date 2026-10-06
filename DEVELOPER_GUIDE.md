@@ -165,7 +165,10 @@ The project uses two special accounts:
 - Support for multiple Bible translations
 - Text and audio format responses
 - Chapter-level retrieval
-- Automatic book name normalization
+- Automatic book name normalization — `get_dbt_book_id` accepts
+  exact names plus common misspellings/alternate titles (e.g.
+  "Isiah", "Song of Songs") and falls back to fuzzy matching for
+  minor typos
 
 **Implementation**:
 - `BiblePassageView` (APIView)
