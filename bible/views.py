@@ -16,6 +16,14 @@ from bible.services.sword.registry import (
     is_sword_fileset,
 )
 from bible.services.esv.registry import is_esv_fileset
+from bible.services.search_grouping import (
+    fetch_dbt_matches,
+    fetch_esv_matches,
+    group_verses_by_book,
+    normalize_dbt_verse,
+    parse_esv_results,
+    scan_sword_matches,
+)
 from bible.services.storage import gcs
 from .serializers import BiblePassageSerializer
 from .services.translation_service import TranslationService
@@ -64,7 +72,7 @@ class BiblePassageView(APIView):
         /api/v1/bible/?passage=John+3&fileset_id=ENGESV
         /api/v1/bible/?passage=John+3&fileset_id=LVSGLU8   # LV
         /api/v1/bible/?passage=Luke+20&fileset_id=GLU8
-          &response_format=audio  # LV audio
+            &response_format=audio   # LV audio
     """
 
     def get(self, request, format=None):
@@ -386,6 +394,16 @@ class CopyrightView(APIView):
             ),
             required=False,
         ),
+        OpenApiParameter(
+            name='group_by',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                "Use 'book' to return every match grouped "
+                'by book instead of a paginated list.'
+            ),
+            required=False,
+        ),
     ],
 )
 class BibleSearchView(APIView):
@@ -399,6 +417,11 @@ class BibleSearchView(APIView):
     repeat the request with an incremented ``page`` parameter
     (e.g. ``?query=Jesus&fileset_id=ENGESV&page=2``).
 
+    With ``group_by=book`` pagination is skipped: every match
+    is fetched and returned as ``data.groups`` (per-book
+    ``book_id``/``count``/``verses`` groups in canonical book
+    order) plus ``data.meta`` = ``{total, truncated}``.
+
     Query Parameters:
         - query: Word/phrase to search (required)
         - fileset_id: DBT or SWORD fileset ID (required)
@@ -407,6 +430,7 @@ class BibleSearchView(APIView):
         - page: Result page number (default 1)
         - sort_by: Sort field (DBT only)
         - books: Comma-separated USFM book IDs
+        - group_by: 'book' returns all matches grouped by book
 
     Examples:
         - ESV API search: ?query=love&fileset_id=ENGESV_API
@@ -429,22 +453,13 @@ class BibleSearchView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            limit = int(
-                request.query_params.get('limit', 15)
-            )
-        except (TypeError, ValueError):
+        # ``group_by`` is validated and dispatched before
+        # limit/page parsing: pagination params are meaningless
+        # in grouped mode, so e.g. ``page=abc`` must not 400.
+        group_by = request.query_params.get('group_by')
+        if group_by and group_by != 'book':
             return Response(
-                {"error": "limit must be an integer."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            page = int(
-                request.query_params.get('page', 1)
-            )
-        except (TypeError, ValueError):
-            return Response(
-                {"error": "page must be an integer."},
+                {"error": "group_by must be 'book'."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -452,6 +467,30 @@ class BibleSearchView(APIView):
         books = request.query_params.get('books')
 
         try:
+            if group_by == 'book':
+                return self._grouped_search(
+                    fileset_id, query, books
+                )
+
+            try:
+                limit = int(
+                    request.query_params.get('limit', 15)
+                )
+            except (TypeError, ValueError):
+                return Response(
+                    {"error": "limit must be an integer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                page = int(
+                    request.query_params.get('page', 1)
+                )
+            except (TypeError, ValueError):
+                return Response(
+                    {"error": "page must be an integer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             if is_esv_fileset(fileset_id):
                 return self._esv_search(query, limit, page)
             if is_sword_fileset(fileset_id):
@@ -476,40 +515,7 @@ class BibleSearchView(APIView):
         result = esv_client.search(query, page, limit)
 
         # Transform ESV API response to match our format
-        verses = []
-        for item in result.get('results', []):
-            # Parse reference like "John 3:16" or "Genesis 1:1-2"
-            reference = item.get('reference', '')
-            try:
-                parts = reference.split()
-                if len(parts) >= 2:
-                    # Handle book names with spaces (e.g., "1 John")
-                    verse_part = parts[-1]  # "3:16" or "3:16-17"
-                    book_name = ' '.join(parts[:-1])  # "John" or "1 John"
-
-                    # Parse chapter and verse
-                    if ':' in verse_part:
-                        chapter_str, verse_str = verse_part.split(':', 1)
-                        chapter = int(chapter_str)
-                        # Handle verse ranges like "1-2" - take first verse
-                        verse_start = int(verse_str.split('-')[0])
-
-                        # Convert book name to book ID using existing utility
-                        from bible.utils.bible_books import get_dbt_book_id
-                        book_id = get_dbt_book_id(book_name)
-
-                        if book_id:
-                            verses.append({
-                                'book_id': book_id,
-                                'chapter': chapter,
-                                'verse_start': verse_start,
-                                'verse_text': item.get('content', ''),
-                            })
-            except (ValueError, IndexError) as e:
-                logger.warning(
-                    f"Failed to parse ESV reference '{reference}': {e}"
-                )
-                continue
+        verses = parse_esv_results(result.get('results', []))
 
         # Build pagination metadata
         pagination = {
@@ -529,6 +535,39 @@ class BibleSearchView(APIView):
             }
         })
 
+    def _grouped_search(self, fileset_id, query, books):
+        """Return every match grouped by book (``group_by=book``).
+
+        Response shape: ``data.groups`` = per-book groups in
+        canonical order; ``data.meta`` = ``{total, truncated}``
+        where ``truncated`` is True when a safety cap cut
+        results off.
+        """
+        if is_esv_fileset(fileset_id):
+            verses, total, truncated = fetch_esv_matches(
+                get_default_esv_client(), query
+            )
+        elif is_sword_fileset(fileset_id):
+            verses = scan_sword_matches(
+                get_default_sword_client(),
+                fileset_id, query, books,
+            )
+            total, truncated = len(verses), False
+        else:
+            verses, total, truncated = fetch_dbt_matches(
+                get_default_dbt_client(),
+                fileset_id, query, books,
+            )
+        return Response({
+            'data': {
+                'groups': group_verses_by_book(verses),
+                'meta': {
+                    'total': total,
+                    'truncated': truncated,
+                },
+            }
+        })
+
     def _dbt_search(
         self, fileset_id, query, limit, page, sort_by, books
     ):
@@ -541,12 +580,7 @@ class BibleSearchView(APIView):
         raw_verses = result.get('verses') or {}
         verse_items = raw_verses.get('data') or []
         normalized = [
-            {
-                'book_id': v.get('book_id'),
-                'chapter': v.get('chapter'),
-                'verse_start': v.get('verse_start'),
-                'verse_text': v.get('verse_text'),
-            }
+            normalize_dbt_verse(v)
             for v in verse_items
         ]
         # Pagination lives in result['meta'] (documented schema) or
@@ -583,37 +617,10 @@ class BibleSearchView(APIView):
     def _sword_search(
         self, fileset_id, query, limit, page, books
     ):
-        sword_client = get_default_sword_client()
-        chapters = sword_client.list_chapters(fileset_id)
-
-        if books:
-            allowed = {
-                b.strip().upper() for b in books.split(',')
-            }
-            chapters = [
-                (b, c) for b, c in chapters
-                if b.upper() in allowed
-            ]
-
-        needle = query.lower()
-        matches = []
-        for book_id, chapter in chapters:
-            try:
-                verses = sword_client.get_chapter_verses(
-                    fileset_id, book_id, chapter
-                )
-            except Exception:
-                continue
-            for v in verses:
-                text = v.get('verse_text', '')
-                if needle in text.lower():
-                    matches.append({
-                        'book_id': book_id,
-                        'chapter': chapter,
-                        'verse_start': v['verse_start'],
-                        'verse_text': text,
-                    })
-
+        matches = scan_sword_matches(
+            get_default_sword_client(),
+            fileset_id, query, books,
+        )
         total = len(matches)
         start = (page - 1) * limit
         page_items = matches[start:start + limit]
