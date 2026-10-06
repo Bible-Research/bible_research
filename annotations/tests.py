@@ -1,4 +1,5 @@
 import datetime
+from unittest.mock import patch
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, APIClient
@@ -8,7 +9,7 @@ from annotations.serializers import (
     NoteSerializer,
     build_comment_tree,
 )
-from annotations.models import Comment, Note, Tag
+from annotations.models import Comment, Note, NoteVerse, Tag
 from bible.models import Verse
 
 
@@ -797,6 +798,167 @@ class BulkNoteCreateTest(TestCase):
         self.assertEqual(
             Note.objects.filter(tag=self.tag).count(), 0
         )
+
+
+class LinkedNotesTest(TestCase):
+    """Tests for POST /api/v1/notes/linked/."""
+
+    URL = '/api/v1/notes/linked/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='linked_user',
+            email='linked@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='LinkedTag',
+        )
+        self.v316, _ = Verse.objects.get_or_create(
+            book='John',
+            chapter=3,
+            verse=16,
+        )
+        self.v317, _ = Verse.objects.get_or_create(
+            book='John',
+            chapter=3,
+            verse=17,
+        )
+        self.g11, _ = Verse.objects.get_or_create(
+            book='Genesis',
+            chapter=1,
+            verse=1,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        # NoteSerializer enriches verses via the DBT client;
+        # keep tests offline by making it fail fast into the
+        # serializer's fallback (empty verse text).
+        patcher = patch(
+            'annotations.serializers.get_default_dbt_client',
+            side_effect=ValueError('DBT disabled in tests'),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _note(self, user, text, verses):
+        note = Note.objects.create(
+            user=user,
+            tag=self.tag if user == self.user else None,
+            note_text=text,
+        )
+        for verse in verses:
+            NoteVerse.objects.create(note=note, verse=verse)
+        return note
+
+    def _post(self, refs):
+        return self.client.post(
+            self.URL,
+            {'verse_references': refs},
+            format='json',
+        )
+
+    def test_returns_own_linked_notes(self):
+        self._note(self.user, 'On John 3:16', [self.v316])
+        resp = self._post([
+            {'book': 'John', 'chapter': 3, 'verse': 16},
+        ])
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['count'], 1)
+        self.assertEqual(
+            data['results'][0]['note_text'], 'On John 3:16'
+        )
+
+    def test_excludes_other_users_notes(self):
+        other = get_user_model().objects.create_user(
+            username='linked_other',
+            password='pass',
+        )
+        self._note(other, 'Someone else note', [self.v316])
+        resp = self._post([
+            {'book': 'John', 'chapter': 3, 'verse': 16},
+        ])
+        self.assertEqual(resp.json()['count'], 0)
+
+    def test_note_matching_multiple_refs_listed_once(self):
+        self._note(
+            self.user, 'Spans two', [self.v316, self.v317]
+        )
+        resp = self._post([
+            {'book': 'John', 'chapter': 3, 'verse': 16},
+            {'book': 'John', 'chapter': 3, 'verse': 17},
+        ])
+        data = resp.json()
+        self.assertEqual(data['count'], 1)
+        self.assertEqual(len(data['results']), 1)
+
+    def test_no_match_returns_empty(self):
+        self._note(self.user, 'Genesis note', [self.g11])
+        resp = self._post([
+            {'book': 'John', 'chapter': 3, 'verse': 16},
+        ])
+        data = resp.json()
+        self.assertEqual(data['count'], 0)
+        self.assertEqual(data['results'], [])
+
+    def test_book_name_matching_is_case_insensitive(self):
+        self._note(self.user, 'Lowercase book', [self.v316])
+        resp = self._post([
+            {'book': 'john', 'chapter': 3, 'verse': 16},
+        ])
+        self.assertEqual(resp.json()['count'], 1)
+
+    def test_empty_references_returns_400(self):
+        resp = self._post([])
+        self.assertEqual(resp.status_code, 400)
+
+    def test_unauthenticated_returns_empty(self):
+        self._note(self.user, 'On John 3:16', [self.v316])
+        client = APIClient()
+        resp = client.post(
+            self.URL,
+            {'verse_references': [
+                {'book': 'John', 'chapter': 3, 'verse': 16},
+            ]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['count'], 0)
+
+    def test_no_upstream_calls_and_no_n_plus_1(self):
+        """linked/ makes no per-note provider calls and issues a
+        fixed number of DB queries regardless of note count."""
+        self._note(self.user, 'Note A', [self.v316])
+        self._note(self.user, 'Note B', [self.v317])
+        refs = [
+            {'book': 'John', 'chapter': 3, 'verse': 16},
+            {'book': 'John', 'chapter': 3, 'verse': 17},
+        ]
+        with patch(
+            'annotations.serializers.get_default_dbt_client'
+        ) as dbt_client, patch(
+            'annotations.serializers.get_default_esv_client'
+        ) as esv_client:
+            # One query for notes (+ joined tag), one prefetch
+            # for verses — not one per note.
+            with self.assertNumQueries(2):
+                resp = self._post(refs)
+        dbt_client.assert_not_called()
+        esv_client.assert_not_called()
+
+        data = resp.json()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(data['count'], 2)
+        verse = data['results'][0]['verses'][0]
+        self.assertEqual(verse['book'], 'John')
+        self.assertEqual(verse['chapter'], 3)
+        self.assertEqual(verse['text'], '')
+        self.assertEqual(data['results'][0]['headings'], [])
+        tag = data['results'][0]['tag']
+        self.assertEqual(tag['name'], 'LinkedTag')
 
 
 class TestPartialReordering(TestCase):
