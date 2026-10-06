@@ -71,8 +71,7 @@ bible_research/
 ### Prerequisites
 - Python 3.8+
 - PostgreSQL (for production) or SQLite (for development)
-- DBT API key from Bible Brain
-  (https://www.faithcomesbyhearing.com/bible-brain/api-reference)
+- DBT API key (from [Bible Brain][bible-brain])
 
 ### Installation
 
@@ -450,6 +449,81 @@ Grouping rules (see `bible/services/fileset_groups.py`):
 ```
 GET /api/v1/bible/translations/?language_iso=eng
 ```
+
+#### Search the Bible
+```
+GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
+```
+
+**Query Parameters**:
+- `query` (required): Word or phrase to search for
+- `fileset_id` (required): DBT or SWORD fileset ID; use
+  `ENGESV_API` for ESV API search
+- `limit`: Max results per page (default 15)
+- `page`: Result page number (default 1)
+- `sort_by`: Sort field (DBT only)
+- `books`: Comma-separated USFM book IDs (e.g. `JHN,ROM`);
+  honored for DBT and SWORD only — the ESV API has no book
+  filter
+- `group_by`: Set to `book` to return every match grouped by
+  book instead of a paginated list
+
+**Response** (default paginated mode):
+```json
+{
+  "data": {
+    "verses": [
+      {
+        "book_id": "JHN",
+        "chapter": 3,
+        "verse_start": 16,
+        "verse_text": "For God so loved the world..."
+      }
+    ],
+    "meta": {
+      "pagination": {
+        "total": 770,
+        "count": 15,
+        "per_page": 15,
+        "current_page": 1,
+        "total_pages": 52
+      }
+    }
+  }
+}
+```
+
+**Grouped mode** (`group_by=book`) fetches all matches and
+returns them bucketed per book in canonical order. Verses
+within each group are sorted by chapter and verse:
+```json
+{
+  "data": {
+    "groups": [
+      {
+        "book_id": "GEN",
+        "count": 12,
+        "verses": [
+          {
+            "book_id": "GEN",
+            "chapter": 22,
+            "verse_start": 2,
+            "verse_text": "..."
+          }
+        ]
+      }
+    ],
+    "meta": {
+      "total": 770,
+      "truncated": false
+    }
+  }
+}
+```
+`meta.total` is the provider-reported match count (number
+scanned for SWORD). `meta.truncated` is true when a safety cap
+cut results off (5000 results for DBT, 30 pages for ESV;
+SWORD is never truncated).
 
 ### Tags
 
@@ -962,8 +1036,7 @@ message**:
 
 - [Django Documentation](https://docs.djangoproject.com/)
 - [Django REST Framework](https://www.django-rest-framework.org/)
-- DBT API documentation:
-  https://www.faithcomesbyhearing.com/bible-brain/api-reference
+- [DBT API Documentation][bible-brain]
 - [PostgreSQL Documentation](https://www.postgresql.org/docs/)
 
 ---
@@ -978,3 +1051,5 @@ For questions or issues:
 ---
 
 **Last Updated**: 2026-03-01
+
+[bible-brain]: https://www.faithcomesbyhearing.com/bible-brain/api-reference
