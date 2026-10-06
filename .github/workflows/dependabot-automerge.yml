@@ -81,10 +81,15 @@ jobs:
             echo "Timed out waiting for checks"; exit 1
           fi
 
+      # Approval is best-effort: it needs the repo setting
+      # "Allow GitHub Actions to create and approve pull
+      # requests". Merge still runs — it fails visibly only if
+      # branch protection truly requires a review.
       - name: Approve PR
         if: >
           steps.metadata.outputs.update-type !=
           'version-update:semver-major'
+        continue-on-error: true
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
