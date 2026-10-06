@@ -17,7 +17,7 @@ mutagen>=1.47,<2
 Pillow>=10,<12
 
 # Dependencies for DBT Client
-certifi >= 14.05.14
+certifi >= 2026.7.22
 future; python_version<="2.7"
 six >= 1.10
 python_dateutil >= 2.5.3
