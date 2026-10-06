@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 import os
+import sys
 from pathlib import Path
 import textwrap
 
@@ -201,6 +202,17 @@ else:
             opts['sslrootcert'] = str(BASE_DIR / cert_path)
 
     _audio_settings_source = config
+
+# Tests always run on a local throwaway sqlite DB: the configured
+# connection is a read-only user against production that cannot
+# create the test database.
+if 'test' in sys.argv:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 # Audio / Cloud TTS settings are resolved from a single source per
 # environment (os.environ in cloud branches, the parsed config.yaml
