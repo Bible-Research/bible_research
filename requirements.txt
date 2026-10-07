@@ -19,7 +19,7 @@ Pillow>=10,<12
 # Dependencies for DBT Client
 certifi >= 14.05.14
 future; python_version<="2.7"
-six >= 1.10
+six >= 1.17.0
 python_dateutil >= 2.9.0.post0
 setuptools >= 21.0.0
 urllib3 >= 1.15.1
