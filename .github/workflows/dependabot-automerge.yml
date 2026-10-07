@@ -64,12 +64,16 @@ jobs:
                           and .conclusion != "neutral")] | length)
                          > 0 then "failed"
                     else "passed" end')
+            # Statuses arrive newest-first; use only the latest
+            # event per context, else a superseded "pending"
+            # blocks the loop forever.
             st=$(gh api "repos/$REPO/commits/$sha/statuses" \
-              --jq 'if length == 0 then "none"
-                    elif (map(select(.state == "error" or
-                          .state == "failure")) | length) > 0
+              --jq '[group_by(.context) | .[] | .[0]] as $s |
+                    if ($s | length) == 0 then "none"
+                    elif ([$s[] | select(.state == "error" or
+                          .state == "failure")] | length) > 0
                     then "failed"
-                    elif (map(select(.state == "pending"))
+                    elif ([$s[] | select(.state == "pending")]
                           | length) > 0 then "pending"
                     else "passed" end')
             if [ "$res" = "failed" ] || [ "$st" = "failed" ]; then
