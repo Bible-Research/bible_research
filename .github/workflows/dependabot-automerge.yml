@@ -22,6 +22,14 @@ jobs:
       group: >-
         dependabot-automerge-${{ github.event.pull_request.number }}
       cancel-in-progress: true
+    env:
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      REPO: ${{ github.repository }}
+      # Optional: a PAT stored as AUTOMERGE_TOKEN lets branch
+      # updates pushed by this job re-trigger CI (a GITHUB_TOKEN
+      # push cannot). Without it, Dependabot's own rebases drive
+      # the retry loop.
+      GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
@@ -29,15 +37,12 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Skip major version bumps; they need human review.
+      # Major bumps stay manual (a human merges them). For
+      # requirement-range PRs update-type is null; CI gates those.
       - name: Wait for checks to pass
         if: >
           steps.metadata.outputs.update-type !=
           'version-update:semver-major'
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
         run: |
           # Poll check runs directly: this job's own "automerge"
           # check appears on the PR, so `gh pr checks --watch`
@@ -59,12 +64,16 @@ jobs:
                           and .conclusion != "neutral")] | length)
                          > 0 then "failed"
                     else "passed" end')
+            # Statuses arrive newest-first; use only the latest
+            # event per context, else a superseded "pending"
+            # blocks the loop forever.
             st=$(gh api "repos/$REPO/commits/$sha/statuses" \
-              --jq 'if length == 0 then "none"
-                    elif (map(select(.state == "error" or
-                          .state == "failure")) | length) > 0
+              --jq '[group_by(.context) | .[] | .[0]] as $s |
+                    if ($s | length) == 0 then "none"
+                    elif ([$s[] | select(.state == "error" or
+                          .state == "failure")] | length) > 0
                     then "failed"
-                    elif (map(select(.state == "pending"))
+                    elif ([$s[] | select(.state == "pending")]
                           | length) > 0 then "pending"
                     else "passed" end')
             if [ "$res" = "failed" ] || [ "$st" = "failed" ]; then
@@ -81,37 +90,23 @@ jobs:
             echo "Timed out waiting for checks"; exit 1
           fi
 
-      # Approval is best-effort: it needs the repo setting
-      # "Allow GitHub Actions to create and approve pull
-      # requests". Merge still runs — it fails visibly only if
-      # branch protection truly requires a review.
-      - name: Approve PR
-        if: >
-          steps.metadata.outputs.update-type !=
-          'version-update:semver-major'
-        continue-on-error: true
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr review --approve "$PR_URL"
-
       - name: Merge PR
         if: >
           steps.metadata.outputs.update-type !=
           'version-update:semver-major'
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          out=$(gh pr merge "$PR_URL" --squash 2>&1) || {
+          if out=$(gh pr merge "$PR_URL" --squash 2>&1); then
             echo "$out"
-            if echo "$out" | grep -q "not up to date"; then
-              # Protection requires up-to-date branches: update
-              # from base; the synchronize event re-runs this
-              # job, which then merges.
-              gh pr update-branch "$PR_URL"
-              exit 0
-            fi
-            exit 1
-          }
+            exit 0
+          fi
           echo "$out"
+          status=$(gh pr view "$PR_URL" --json mergeStateStatus \
+            -q .mergeStateStatus)
+          if [ "$status" = "BEHIND" ]; then
+            # Protection requires an up-to-date branch. Update it;
+            # the push re-triggers this job (with AUTOMERGE_TOKEN)
+            # or Dependabot's own rebase does.
+            gh pr update-branch "$PR_URL" || true
+            exit 0
+          fi
+          exit 1
