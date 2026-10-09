@@ -95,15 +95,17 @@ def normalize_apibible_verse(item):
 
 
 def _parse_apibible_verse_ref(verse_id):
-    """Parse ``JHN.3.16`` into ``(book_id, chapter, verse_start)``."""
+    """Parse ``JHN.3.16`` into ``(book_id, chapter, verse_start)``.
+
+    Ranges keep the first verse and come in two shapes:
+    ``JHN.3.16-17`` and the ``orgId`` form
+    ``JHN.3.16-JHN.3.17`` — strip the range tail before
+    splitting on dots so the second parses too.
+    """
     try:
-        book_id, chapter_str, verse_str = verse_id.split('.')
-        return (
-            book_id,
-            int(chapter_str),
-            # Ranges like "16-17" keep the first verse.
-            int(verse_str.split('-')[0]),
-        )
+        head = verse_id.split('-', 1)[0]
+        book_id, chapter_str, verse_str = head.split('.')
+        return book_id, int(chapter_str), int(verse_str)
     except (ValueError, AttributeError):
         return None, None, None
 

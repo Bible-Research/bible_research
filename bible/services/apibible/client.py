@@ -14,16 +14,22 @@ logger = logging.getLogger(__name__)
 
 APIBIBLE_BASE_URL = "https://api.scripture.api.bible/v1"
 
-# Paragraph styles that mark a section heading in API.Bible JSON
-# content (s*/ms* = section headings, mr = parallel reference,
-# d = descriptive title, sp = speaker).
+# Paragraph styles that mark a non-verse heading in API.Bible
+# JSON content: s*/ms* = section headings, mr/r = parallel
+# references, d = descriptive title, sp = speaker,
+# qa = acrostic heading, cl = closure, lit = liturgical note.
+# Keeping these out of verse text matters more than where they
+# surface, so unknown-but-heading-styled paragraphs become
+# ``headings`` entries instead of leaking into verse text.
 _HEADING_STYLES = frozenset({
     "s", "s1", "s2", "s3", "s4",
     "ms", "ms1", "ms2", "mr", "d", "sp",
+    "r", "qa", "cl", "lit",
 })
 
-# Trailing numeric component of a verse id like "JHN.3.16".
-_VERSE_ID_RE = re.compile(r"\.(\d+)$")
+# Trailing numeric component of a verse id like "JHN.3.16";
+# ranged ids ("JHN.3.16-17") resolve to their first verse.
+_VERSE_ID_RE = re.compile(r"\.(\d+)(?:-\d+)?$")
 
 
 def _normalise(text: str) -> str:
@@ -109,12 +115,13 @@ class ApiBibleClient:
     def get_chapter_audio(
         self, audio_bible_id: str, book_id: str, chapter: int
     ) -> Dict[str, Any]:
-        """Return ``{audio_url, timecodes}`` for one chapter.
+        """Return ``{audio_url, timecodes, fums}`` for a chapter.
 
         ``audio_url`` is API.Bible's presigned ``resourceUrl``
         (it expires — callers should not persist it long-term);
         ``timecodes`` is the optional verse→timestamp list used
-        by the timestamps endpoint.
+        by the timestamps endpoint; ``fums`` is the raw response
+        ``meta`` block for FUMS reporting.
 
         Raises:
             PassageNotFoundError: when no audio resource exists
@@ -128,7 +135,8 @@ class ApiBibleClient:
             timeout=10,
         )
         r.raise_for_status()
-        data = (r.json() or {}).get("data") or {}
+        payload = r.json() or {}
+        data = payload.get("data") or {}
         url = data.get("resourceUrl")
         if not url:
             raise PassageNotFoundError(
@@ -138,6 +146,7 @@ class ApiBibleClient:
         return {
             "audio_url": url,
             "timecodes": data.get("timecodes") or [],
+            "fums": payload.get("meta") or {},
         }
 
     def get_chapter_audio_url(
@@ -217,13 +226,18 @@ def _verse_marker(item: Dict[str, Any]) -> "Optional[tuple]":
         or item.get("sid")
     )
     if ref is not None:
-        match = _VERSE_ID_RE.search(str(ref))
+        # Range tails take two shapes — "JHN.3.16-17" and
+        # "JHN.3.16-JHN.3.17" — so drop everything after the
+        # first "-" before matching the trailing verse number.
+        head = str(ref).split("-", 1)[0]
+        match = _VERSE_ID_RE.search(head)
         if match:
             return ("start", int(match.group(1)))
         return None
     num = attrs.get("number") or item.get("number")
     try:
-        return ("start", int(num))
+        # "number" can carry a span too ("16-17").
+        return ("start", int(str(num).split("-")[0]))
     except (TypeError, ValueError):
         return None
 
@@ -271,8 +285,12 @@ def _parse_chapter_content(content: Any) -> Dict[str, Any]:
     verses: List[Dict[str, Any]] = []
     headings: List[Dict[str, Any]] = []
     pending_headings: List[str] = []
+    # Text seen before the first verse marker. Some chapters emit
+    # no marker for verse 1, so this preamble is real verse text.
+    pre_buf: List[str] = []
     buf: List[str] = []
     current_verse: "Optional[int]" = None
+    seen_first_marker = False
 
     def flush_verse() -> None:
         nonlocal current_verse, buf
@@ -296,8 +314,33 @@ def _parse_chapter_content(content: Any) -> Dict[str, Any]:
                 })
             pending_headings = []
 
+    def claim_preamble(first: int) -> int:
+        """Attribute pre-first-marker text to implicit verse 1.
+
+        Some chapters emit no verse-1 marker; when the first
+        discovered marker is >1 any collected preamble belongs to
+        verse 1. Returns the verse number pending headings
+        attach to (1 when a preamble was claimed).
+        """
+        if first <= 1:
+            return first
+        text = _normalise(" ".join(pre_buf))
+        if not text:
+            return first
+        logger.warning(
+            "API.Bible chapter content has no verse-1 marker; "
+            "attributing pre-marker text to verse 1 "
+            "(first marker: verse %s)",
+            first,
+        )
+        verses.append({
+            "verse_start": 1,
+            "verse_text": text,
+        })
+        return 1
+
     def walk(node: Any) -> None:
-        nonlocal current_verse
+        nonlocal current_verse, seen_first_marker
         items = node if isinstance(node, list) else [node]
         for item in items:
             if not isinstance(item, dict):
@@ -306,7 +349,11 @@ def _parse_chapter_content(content: Any) -> Dict[str, Any]:
             if marker is not None:
                 if marker[0] == "start":
                     flush_verse()
-                    flush_headings(marker[1])
+                    before = marker[1]
+                    if not seen_first_marker:
+                        seen_first_marker = True
+                        before = claim_preamble(marker[1])
+                    flush_headings(before)
                     current_verse = marker[1]
                     # Some payloads inline the verse text on the
                     # marker node itself.
@@ -317,6 +364,15 @@ def _parse_chapter_content(content: Any) -> Dict[str, Any]:
                     flush_verse()
                     current_verse = None
                 continue
+            if (
+                item.get("type") == "verse"
+                or item.get("name") == "verse"
+            ):
+                # A verse-shaped node whose id/number failed to
+                # parse is skipped wholesale — descending into it
+                # would leak its label and children into the
+                # previous verse's text.
+                continue
             if _is_heading(item):
                 text = _node_text(item)
                 if text:
@@ -326,6 +382,8 @@ def _parse_chapter_content(content: Any) -> Dict[str, Any]:
                 text = item.get("text")
                 if current_verse is not None and text:
                     buf.append(text)
+                elif not seen_first_marker and text:
+                    pre_buf.append(text)
                 continue
             # Generic container (para, chapter, ...) — descend.
             for key in ("items", "content"):

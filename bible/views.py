@@ -56,21 +56,36 @@ def _apibible_timecode(item):
     Timecode entries carry a ``verseId`` like ``JHN.3.16`` (some
     payloads expose ``verse_start``/``verse``/``verse_id``
     directly); the trailing dotted segment is the verse number.
+    API.Bible serializes numbers as strings, so both fields are
+    coerced to real ``int``/``float`` values.
     """
     verse = (
         item.get('verse_start')
         or item.get('verse')
         or item.get('verse_id')
     )
+    if verse is not None:
+        try:
+            verse = int(verse)
+        except (TypeError, ValueError):
+            verse = None
     if verse is None:
         verse_id = item.get('verseId') or ''
         try:
-            verse = int(str(verse_id).split('.')[-1])
+            verse = int(
+                str(verse_id).split('.')[-1].split('-')[0]
+            )
         except ValueError:
             verse = None
+    timestamp = item.get('timestamp')
+    if timestamp is not None:
+        try:
+            timestamp = float(timestamp)
+        except (TypeError, ValueError):
+            timestamp = None
     return {
         'verse_start': verse,
-        'timestamp': item.get('timestamp'),
+        'timestamp': timestamp,
     }
 
 
@@ -269,6 +284,19 @@ class AudioTimestampView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # A non-numeric chapter is a client error — reject with
+        # 400 instead of letting ValueError surface as a 502
+        # provider_error downstream.
+        try:
+            chapter_num = int(chapter)
+        except (TypeError, ValueError):
+            chapter_num = 0
+        if chapter_num < 1:
+            return Response(
+                {"error": "chapter must be a positive integer."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         try:
             # Convert book name to DBT book ID
             # (e.g. "John" -> "JHN")
@@ -284,7 +312,7 @@ class AudioTimestampView(APIView):
                 voice_name = get_tts_config(canon)["voice_name"]
                 try:
                     payload = gcs.read_timestamps_json(
-                        canon, book_id, int(chapter), voice_name,
+                        canon, book_id, chapter_num, voice_name,
                     )
                 except gcs_exceptions.NotFound:
                     return Response(
@@ -314,7 +342,7 @@ class AudioTimestampView(APIView):
                     .get_chapter_audio(
                         meta["audio_bible_id"],
                         book_id,
-                        int(chapter),
+                        chapter_num,
                     )
                 )
                 timecodes = audio.get("timecodes") or []
@@ -337,7 +365,7 @@ class AudioTimestampView(APIView):
 
             dbt_client = get_default_dbt_client()
             result = dbt_client.get_timestamps(
-                fileset_id, book_id, chapter
+                fileset_id, book_id, chapter_num
             )
             timestamps = [
                 {
@@ -570,6 +598,19 @@ class BibleSearchView(APIView):
             except (TypeError, ValueError):
                 return Response(
                     {"error": "page must be an integer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Non-positive pagination params are client errors —
+            # 400 instead of sending e.g. a negative ``offset``
+            # to API.Bible.
+            if limit < 1 or page < 1:
+                return Response(
+                    {
+                        "error": (
+                            "limit and page must be "
+                            "positive integers."
+                        )
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 

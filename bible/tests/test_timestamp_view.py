@@ -48,7 +48,7 @@ def test_get_timestamps_success(
     assert response.data['data'][0]['verse_start'] == 1
     mock_get_dbt_book_id.assert_called_once_with('John')
     mock_dbt_instance.get_timestamps.assert_called_once_with(
-        'ENGESVN2DA', 'JHN', '1'
+        'ENGESVN2DA', 'JHN', 1
     )
 
 

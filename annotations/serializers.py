@@ -4,6 +4,13 @@ from django.contrib.auth import get_user_model
 from django.db.models import Q
 from rest_framework import serializers
 from bible.models import Verse
+from bible.services.apibible.client import (
+    get_default_apibible_client,
+)
+from bible.services.apibible.registry import (
+    get_apibible_meta,
+    is_apibible_fileset,
+)
 from bible.services.dbt.client import get_default_dbt_client
 from bible.services.esv.client import get_default_esv_client
 from bible.services.esv.registry import is_esv_fileset
@@ -297,6 +304,55 @@ class NoteSerializer(serializers.ModelSerializer):
                     for h in parsed.get('headings', [])
                     if h.get('before_verse') in verse_numbers
                 ]
+            elif is_apibible_fileset(fileset_id):
+                # API.Bible filesets (e.g. ENGNIV_API) must fetch
+                # from api.scripture.api.bible — falling through
+                # to DBT would silently render ENGESV text
+                # labelled as the requested translation.
+                apibible_meta = get_apibible_meta(fileset_id)
+                parsed = get_default_apibible_client().get_chapter(
+                    apibible_meta['bible_id'], dbt_book_id, chapter
+                )
+                if not parsed.get('verses'):
+                    raise PassageNotFoundError(
+                        f"No verses found for {dbt_book_id} "
+                        f"{chapter} in fileset_id={fileset_id}"
+                    )
+
+                # Extract verses in range — same shape as the
+                # ESV branch's parsed result.
+                for verse in verses:
+                    matching_verse = next(
+                        (
+                            v for v in parsed['verses']
+                            if v['verse_start'] == verse.verse
+                        ),
+                        None
+                    )
+                    text = (
+                        matching_verse['verse_text']
+                        if matching_verse else ''
+                    )
+                    verse_data = {
+                        'book': book_name,
+                        'chapter': chapter,
+                        'verse': verse.verse,
+                        'text': text
+                    }
+                    verses_with_text.append(verse_data)
+
+                headings = [
+                    {
+                        'before_verse': h.get('before_verse'),
+                        'text': h.get('text', '')
+                    }
+                    for h in parsed.get('headings', [])
+                    if h.get('before_verse') in verse_numbers
+                ]
+                # Relay the FUMS ``meta`` block so the frontend
+                # can report API.Bible text deliveries.
+                if parsed.get('fums'):
+                    representation['meta'] = parsed['fums']
             else:
                 # Use DBT client for other filesets
                 kwargs = {

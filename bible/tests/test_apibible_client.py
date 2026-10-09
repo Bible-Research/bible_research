@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import requests
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APIRequestFactory
 
 from bible.serializers import BiblePassageSerializer
 from bible.services.apibible.client import (
@@ -22,6 +22,11 @@ from bible.services.apibible.registry import (
     get_apibible_translation_listing,
     is_apibible_fileset,
 )
+from bible.services.search_grouping import (
+    _parse_apibible_verse_ref,
+    normalize_apibible_verse,
+)
+from bible.views import AudioTimestampView, BibleSearchView
 from bible.utils.provider_errors import (
     PassageNotFoundError,
     provider_error_fields,
@@ -227,7 +232,33 @@ class ParseChapterContentTests(TestCase):
         self.assertEqual(result["verses"], [])
         self.assertEqual(result["headings"], [])
 
-    def test_text_before_first_verse_is_ignored(self):
+    def test_preamble_text_attributed_to_implicit_verse_1(self):
+        """When the first discovered marker is >1 the chapter
+        has an implicit verse 1 — its leading text must not be
+        silently dropped."""
+        content = [
+            {"type": "text", "text": "In the beginning..."},
+            {"type": "verse", "verseId": "GEN.1.2"},
+            {"type": "text", "text": "The earth was formless."},
+        ]
+        with self.assertLogs(
+            "bible.services.apibible.client", level="WARNING"
+        ):
+            result = _parse_chapter_content(content)
+        verses = result["verses"]
+        self.assertEqual(
+            [v["verse_start"] for v in verses], [1, 2]
+        )
+        self.assertEqual(
+            verses[0]["verse_text"], "In the beginning..."
+        )
+        self.assertEqual(
+            verses[1]["verse_text"], "The earth was formless."
+        )
+
+    def test_text_before_verse_1_marker_is_ignored(self):
+        """When verse 1 has an explicit marker, preceding noise
+        (e.g. a chapter label) is not verse text."""
         content = [
             {"type": "text", "text": "Preamble text"},
             {"type": "verse", "verseId": "GEN.1.1"},
@@ -239,6 +270,118 @@ class ParseChapterContentTests(TestCase):
             result["verses"][0]["verse_text"],
             "In the beginning...",
         )
+
+    def test_ranged_verse_id_marker_starts_new_verse(self):
+        """``verseId="JHN.3.16-17"`` resolves to verse 16 and
+        must not merge into the previous verse."""
+        content = [
+            {"type": "verse", "verseId": "JHN.3.15"},
+            {"type": "text", "text": "fifteen."},
+            {"type": "verse", "verseId": "JHN.3.16-17"},
+            {"type": "text", "text": "sixteen."},
+        ]
+        result = _parse_chapter_content(content)
+        verses = result["verses"]
+        self.assertEqual(
+            [v["verse_start"] for v in verses], [15, 16]
+        )
+        self.assertEqual(verses[0]["verse_text"], "fifteen.")
+        self.assertEqual(verses[1]["verse_text"], "sixteen.")
+
+    def test_dotted_range_verse_id_marker(self):
+        """``sid="JHN.3.16-JHN.3.17"`` (the orgId shape) also
+        resolves to its first verse."""
+        content = [
+            {
+                "name": "verse",
+                "type": "tag",
+                "attrs": {
+                    "number": "15",
+                    "sid": "JHN.3.15",
+                    "style": "v",
+                },
+            },
+            {"type": "text", "text": "fifteen."},
+            {
+                "name": "verse",
+                "type": "tag",
+                "attrs": {
+                    "number": "16",
+                    "sid": "JHN.3.16-JHN.3.17",
+                    "style": "v",
+                },
+            },
+            {"type": "text", "text": "sixteen."},
+        ]
+        result = _parse_chapter_content(content)
+        verses = result["verses"]
+        self.assertEqual(
+            [v["verse_start"] for v in verses], [15, 16]
+        )
+        self.assertEqual(verses[1]["verse_text"], "sixteen.")
+
+    def test_ranged_number_attr_marker(self):
+        """``number="16-17"`` starts verse 16 instead of being
+        treated as an unparseable marker."""
+        content = [
+            {"type": "verse", "verseId": "JHN.3.15"},
+            {"type": "text", "text": "fifteen."},
+            {
+                "name": "verse",
+                "type": "tag",
+                "attrs": {"number": "16-17", "style": "v"},
+            },
+            {"type": "text", "text": "sixteen."},
+        ]
+        result = _parse_chapter_content(content)
+        verses = result["verses"]
+        self.assertEqual(
+            [v["verse_start"] for v in verses], [15, 16]
+        )
+        self.assertEqual(verses[1]["verse_text"], "sixteen.")
+
+    def test_unparseable_verse_marker_does_not_leak(self):
+        """A verse-shaped node whose id fails to parse must not
+        append its label/children to the previous verse."""
+        content = [
+            {"type": "verse", "verseId": "JHN.3.15"},
+            {"type": "text", "text": "fifteen."},
+            {
+                "name": "verse",
+                "type": "tag",
+                "attrs": {"sid": "JHN.three.16"},
+                "items": [{"type": "text", "text": "16"}],
+            },
+        ]
+        result = _parse_chapter_content(content)
+        verses = result["verses"]
+        self.assertEqual(
+            [v["verse_start"] for v in verses], [15]
+        )
+        self.assertEqual(verses[0]["verse_text"], "fifteen.")
+
+    def test_misc_heading_styles_do_not_leak_into_verses(self):
+        """Parallel-ref/acrostic/closure paragraphs (r, qa, cl,
+        lit) are non-verse text, not verse content."""
+        for style in ("r", "qa", "cl", "lit"):
+            content = [
+                {"type": "verse", "verseId": "JHN.3.16"},
+                {"type": "text", "text": "body."},
+                {
+                    "name": "para",
+                    "type": "tag",
+                    "attrs": {"style": style},
+                    "items": [
+                        {"type": "text", "text": "leaky note"}
+                    ],
+                },
+            ]
+            result = _parse_chapter_content(content)
+            self.assertEqual(
+                result["verses"][0]["verse_text"],
+                "body.",
+                msg=f"style {style!r} leaked into verse text",
+            )
 
 
 # ============================================================
@@ -330,7 +473,8 @@ class ApiBibleClientSessionTests(TestCase):
                 "timecodes": [
                     {"verseId": "JHN.3.1", "timestamp": 0.0},
                 ],
-            }
+            },
+            "meta": _FUMS_META,
         }
         client.session.get = MagicMock(
             return_value=_json_response(payload)
@@ -342,6 +486,8 @@ class ApiBibleClientSessionTests(TestCase):
             audio["audio_url"], "https://cdn.example.com/a.mp3"
         )
         self.assertEqual(len(audio["timecodes"]), 1)
+        # FUMS meta rides along so callers can relay it.
+        self.assertEqual(audio["fums"]["fumsId"], "abc123")
 
     def test_get_chapter_audio_missing_url_raises(self):
         client = ApiBibleClient(api_key="test-key")
@@ -475,9 +621,11 @@ class ApiBibleSerializerRoutingTests(TestCase):
     @patch("bible.serializers.get_default_apibible_client")
     def test_audio_fileset_returns_audio_url(self, mock_get):
         mock_client = MagicMock()
-        mock_client.get_chapter_audio_url.return_value = (
-            "https://cdn.example.com/JHN.3.mp3"
-        )
+        mock_client.get_chapter_audio.return_value = {
+            "audio_url": "https://cdn.example.com/JHN.3.mp3",
+            "timecodes": [],
+            "fums": _FUMS_META,
+        }
         mock_get.return_value = mock_client
 
         data = self._data("ENGNIVC1DA", "audio")
@@ -490,7 +638,10 @@ class ApiBibleSerializerRoutingTests(TestCase):
             result["audio_url"],
             "https://cdn.example.com/JHN.3.mp3",
         )
-        mock_client.get_chapter_audio_url.assert_called_once_with(
+        # Audio responses carry FUMS meta too — it must be
+        # relayed so the frontend can report the delivery.
+        self.assertEqual(result["meta"]["fumsId"], "abc123")
+        mock_client.get_chapter_audio.assert_called_once_with(
             AUDIO_BIBLE_ID, "JHN", 3
         )
 
@@ -548,3 +699,161 @@ class ApiBibleTranslationsEndpointTests(TestCase):
         fileset_ids = [f["id"] for f in niv_entry["filesets"]]
         self.assertIn("ENGNIV_API", fileset_ids)
         self.assertIn("ENGNIVC1DA", fileset_ids)
+
+
+# ============================================================
+# Search-result verse-ref parsing (orgId ranges)
+# ============================================================
+
+class ApiBibleVerseRefParsingTests(TestCase):
+    def test_plain_ref(self):
+        self.assertEqual(
+            _parse_apibible_verse_ref("JHN.3.16"),
+            ("JHN", 3, 16),
+        )
+
+    def test_short_range_ref(self):
+        self.assertEqual(
+            _parse_apibible_verse_ref("JHN.3.16-17"),
+            ("JHN", 3, 16),
+        )
+
+    def test_dotted_range_ref_from_orgid(self):
+        """``orgId`` ranges carry a full tail ref —
+        ``JHN.3.16-JHN.3.17`` keeps the first verse."""
+        self.assertEqual(
+            _parse_apibible_verse_ref("JHN.3.16-JHN.3.17"),
+            ("JHN", 3, 16),
+        )
+
+    def test_garbage_returns_nones(self):
+        self.assertEqual(
+            _parse_apibible_verse_ref("garbage"),
+            (None, None, None),
+        )
+        self.assertEqual(
+            _parse_apibible_verse_ref(None),
+            (None, None, None),
+        )
+
+    def test_normalize_apibible_verse_handles_orgid_range(self):
+        item = {
+            "id": "JHN.3.16-JHN.3.17",
+            "orgId": "JHN.3.16-JHN.3.17",
+            "bookId": "JHN",
+            "chapterId": "3",
+            "reference": "John 3:16-17",
+            "text": "For God so loved...",
+        }
+        verse = normalize_apibible_verse(item)
+        self.assertEqual(verse["book_id"], "JHN")
+        self.assertEqual(verse["chapter"], 3)
+        self.assertEqual(verse["verse_start"], 16)
+
+
+# ============================================================
+# Timestamps endpoint — string coercion, bad chapter
+# ============================================================
+
+class ApiBibleTimestampViewTests(TestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+
+    @patch("bible.views.get_default_apibible_client")
+    def test_string_timecode_fields_are_coerced(self, mock_get):
+        """API.Bible returns verse/timestamp as strings — the
+        endpoint must emit real int/float values."""
+        client = mock_get.return_value
+        client.get_chapter_audio.return_value = {
+            "audio_url": "https://cdn.example.com/a.mp3",
+            "timecodes": [
+                {"verseId": "JHN.3.1", "timestamp": "0.0"},
+                {"verse": "2", "timestamp": "12.5"},
+                {"verse_start": "3", "timestamp": "20"},
+            ],
+        }
+
+        request = self.factory.get("/fake-url/", {
+            "fileset_id": "ENGNIVC1DA",
+            "book": "John",
+            "chapter": "3",
+        })
+        resp = AudioTimestampView.as_view()(request)
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data["data"]
+        self.assertEqual(data[0]["verse_start"], 1)
+        self.assertIsInstance(data[0]["timestamp"], float)
+        self.assertEqual(data[0]["timestamp"], 0.0)
+        self.assertEqual(data[1]["verse_start"], 2)
+        self.assertEqual(data[1]["timestamp"], 12.5)
+        self.assertEqual(data[2]["verse_start"], 3)
+        self.assertEqual(data[2]["timestamp"], 20.0)
+        client.get_chapter_audio.assert_called_once_with(
+            AUDIO_BIBLE_ID, "JHN", 3
+        )
+
+    @patch("bible.views.get_default_apibible_client")
+    def test_non_numeric_chapter_is_400(self, mock_get):
+        """chapter=abc is a client error — 400, not a 502
+        provider_error from a ValueError downstream."""
+        request = self.factory.get("/fake-url/", {
+            "fileset_id": "ENGNIVC1DA",
+            "book": "John",
+            "chapter": "abc",
+        })
+        resp = AudioTimestampView.as_view()(request)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("chapter", resp.data["error"])
+        mock_get.assert_not_called()
+
+    @patch("bible.views.get_default_apibible_client")
+    def test_non_positive_chapter_is_400(self, mock_get):
+        request = self.factory.get("/fake-url/", {
+            "fileset_id": "ENGNIVC1DA",
+            "book": "John",
+            "chapter": "0",
+        })
+        resp = AudioTimestampView.as_view()(request)
+
+        self.assertEqual(resp.status_code, 400)
+        mock_get.assert_not_called()
+
+
+# ============================================================
+# Search view — invalid pagination must not reach the provider
+# ============================================================
+
+class ApiBibleSearchViewTests(TestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+
+    @patch("bible.views.get_default_apibible_client")
+    def test_non_positive_page_is_400_no_upstream_call(
+        self, mock_get
+    ):
+        """page=-1 would send a negative offset upstream —
+        reject with 400 instead."""
+        request = self.factory.get("/fake-url/", {
+            "query": "love",
+            "fileset_id": "ENGNIV_API",
+            "page": "-1",
+        })
+        resp = BibleSearchView.as_view()(request)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("page", resp.data["error"])
+        mock_get.assert_not_called()
+
+    @patch("bible.views.get_default_apibible_client")
+    def test_non_positive_limit_is_400(self, mock_get):
+        request = self.factory.get("/fake-url/", {
+            "query": "love",
+            "fileset_id": "ENGNIV_API",
+            "limit": "0",
+        })
+        resp = BibleSearchView.as_view()(request)
+
+        self.assertEqual(resp.status_code, 400)
+        mock_get.assert_not_called()

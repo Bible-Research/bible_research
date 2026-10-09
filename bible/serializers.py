@@ -168,16 +168,23 @@ class BiblePassageSerializer(serializers.Serializer):
                 meta = get_apibible_meta(fileset_id)
                 client = get_default_apibible_client()
                 if response_format == 'audio':
-                    audio_url = client.get_chapter_audio_url(
+                    audio = client.get_chapter_audio(
                         meta['audio_bible_id'], book_id, chapter
                     )
-                    return {
+                    result = {
                         'book': book_id,
                         'book_name': book_name,
                         'chapter': chapter,
                         'format': 'audio',
-                        'audio_url': audio_url,
+                        'audio_url': audio['audio_url'],
                     }
+                    # Audio responses carry the same FUMS ``meta``
+                    # block as text — relay it so the frontend
+                    # can report the delivery.
+                    fums = audio.get('fums')
+                    if fums:
+                        result['meta'] = fums
+                    return result
                 parsed = client.get_chapter(
                     meta['bible_id'], book_id, chapter
                 )
