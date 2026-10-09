@@ -48,7 +48,7 @@ def test_get_timestamps_success(
     assert response.data['data'][0]['verse_start'] == 1
     mock_get_dbt_book_id.assert_called_once_with('John')
     mock_dbt_instance.get_timestamps.assert_called_once_with(
-        'ENGESVN2DA', 'JHN', '1'
+        'ENGESVN2DA', 'JHN', 1
     )
 
 
@@ -141,6 +141,40 @@ def test_get_timestamps_error_does_not_leak_credentials(
     assert response.status_code == status.HTTP_502_BAD_GATEWAY
     assert response.data['error_code'] == 'provider_error'
     assert 'SECRET' not in response.data['error']
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_apibible_client')
+@patch('bible.views.get_dbt_book_id')
+def test_apibible_ranged_timecode_verse_ids(
+    mock_get_dbt_book_id, mock_get_client, factory
+):
+    """Both ranged ``verseId`` shapes — ``JHN.3.16-17`` and the
+    orgId form ``JHN.3.16-JHN.3.17`` — must resolve to the
+    range's first verse, not its tail."""
+    mock_get_dbt_book_id.return_value = 'JHN'
+    mock_client = mock_get_client.return_value
+    mock_client.get_chapter_audio.return_value = {
+        "timecodes": [
+            {"verseId": "JHN.3.16-17", "timestamp": "5.0"},
+            {
+                "verseId": "JHN.3.16-JHN.3.17",
+                "timestamp": "5.0",
+            },
+        ]
+    }
+
+    request = factory.get('/fake-url/', {
+        'fileset_id': 'ENGNIVC1DA',
+        'book': 'John',
+        'chapter': '3'
+    })
+    response = AudioTimestampView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert [
+        tc['verse_start'] for tc in response.data['data']
+    ] == [16, 16]
 
 
 @pytest.mark.django_db

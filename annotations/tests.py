@@ -13,6 +13,7 @@ from annotations.serializers import (
 )
 from annotations.models import Comment, Note, Tag
 from bible.models import Verse
+from bible.services.apibible.registry import APIBIBLE_TRANSLATIONS
 
 
 class FakeProviderError(Exception):
@@ -1106,6 +1107,81 @@ class NoteProviderErrorTest(TestCase):
 
         data = NoteSerializer(
             self.note, context={'fileset_id': 'ENGESV_API'}
+        ).data
+
+        self.assertEqual(data['error_code'], 'not_found')
+        self.assertEqual(data['verses'][0]['text'], '')
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('annotations.serializers.get_default_apibible_client')
+    def test_note_fetches_apibible_fileset_via_apibible_client(
+        self, mock_get_apibible, mock_get_dbt
+    ):
+        """ENGNIV_API notes must come from API.Bible — falling
+        through to DBT silently rendered ESV text labelled NIV."""
+        mock_client = MagicMock()
+        mock_client.get_chapter.return_value = {
+            'verses': [
+                {'verse_start': 1, 'verse_text': 'NIV text'}
+            ],
+            'headings': [
+                {'before_verse': 1, 'text': 'Prologue'}
+            ],
+            'fums': {'fumsId': 'abc123'},
+        }
+        mock_get_apibible.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGNIV_API'}
+        ).data
+
+        self.assertEqual(data['verses'][0]['text'], 'NIV text')
+        self.assertEqual(data['headings'][0]['text'], 'Prologue')
+        # FUMS meta is relayed for frontend reporting.
+        self.assertEqual(data['meta']['fumsId'], 'abc123')
+        mock_client.get_chapter.assert_called_once_with(
+            APIBIBLE_TRANSLATIONS['ENGNIV_API']['bible_id'],
+            'JHN',
+            1,
+        )
+        mock_get_dbt.assert_not_called()
+
+    @patch('annotations.serializers.get_default_apibible_client')
+    def test_note_includes_error_fields_on_apibible_failure(
+        self, mock_get
+    ):
+        """API.Bible failures degrade like other providers:
+        verse refs kept, text empty, error fields set."""
+        mock_client = MagicMock()
+        mock_client.get_chapter.side_effect = FakeProviderError(
+            503
+        )
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGNIV_API'}
+        ).data
+
+        self.assertEqual(data['error_code'], 'provider_error')
+        self.assertIn('503', data['error'])
+        self.assertEqual(data['verses'][0]['text'], '')
+
+    @patch('annotations.serializers.get_default_apibible_client')
+    def test_note_includes_not_found_on_empty_apibible_verses(
+        self, mock_get
+    ):
+        """A successful-but-empty API.Bible body is missing
+        content, not a silent empty verse list."""
+        mock_client = MagicMock()
+        mock_client.get_chapter.return_value = {
+            'verses': [],
+            'headings': [],
+            'fums': {},
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGNIV_API'}
         ).data
 
         self.assertEqual(data['error_code'], 'not_found')

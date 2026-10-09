@@ -9,6 +9,10 @@ from rest_framework.views import APIView
 
 from bible.utils.bible_books import get_dbt_book_id
 from bible.utils.provider_errors import provider_error_fields
+from bible.services.apibible.registry import (
+    get_apibible_meta,
+    is_apibible_fileset,
+)
 from bible.services.google_tts.registry import get_tts_config
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import (
@@ -17,9 +21,11 @@ from bible.services.sword.registry import (
 )
 from bible.services.esv.registry import is_esv_fileset
 from bible.services.search_grouping import (
+    fetch_apibible_matches,
     fetch_dbt_matches,
     fetch_esv_matches,
     group_verses_by_book,
+    normalize_apibible_verse,
     normalize_dbt_verse,
     parse_esv_results,
     scan_sword_matches,
@@ -27,6 +33,9 @@ from bible.services.search_grouping import (
 from bible.services.storage import gcs
 from .serializers import BiblePassageSerializer
 from .services.translation_service import TranslationService
+from .services.apibible.client import (
+    get_default_apibible_client,
+)
 from .services.dbt.client import get_default_dbt_client
 from .services.esv.client import (
     get_default_esv_client
@@ -38,6 +47,48 @@ PROVIDER_ERROR_STATUSES = {
     'rate_limited': status.HTTP_429_TOO_MANY_REQUESTS,
     'not_found': status.HTTP_404_NOT_FOUND,
 }
+
+
+def _apibible_timecode(item):
+    """Map an API.Bible audio timecode to ``{verse_start,
+    timestamp}``.
+
+    Timecode entries carry a ``verseId`` like ``JHN.3.16`` (some
+    payloads expose ``verse_start``/``verse``/``verse_id``
+    directly); the trailing dotted segment is the verse number.
+    API.Bible serializes numbers as strings, so both fields are
+    coerced to real ``int``/``float`` values.
+    """
+    verse = (
+        item.get('verse_start')
+        or item.get('verse')
+        or item.get('verse_id')
+    )
+    if verse is not None:
+        try:
+            verse = int(verse)
+        except (TypeError, ValueError):
+            verse = None
+    if verse is None:
+        verse_id = item.get('verseId') or ''
+        try:
+            # Strip the range tail first: both "JHN.3.16-17"
+            # and "JHN.3.16-JHN.3.17" must resolve to 16.
+            verse = int(
+                str(verse_id).split('-', 1)[0].split('.')[-1]
+            )
+        except ValueError:
+            verse = None
+    timestamp = item.get('timestamp')
+    if timestamp is not None:
+        try:
+            timestamp = float(timestamp)
+        except (TypeError, ValueError):
+            timestamp = None
+    return {
+        'verse_start': verse,
+        'timestamp': timestamp,
+    }
 
 
 def provider_error_response(exc):
@@ -235,6 +286,19 @@ class AudioTimestampView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # A non-numeric chapter is a client error — reject with
+        # 400 instead of letting ValueError surface as a 502
+        # provider_error downstream.
+        try:
+            chapter_num = int(chapter)
+        except (TypeError, ValueError):
+            chapter_num = 0
+        if chapter_num < 1:
+            return Response(
+                {"error": "chapter must be a positive integer."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         try:
             # Convert book name to DBT book ID
             # (e.g. "John" -> "JHN")
@@ -250,7 +314,7 @@ class AudioTimestampView(APIView):
                 voice_name = get_tts_config(canon)["voice_name"]
                 try:
                     payload = gcs.read_timestamps_json(
-                        canon, book_id, int(chapter), voice_name,
+                        canon, book_id, chapter_num, voice_name,
                     )
                 except gcs_exceptions.NotFound:
                     return Response(
@@ -273,9 +337,37 @@ class AudioTimestampView(APIView):
                     return provider_error_response(exc)
                 return Response({"data": payload.get("data", [])})
 
+            if is_apibible_fileset(fileset_id):
+                meta = get_apibible_meta(fileset_id)
+                audio = (
+                    get_default_apibible_client()
+                    .get_chapter_audio(
+                        meta["audio_bible_id"],
+                        book_id,
+                        chapter_num,
+                    )
+                )
+                timecodes = audio.get("timecodes") or []
+                if not timecodes:
+                    return Response(
+                        {
+                            "error": (
+                                "Timestamps not yet generated for "
+                                "this chapter."
+                            ),
+                        },
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+                return Response({
+                    "data": [
+                        _apibible_timecode(tc)
+                        for tc in timecodes
+                    ]
+                })
+
             dbt_client = get_default_dbt_client()
             result = dbt_client.get_timestamps(
-                fileset_id, book_id, chapter
+                fileset_id, book_id, chapter_num
             )
             timestamps = [
                 {
@@ -309,6 +401,26 @@ class CopyrightView(APIView):
             )
 
         try:
+            if is_apibible_fileset(bible_id):
+                meta = get_apibible_meta(bible_id)
+                bible = (
+                    get_default_apibible_client()
+                    .get_bible(meta['bible_id'])
+                )
+                copyright_text = (
+                    bible.get('copyrightStatement') or ''
+                )
+                return Response({
+                    "data": [{
+                        "id": bible_id,
+                        "type": "text_plain",
+                        "size": "C",
+                        "copyright": copyright_text,
+                        "copyright_date": "",
+                        "copyright_description": copyright_text,
+                    }]
+                })
+
             dbt_client = get_default_dbt_client()
             result = dbt_client.get_copyright(bible_id)
 
@@ -490,9 +602,26 @@ class BibleSearchView(APIView):
                     {"error": "page must be an integer."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            # Non-positive pagination params are client errors —
+            # 400 instead of sending e.g. a negative ``offset``
+            # to API.Bible.
+            if limit < 1 or page < 1:
+                return Response(
+                    {
+                        "error": (
+                            "limit and page must be "
+                            "positive integers."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             if is_esv_fileset(fileset_id):
                 return self._esv_search(query, limit, page)
+            if is_apibible_fileset(fileset_id):
+                return self._apibible_search(
+                    fileset_id, query, limit, page
+                )
             if is_sword_fileset(fileset_id):
                 return self._sword_search(
                     fileset_id, query, limit, page, books
@@ -535,6 +664,39 @@ class BibleSearchView(APIView):
             }
         })
 
+    def _apibible_search(self, fileset_id, query, limit, page):
+        """Search using API.Bible's offset-based search endpoint."""
+        meta = get_apibible_meta(fileset_id)
+        client = get_default_apibible_client()
+        offset = (page - 1) * limit
+        result = client.search(
+            meta['bible_id'], query,
+            offset=offset, limit=limit,
+        )
+        data = result.get('data') or {}
+        verses = [
+            normalize_apibible_verse(v)
+            for v in data.get('verses') or []
+        ]
+        total = data.get('total') or 0
+        total_pages = (
+            (total + limit - 1) // limit if limit else 1
+        )
+        return Response({
+            'data': {
+                'verses': verses,
+                'meta': {
+                    'pagination': {
+                        'total': total,
+                        'count': len(verses),
+                        'per_page': limit,
+                        'current_page': page,
+                        'total_pages': total_pages,
+                    }
+                },
+            }
+        })
+
     def _grouped_search(self, fileset_id, query, books):
         """Return every match grouped by book (``group_by=book``).
 
@@ -546,6 +708,12 @@ class BibleSearchView(APIView):
         if is_esv_fileset(fileset_id):
             verses, total, truncated = fetch_esv_matches(
                 get_default_esv_client(), query
+            )
+        elif is_apibible_fileset(fileset_id):
+            meta = get_apibible_meta(fileset_id)
+            verses, total, truncated = fetch_apibible_matches(
+                get_default_apibible_client(),
+                meta['bible_id'], query,
             )
         elif is_sword_fileset(fileset_id):
             verses = scan_sword_matches(
