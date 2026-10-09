@@ -25,10 +25,8 @@ jobs:
     env:
       PR_URL: ${{ github.event.pull_request.html_url }}
       REPO: ${{ github.repository }}
-      # Optional: a PAT stored as AUTOMERGE_TOKEN lets branch
-      # updates pushed by this job re-trigger CI (a GITHUB_TOKEN
-      # push cannot). Without it, Dependabot's own rebases drive
-      # the retry loop.
+      # Optional: a PAT stored as AUTOMERGE_TOKEN makes gh act as
+      # a user instead of github-actions[bot].
       GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Fetch Dependabot metadata
@@ -103,10 +101,12 @@ jobs:
           status=$(gh pr view "$PR_URL" --json mergeStateStatus \
             -q .mergeStateStatus)
           if [ "$status" = "BEHIND" ]; then
-            # Protection requires an up-to-date branch. Update it;
-            # the push re-triggers this job (with AUTOMERGE_TOKEN)
-            # or Dependabot's own rebase does.
-            gh pr update-branch "$PR_URL" || true
+            # A workflow push would not trigger CI and would make
+            # Dependabot disown the PR ("edited by someone
+            # else"). Leave the branch alone: Dependabot rebases
+            # conflicting PRs itself, which re-runs this job.
+            echo "Branch is behind main; waiting for a \
+Dependabot rebase."
             exit 0
           fi
           exit 1
