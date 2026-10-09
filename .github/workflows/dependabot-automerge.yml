@@ -105,8 +105,7 @@ jobs:
             # Dependabot disown the PR ("edited by someone
             # else"). Leave the branch alone: Dependabot rebases
             # conflicting PRs itself, which re-runs this job.
-            echo "Branch is behind main; waiting for a \
-Dependabot rebase."
+            echo "Branch behind main; awaiting Dependabot rebase."
             exit 0
           fi
           exit 1
