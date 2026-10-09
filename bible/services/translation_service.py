@@ -2,6 +2,7 @@
 
 import logging
 
+from .apibible.registry import get_apibible_translation_listing
 from .dbt.client import get_default_dbt_client
 from .esv.registry import get_esv_translation_listing
 from .sword.client import get_default_sword_client
@@ -67,7 +68,18 @@ class TranslationService:
                 e for e in esv_entries
                 if e['iso'].lower() == needle
             ]
-        return processed + sword_entries + esv_entries
+
+        apibible_entries = get_apibible_translation_listing()
+        if language_iso:
+            needle = language_iso.lower()
+            apibible_entries = [
+                e for e in apibible_entries
+                if e['iso'].lower() == needle
+            ]
+        return (
+            processed + sword_entries + esv_entries
+            + apibible_entries
+        )
 
     @classmethod
     def _process_translations(cls, translations):

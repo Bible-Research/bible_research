@@ -31,11 +31,19 @@ provider. Routing happens in `bible/services/translation_service.py`:
    → ESV API via `bible/services/esv/client.py`.
 2. SWORD filesets (`bible/services/sword/registry.py`) → local SWORD
    modules via pysword (`bible/services/sword/client.py`).
-3. Everything else → DBT API v4 via `bible/services/dbt/client.py`.
+3. API.Bible filesets (`bible/services/apibible/registry.py`) →
+   api.scripture.api.bible via `bible/services/apibible/client.py`.
+4. Everything else → DBT API v4 via `bible/services/dbt/client.py`.
 
 Known fileset ids: `ENGKJV` (KJV), `ENGESV_API` (ESV), `LVSGLU8`
-(Latvian Glück text), `LVSGLU8C1DA` (Latvian Glück generated audio).
+(Latvian Glück text), `LVSGLU8C1DA` (Latvian Glück generated audio),
+`ENGNIV_API` (API.Bible NIV text), `ENGNIVC1DA` (NIV audio).
 `*DA`-suffixed ids are audio filesets.
+
+API.Bible text responses carry a `meta` block with FUMS fields the
+frontend must report (license requirement). The API.Bible client
+needs `API_BIBLE_KEY` (settings/`config.yaml`); the registry and
+translations listing work without it.
 
 Book-name handling lives in `bible/utils/bible_books.py`
 (`get_dbt_book_id`, `get_book_name_from_id`, `get_testament`). There

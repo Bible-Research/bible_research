@@ -369,8 +369,18 @@ GET /api/v1/bible/?passage=John+3&response_format=audio&
 - `response_format`: "text" or "audio" (default: "text")
 - `fileset_id`: DBT fileset ID for the specific translation and
   format (default: "ENGESV")
-  - For text: Use translation codes like "ENGESV", "ENGKJV"
-  - For audio: Use audio fileset codes like "ENGESVN2DA"
+  - For text: Use translation codes like "ENGESV", "ENGKJV",
+    "ENGESV_API" (ESV API), "LVSGLU8" (SWORD), "ENGNIV_API"
+    (API.Bible NIV)
+  - For audio: Use audio fileset codes like "ENGESVN2DA",
+    "LVSGLU8C1DA", "ENGNIVC1DA"
+
+API.Bible text responses additionally carry a `meta` object with
+the upstream FUMS fields (`fums`, `fumsId`, `fumsJsInclude`,
+`fumsNoScript`) — clients must report them per API.Bible's
+license terms. Audio responses return API.Bible's presigned
+`resourceUrl`, which expires (typically within minutes); treat
+it like any other short-lived signed URL.
 
 #### List Available Translations
 ```
@@ -417,7 +427,9 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
 **Query Parameters**:
 - `query` (required): Word or phrase to search for
 - `fileset_id` (required): DBT or SWORD fileset ID; use
-  `ENGESV_API` for ESV API search
+  `ENGESV_API` for ESV API search or `ENGNIV_API` for API.Bible
+  (NIV) search — `page`/`limit` are mapped onto API.Bible's
+  `offset`-based pagination
 - `limit`: Max results per page (default 15)
 - `page`: Result page number (default 1)
 - `sort_by`: Sort field (DBT only)
@@ -763,6 +775,38 @@ verses = client.get_verses(
 - `ENGESVN1DA` - ESV Audio
 - `ENGKJV` - King James Version
 - And many more...
+
+### API.Bible (NIV)
+
+**Base URL**: `https://api.scripture.api.bible/v1`
+
+**Authentication**: `api-key` header (never a query param);
+read from `settings.API_BIBLE_KEY` (`config.yaml` locally,
+Secret Manager / env in prod). `ApiBibleClient` raises
+`ValueError` at construction when the key is unset — the NIV
+filesets degrade to `provider_error` responses until a key is
+configured.
+
+**Endpoints Used**:
+- `GET /bibles/{bible_id}/chapters/{BOOK}.{n}` - chapter text
+  (`content-type=json`, verse numbers/spans + titles)
+- `GET /bibles/{bible_id}/search` - full-text search
+  (`offset`-based pagination)
+- `GET /bibles/{bible_id}` - bible object (`copyrightStatement`)
+- `GET /audio-bibles/{audio_bible_id}/chapters/{BOOK}.{n}` -
+  presigned `resourceUrl` + optional verse `timecodes`
+
+**Client Implementation**: `bible/services/apibible/client.py`
+(registry: `bible/services/apibible/registry.py`)
+
+**Fileset IDs** (synthetic, registered server-side):
+- `ENGNIV_API` - New International Version (text)
+- `ENGNIVC1DA` - NIV audio ("The Listener's Bible");
+  canonicalizes to `ENGNIV_API`
+
+Passage responses pass the upstream `meta` (FUMS) block
+through so the frontend can report chapter views per
+API.Bible's license terms.
 
 ---
 

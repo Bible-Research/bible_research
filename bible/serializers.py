@@ -2,6 +2,13 @@ import logging
 from django.conf import settings
 from rest_framework import serializers
 
+from bible.services.apibible.client import (
+    get_default_apibible_client,
+)
+from bible.services.apibible.registry import (
+    get_apibible_meta,
+    is_apibible_fileset,
+)
 from bible.services.dbt.client import get_default_dbt_client
 from bible.services.esv.client import get_default_esv_client
 from bible.services.esv.registry import is_esv_fileset
@@ -156,6 +163,45 @@ class BiblePassageSerializer(serializers.Serializer):
                         for v in verses
                     ],
                 }
+
+            if is_apibible_fileset(fileset_id):
+                meta = get_apibible_meta(fileset_id)
+                client = get_default_apibible_client()
+                if response_format == 'audio':
+                    audio_url = client.get_chapter_audio_url(
+                        meta['audio_bible_id'], book_id, chapter
+                    )
+                    return {
+                        'book': book_id,
+                        'book_name': book_name,
+                        'chapter': chapter,
+                        'format': 'audio',
+                        'audio_url': audio_url,
+                    }
+                parsed = client.get_chapter(
+                    meta['bible_id'], book_id, chapter
+                )
+                result = {
+                    'book': book_id,
+                    'book_name': book_name,
+                    'chapter': chapter,
+                    'format': 'text',
+                    'verses': [
+                        {
+                            'verse': v['verse_start'],
+                            'text': v['verse_text'],
+                        }
+                        for v in parsed['verses']
+                    ],
+                    'headings': parsed['headings'],
+                }
+                # API.Bible's FUMS tracking token must reach the
+                # client — required by their license terms for web
+                # apps. Pass the response ``meta`` block through.
+                fums = parsed.get('fums')
+                if fums:
+                    result['meta'] = fums
+                return result
 
             dbt_client = get_default_dbt_client()
             passage_data = dbt_client.get_verses(

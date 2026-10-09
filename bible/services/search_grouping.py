@@ -73,6 +73,41 @@ def normalize_dbt_verse(item):
     }
 
 
+def normalize_apibible_verse(item):
+    """Normalize one API.Bible ``/search`` verse item.
+
+    API.Bible verses carry ``id`` (first verse of the match,
+    e.g. ``JHN.3.16``), ``orgId`` (the match range, e.g.
+    ``JHN.3.16-17``), ``bookId``, ``chapterId``, ``reference``
+    and ``text``. ``id`` is preferred because it points at the
+    first verse; items that fail to parse keep ``None`` fields
+    and are dropped by ``group_verses_by_book``.
+    """
+    book_id, chapter, verse_start = _parse_apibible_verse_ref(
+        item.get('id') or item.get('orgId') or ''
+    )
+    return {
+        'book_id': book_id or item.get('bookId'),
+        'chapter': chapter,
+        'verse_start': verse_start,
+        'verse_text': item.get('text') or '',
+    }
+
+
+def _parse_apibible_verse_ref(verse_id):
+    """Parse ``JHN.3.16`` into ``(book_id, chapter, verse_start)``."""
+    try:
+        book_id, chapter_str, verse_str = verse_id.split('.')
+        return (
+            book_id,
+            int(chapter_str),
+            # Ranges like "16-17" keep the first verse.
+            int(verse_str.split('-')[0]),
+        )
+    except (ValueError, AttributeError):
+        return None, None, None
+
+
 def _book_order(book_id):
     """Canonical sort key for a DBT book id (unknowns last)."""
     if not book_id:
@@ -177,6 +212,41 @@ def fetch_dbt_matches(client, fileset_id, query, books):
 
     return (
         [normalize_dbt_verse(v) for v in items],
+        total,
+        total > len(items),
+    )
+
+
+def fetch_apibible_matches(client, bible_id, query):
+    """Fetch all API.Bible matches for a grouped search.
+
+    API.Bible paginates by ``offset``; pages of ``ESV_PAGE_SIZE``
+    are fetched sequentially until the provider-reported
+    ``total`` is reached or ``MAX_RESULTS`` caps the fetch.
+
+    Returns ``(verses, total, truncated)``.
+    """
+    items = []
+    total = 0
+    offset = 0
+    while len(items) < MAX_RESULTS:
+        result = client.search(
+            bible_id, query,
+            offset=offset, limit=ESV_PAGE_SIZE,
+        )
+        data = result.get('data') or {}
+        batch = data.get('verses') or []
+        if not batch:
+            break
+        items.extend(batch)
+        total = data.get('total') or len(items)
+        if len(items) >= total:
+            break
+        offset += len(batch)
+    if len(items) > MAX_RESULTS:
+        items = items[:MAX_RESULTS]
+    return (
+        [normalize_apibible_verse(v) for v in items],
         total,
         total > len(items),
     )

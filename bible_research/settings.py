@@ -97,6 +97,15 @@ if IS_GCP_ENVIRONMENT:
     SECRET_KEY = get_secret('DJANGO_SECRET_KEY')
     DBT_KEY = get_secret('DBT_KEY')
     ESV_KEY = get_secret('ESV_KEY')
+    # Optional until an API.Bible key is provisioned — fall back
+    # to a plain env var so the missing Secret Manager entry can
+    # never break startup.
+    API_BIBLE_KEY = os.environ.get('API_BIBLE_KEY')
+    if not API_BIBLE_KEY:
+        try:
+            API_BIBLE_KEY = get_secret('API_BIBLE_KEY')
+        except Exception:
+            API_BIBLE_KEY = None
     DEBUG = False
 
     # Assumes DATABASE_URL is stored in Secret Manager
@@ -124,6 +133,7 @@ elif IS_VERCEL:
     SECRET_KEY = os.environ.get('SECRET_KEY')
     DBT_KEY = os.environ.get('DBT_KEY')
     ESV_KEY = os.environ.get('ESV_KEY')
+    API_BIBLE_KEY = os.environ.get('API_BIBLE_KEY')
     DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
     # Build database config from individual env vars
@@ -192,6 +202,7 @@ else:
     SECRET_KEY = config.get('SECRET_KEY')
     DBT_KEY = config.get('DBT_KEY')
     ESV_KEY = config.get('ESV_KEY')
+    API_BIBLE_KEY = config.get('API_BIBLE_KEY')
     DEBUG = config.get('DEBUG', True)
     DATABASES = config.get('DATABASES')
 
