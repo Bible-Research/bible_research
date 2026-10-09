@@ -72,8 +72,10 @@ def _apibible_timecode(item):
     if verse is None:
         verse_id = item.get('verseId') or ''
         try:
+            # Strip the range tail first: both "JHN.3.16-17"
+            # and "JHN.3.16-JHN.3.17" must resolve to 16.
             verse = int(
-                str(verse_id).split('.')[-1].split('-')[0]
+                str(verse_id).split('-', 1)[0].split('.')[-1]
             )
         except ValueError:
             verse = None

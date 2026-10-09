@@ -342,14 +342,16 @@ class ParseChapterContentTests(TestCase):
 
     def test_unparseable_verse_marker_does_not_leak(self):
         """A verse-shaped node whose id fails to parse must not
-        append its label/children to the previous verse."""
+        append its label/children to the previous verse.
+        ``sid="JHN.3.xvi"`` is genuinely unparseable — the
+        trailing dotted segment is non-numeric."""
         content = [
             {"type": "verse", "verseId": "JHN.3.15"},
             {"type": "text", "text": "fifteen."},
             {
                 "name": "verse",
                 "type": "tag",
-                "attrs": {"sid": "JHN.three.16"},
+                "attrs": {"sid": "JHN.3.xvi"},
                 "items": [{"type": "text", "text": "16"}],
             },
         ]
@@ -359,6 +361,27 @@ class ParseChapterContentTests(TestCase):
             [v["verse_start"] for v in verses], [15]
         )
         self.assertEqual(verses[0]["verse_text"], "fifteen.")
+
+    def test_stray_leading_eid_blocks_preamble_claim(self):
+        """A stray end-marker before any ``sid`` means verse
+        markup began — following text must not be claimed as
+        implicit verse 1 by the preamble logic."""
+        content = [
+            {
+                "name": "verse",
+                "type": "tag",
+                "attrs": {"eid": "JHN.3.0"},
+            },
+            {"type": "text", "text": "orphan text"},
+            {"type": "verse", "verseId": "JHN.3.2"},
+            {"type": "text", "text": "two."},
+        ]
+        result = _parse_chapter_content(content)
+        verses = result["verses"]
+        self.assertEqual(
+            [v["verse_start"] for v in verses], [2]
+        )
+        self.assertEqual(verses[0]["verse_text"], "two.")
 
     def test_misc_heading_styles_do_not_leak_into_verses(self):
         """Parallel-ref/acrostic/closure paragraphs (r, qa, cl,

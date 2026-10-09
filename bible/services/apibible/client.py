@@ -27,9 +27,10 @@ _HEADING_STYLES = frozenset({
     "r", "qa", "cl", "lit",
 })
 
-# Trailing numeric component of a verse id like "JHN.3.16";
-# ranged ids ("JHN.3.16-17") resolve to their first verse.
-_VERSE_ID_RE = re.compile(r"\.(\d+)(?:-\d+)?$")
+# Trailing numeric component of a verse id like "JHN.3.16".
+# Range tails ("JHN.3.16-17", "JHN.3.16-JHN.3.17") are
+# already stripped by the caller's split on "-".
+_VERSE_ID_RE = re.compile(r"\.(\d+)$")
 
 
 def _normalise(text: str) -> str:
@@ -363,6 +364,10 @@ def _parse_chapter_content(content: Any) -> Dict[str, Any]:
                 else:
                     flush_verse()
                     current_verse = None
+                    # A stray leading end-marker still means
+                    # verse markup began, so any pre-marker
+                    # text must not be claimed as verse 1.
+                    seen_first_marker = True
                 continue
             if (
                 item.get("type") == "verse"
