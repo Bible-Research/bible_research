@@ -1,4 +1,4 @@
-Django==5.2.16
+Django==5.2.17
 PyYAML
 dj-database-url
 django-cors-headers
@@ -7,7 +7,7 @@ drf-spectacular
 requests
 pysword
 pycountry
-psycopg2-binary==2.9.9
+psycopg2-binary==2.9.13
 gunicorn==23.0.0
 google-cloud-secret-manager
 google-cloud-texttospeech>=2.16,<3
