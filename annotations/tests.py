@@ -1178,6 +1178,61 @@ class TestPartialReordering(TestCase):
                 response.json()['error'], 'validation_error'
             )
 
+    def test_reorder_rejects_non_finite_position(self):
+        """'nan'/'inf' parse via float() but must be rejected
+        with a 400 — storing NaN on SQLite raises a misleading
+        IntegrityError (and Postgres would persist it)."""
+        for bad_pos in ('nan', 'inf', '-inf'):
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                {
+                    'tag_id': self.tag.id,
+                    'updates': [
+                        {
+                            'note_id': self.notes[0].id,
+                            'position': bad_pos,
+                        },
+                    ],
+                },
+                format='json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'position={bad_pos!r}'
+            )
+            self.assertEqual(
+                response.json()['error'], 'validation_error'
+            )
+        # Raw NaN/Infinity JSON literals are rejected even
+        # earlier — DRF's strict parser 400s them before the
+        # view's math.isfinite guard runs.
+        for literal in ('NaN', 'Infinity', '-Infinity'):
+            raw = (
+                f'{{"tag_id": "{self.tag.id}", "updates": '
+                f'[{{"note_id": "{self.notes[0].id}", '
+                f'"position": {literal}}}]}}'
+            )
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                raw,
+                content_type='application/json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'literal={literal}'
+            )
+
+    def test_reorder_rejects_non_dict_body(self):
+        """A top-level JSON array body returns a 400, not a 500
+        AttributeError from request.data.get."""
+        response = self.client.post(
+            '/api/v1/notes/reorder/',
+            [1, 2],
+            format='json'
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()['error'], 'validation_error'
+        )
+
 
 class ReadingPositionViewSetTest(TestCase):
     """Integration tests for the ReadingPositionViewSet API."""
@@ -1765,11 +1820,13 @@ class TestNoteMove(TestCase):
 
     def test_move_rejects_other_users_note(self):
         """A note owned by another user in the same tag cannot
-        be moved."""
+        be moved — even a PUBLIC one, which order-index lists
+        but move must still reject as note_id."""
         foreign = Note.objects.create(
             note_text='foreign',
             tag=self.tag,
             user=self.other_user,
+            public=True,
             tag_position=99.0,
         )
         resp = self._move(foreign, self.notes[0])
@@ -1778,11 +1835,13 @@ class TestNoteMove(TestCase):
 
     def test_move_rejects_other_users_target(self):
         """A target_note_id owned by another user is not a valid
-        anchor."""
+        anchor — even a PUBLIC one, which order-index lists but
+        move must still reject as target."""
         foreign = Note.objects.create(
             note_text='foreign target',
             tag=self.tag,
             user=self.other_user,
+            public=True,
             tag_position=99.0,
         )
         resp = self._move(self.notes[0], foreign)
@@ -1826,3 +1885,10 @@ class TestNoteMove(TestCase):
                 self.assertEqual(
                     resp.json()['error'], 'validation_error'
                 )
+
+    def test_move_rejects_non_dict_body(self):
+        """A top-level JSON array body returns a 400, not a 500
+        AttributeError from request.data.get."""
+        resp = self.client.post(self.URL, [1, 2], format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['error'], 'validation_error')

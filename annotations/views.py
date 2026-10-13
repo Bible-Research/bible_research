@@ -1,4 +1,5 @@
 import logging
+import math
 
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from rest_framework.decorators import action
@@ -656,7 +657,7 @@ class NoteViewSet(viewsets.ModelViewSet):
                 },
                 status=drf_status.HTTP_400_BAD_REQUEST,
             )
-        
+
         # Validate update structure
         note_ids = []
         position_map = {}
@@ -727,9 +728,23 @@ class NoteViewSet(viewsets.ModelViewSet):
                     },
                     status=drf_status.HTTP_400_BAD_REQUEST,
                 )
+            # 'nan'/'inf' strings and JSON NaN/Infinity literals
+            # survive float(); Postgres happily persists NaN and
+            # SQLite turns it into a misleading IntegrityError.
+            if not math.isfinite(position_map[note_id]):
+                return Response(
+                    {
+                        'error': 'validation_error',
+                        'message': (
+                            f'Update at index {idx} has a '
+                            f'non-finite position.'
+                        ),
+                    },
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
 
             note_ids.append(note_id)
-        
+
         # Check for duplicate positions in request
         positions = list(position_map.values())
         if len(positions) != len(set(positions)):
@@ -740,9 +755,9 @@ class NoteViewSet(viewsets.ModelViewSet):
                 },
                 status=drf_status.HTTP_400_BAD_REQUEST,
             )
-        
+
         user = request.user
-        
+
         try:
             with transaction.atomic():
                 # Fetch and lock notes
@@ -753,7 +768,7 @@ class NoteViewSet(viewsets.ModelViewSet):
                         tag_id=tag_id
                     )
                 )
-                
+
                 if len(notes) != len(note_ids):
                     found = {n.id for n in notes}
                     missing = set(note_ids) - found
@@ -768,7 +783,7 @@ class NoteViewSet(viewsets.ModelViewSet):
                         },
                         status=drf_status.HTTP_400_BAD_REQUEST,
                     )
-                
+
                 # Two-phase update to avoid constraint violations
                 # during swaps:
                 # Phase 1: Move to temporary negative positions,
@@ -782,20 +797,20 @@ class NoteViewSet(viewsets.ModelViewSet):
                 )
 
                 Note.objects.bulk_update(notes, ['tag_position'])
-                
+
                 # Phase 2: Move to final positions
                 for note in notes:
                     note.tag_position = position_map[note.id]
-                
+
                 Note.objects.bulk_update(notes, ['tag_position'])
-            
+
             return Response(status=drf_status.HTTP_204_NO_CONTENT)
-        
+
         except IntegrityError as e:
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
             error_msg = str(e).lower()
-            
+
             if 'unique_tag_position_per_tag' in error_msg:
                 return Response(
                     {
@@ -1059,6 +1074,16 @@ class NoteViewSet(viewsets.ModelViewSet):
                         new_pos = high_pos - 1.0
                     else:
                         rebalanced = True
+
+                # No position is client-supplied here, but a
+                # non-finite value already stored in the DB
+                # (Postgres persists NaN) makes the midpoint /
+                # last+1 / first-1 arithmetic above meaningless;
+                # renumber 1..N instead of writing it back.
+                if new_pos is not None and not math.isfinite(
+                    new_pos
+                ):
+                    rebalanced = True
 
                 if rebalanced:
                     # Insert the moved note at the slot bracketed
