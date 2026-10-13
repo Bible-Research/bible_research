@@ -717,7 +717,7 @@ class NoteViewSet(viewsets.ModelViewSet):
 
             try:
                 position_map[note_id] = float(position)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 return Response(
                     {
                         'error': 'validation_error',

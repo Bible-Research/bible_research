@@ -1181,8 +1181,9 @@ class TestPartialReordering(TestCase):
     def test_reorder_rejects_non_finite_position(self):
         """'nan'/'inf' parse via float() but must be rejected
         with a 400 — storing NaN on SQLite raises a misleading
-        IntegrityError (and Postgres would persist it)."""
-        for bad_pos in ('nan', 'inf', '-inf'):
+        IntegrityError (and Postgres would persist it). Huge
+        ints raise OverflowError inside float() — also a 400."""
+        for bad_pos in ('nan', 'inf', '-inf', 10 ** 400):
             response = self.client.post(
                 '/api/v1/notes/reorder/',
                 {
@@ -1202,9 +1203,9 @@ class TestPartialReordering(TestCase):
             self.assertEqual(
                 response.json()['error'], 'validation_error'
             )
-        # Raw NaN/Infinity JSON literals are rejected even
-        # earlier — DRF's strict parser 400s them before the
-        # view's math.isfinite guard runs.
+        # Raw NaN/Infinity JSON literals are also rejected —
+        # by the JSON parser or the math.isfinite guard,
+        # depending on DRF version.
         for literal in ('NaN', 'Infinity', '-Infinity'):
             raw = (
                 f'{{"tag_id": "{self.tag.id}", "updates": '
