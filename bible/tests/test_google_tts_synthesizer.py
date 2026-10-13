@@ -1,5 +1,7 @@
 import re
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from bible.services.google_tts import synthesizer as synth_module
 from bible.services.google_tts.synthesizer import Synthesizer
@@ -53,6 +55,21 @@ def _chapter_synth(verses, tts):
     synth = Synthesizer(tts_client=tts)
     synth._sword = _FakeSword(verses)
     return synth
+
+
+def test_unknown_mode_raises_before_sword_io():
+    """A bogus mode must fail fast — before the expensive
+    ``get_chapter_verses`` SWORD module read."""
+
+    class ExplodingSword:
+        def get_chapter_verses(self, *_):
+            raise AssertionError("SWORD module must not be read")
+
+    synth = Synthesizer(tts_client=MagicMock())
+    synth._sword = ExplodingSword()
+
+    with pytest.raises(ValueError, match="Unknown synthesis mode"):
+        synth.run("LVSGLU8", "JHN", 3, mode="bogus")
 
 
 @patch("bible.services.google_tts.synthesizer.MP3", _FakeMP3)
@@ -147,9 +164,13 @@ def test_chapter_mode_segments_oversized_chapter_with_offsets(
 
 
 @patch("bible.services.google_tts.synthesizer.MP3", _FakeMP3)
-def test_chapter_mode_missing_mark_falls_back_to_previous_timestamp():
+def test_chapter_mode_missing_mark_falls_back_to_previous_timestamp(
+    caplog,
+):
     """If the voice drops a <mark> (partial SSML support), the verse
-    keeps a sane timestamp instead of disappearing."""
+    keeps a sane timestamp instead of disappearing — and the drop is
+    logged, since the fallback produces plausible-looking wrong
+    data."""
 
     class DropMarkTTS(_FakeChapterTTS):
         def synthesize_ssml(self, ssml, **_):
@@ -167,3 +188,4 @@ def test_chapter_mode_missing_mark_falls_back_to_previous_timestamp():
     assert [d["verse_start"] for d in data] == [1, 2, 3]
     # v2 inherits v1's timestamp; v3's real mark still wins.
     assert [d["timestamp"] for d in data] == [0.0, 0.0, 2.0]
+    assert "no timepoint for 1 mark(s)" in caplog.text

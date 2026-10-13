@@ -252,6 +252,44 @@ def test_mode_both_runs_verse_pass_then_chapter_pass(
     assert read_usage.call_count == 2
 
 
+@patch(f"{_CMD}.get_default_sword_client")
+@patch(f"{_CMD}.gcs.mark_run_complete")
+@patch(f"{_CMD}.gcs.increment_monthly_usage")
+@patch(f"{_CMD}.gcs.read_monthly_usage")
+@patch(f"{_CMD}.gcs.acquire_run_lock")
+@patch(f"{_CMD}.gcs.upload_chapter_artifacts")
+@patch(f"{_CMD}.gcs.list_completed_chapters")
+@patch(f"{_CMD}.Synthesizer")
+def test_run_lock_left_open_when_every_chapter_fails(
+    synth_cls, list_done, upload, acquire, read_usage, increment,
+    mark_complete, sword_client,
+):
+    """If every pending chapter hits the generic
+    ``except -> continue`` path (e.g. a client-side crash before
+    any TTS call), marking the run complete would lock the month
+    out with zero artifacts. The lock must stay "running" so a
+    later run retries after it goes stale."""
+    sword_client.return_value.list_chapters.return_value = [
+        ("GEN", 1), ("GEN", 2),
+    ]
+    acquire.return_value = (True, "acquired")
+    read_usage.return_value = 0
+    list_done.return_value = set()
+
+    inst = MagicMock()
+    inst.run.side_effect = RuntimeError("synthetic boom")
+    synth_cls.return_value = inst
+
+    out = StringIO()
+    call_command(
+        "generate_chapter_audio", "--fileset-id", "LVSGLU8",
+        stdout=out,
+    )
+
+    mark_complete.assert_not_called()
+    assert "all_failed" in out.getvalue()
+
+
 @patch(f"{_CMD}.gcs.acquire_run_lock")
 def test_dry_run_reports_each_mode_without_touching_gcs(
     acquire,
