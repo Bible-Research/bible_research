@@ -12,7 +12,7 @@ from rest_framework.views import APIView
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import models, transaction, IntegrityError
-from django.db.models import Count, Q, F, Prefetch
+from django.db.models import Count, Q, F, Min, Prefetch
 from django.shortcuts import get_object_or_404
 
 from bible.models import Verse
@@ -61,6 +61,22 @@ def get_accessible_notes_qs(user):
             Q(user=user) | Q(public=True)
         )
     return Note.objects.filter(public=True)
+
+
+def _park_notes_for_renumber(notes, tag_id):
+    """
+    Assign every note a temporary tag_position parked below
+    all positions currently used in the tag — including real
+    negative values left behind by repeated 'before first'
+    moves — and below the 1..N range a renumber writes next,
+    so unique_tag_position_per_tag cannot trip mid-update.
+    """
+    lowest = Note.objects.filter(tag_id=tag_id).aggregate(
+        lowest=Min('tag_position')
+    )['lowest']
+    base = min(0, lowest) if lowest is not None else 0
+    for idx, note in enumerate(notes):
+        note.tag_position = base - idx - 1
 
 
 class TagViewSet(viewsets.ModelViewSet):
@@ -595,8 +611,13 @@ class NoteViewSet(viewsets.ModelViewSet):
         The database enforces unique positions per tag via
         the 'unique_tag_position_per_tag' constraint.
         """
-        tag_id = request.data.get('tag_id')
-        updates = request.data.get('updates', [])
+        # Non-dict JSON bodies (array/scalar) get no fields
+        # and fall through to the usual 400s.
+        data = (
+            request.data if isinstance(request.data, dict) else {}
+        )
+        tag_id = data.get('tag_id')
+        updates = data.get('updates', [])
 
         if not tag_id:
             return Response(
@@ -706,10 +727,11 @@ class NoteViewSet(viewsets.ModelViewSet):
                 
                 # Two-phase update to avoid constraint violations
                 # during swaps:
-                # Phase 1: Move to temporary negative positions
-                for idx, note in enumerate(notes):
-                    note.tag_position = -(idx + 1)
-                
+                # Phase 1: Move to temporary negative positions,
+                # parked below any real negatives already in
+                # the tag.
+                _park_notes_for_renumber(notes, tag_id)
+
                 Note.objects.bulk_update(notes, ['tag_position'])
                 
                 # Phase 2: Move to final positions
@@ -803,6 +825,10 @@ class NoteViewSet(viewsets.ModelViewSet):
         notes = (
             get_accessible_notes_qs(request.user)
             .filter(tag_id=tag_id)
+            # Avoid loading heavy note_text rows at scale; the
+            # verse prefetch runs as a separate query and is
+            # unaffected by .only().
+            .only('id', 'tag_position', 'created_at')
             .order_by(
                 F('tag_position').asc(nulls_last=True),
                 '-created_at',
@@ -871,10 +897,15 @@ class NoteViewSet(viewsets.ModelViewSet):
                 status=drf_status.HTTP_400_BAD_REQUEST,
             )
 
-        tag_id = request.data.get('tag_id')
-        note_id = request.data.get('note_id')
-        target_note_id = request.data.get('target_note_id')
-        placement = request.data.get('placement')
+        # Non-dict JSON bodies (array/scalar) get no fields
+        # and fall through to the usual 400s.
+        data = (
+            request.data if isinstance(request.data, dict) else {}
+        )
+        tag_id = data.get('tag_id')
+        note_id = data.get('note_id')
+        target_note_id = data.get('target_note_id')
+        placement = data.get('placement')
 
         if not tag_id:
             return _err('tag_id is required.')
@@ -895,6 +926,11 @@ class NoteViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 # Lock the tag's ordered notes; placement is
                 # computed against canonical ascending order.
+                # Scope note: order-index (like GET /notes/)
+                # also lists other users' PUBLIC notes in the
+                # tag, but move only sees/locks the requester's
+                # own — a foreign public note anchor 400s, and
+                # foreign positions in a shared tag can 409.
                 notes = list(
                     Note.objects.select_for_update()
                     .filter(user=user, tag_id=tag_id)
@@ -978,10 +1014,12 @@ class NoteViewSet(viewsets.ModelViewSet):
                         + ordered[high_idx:]
                     )
                     # Phase 1: park every tag note on a temporary
-                    # negative position so the unique constraint
-                    # cannot trip mid-renumber.
-                    for idx, n in enumerate(notes):
-                        n.tag_position = -(idx + 1)
+                    # position below all existing values — 'before
+                    # first' moves leave real negatives (0, -1,
+                    # -2, ...) that would collide with naive
+                    # -(idx+1) temps — and below the final 1..N
+                    # range.
+                    _park_notes_for_renumber(notes, tag_id)
                     Note.objects.bulk_update(
                         notes, ['tag_position']
                     )

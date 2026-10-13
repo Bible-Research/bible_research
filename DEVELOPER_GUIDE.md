@@ -791,6 +791,13 @@ satisfy `unique_tag_position_per_tag`), and the moved note
 takes its slot. Notes are scoped to `request.user`, as in
 `notes/reorder/`.
 
+Scope caveat: `order-index` (like `GET /notes/`) also lists
+other users' *public* notes in the tag, but `move` only sees
+and reorders the requester's own notes. In a shared tag, a
+`note_id`/`target_note_id` naming a foreign public note
+returns `400`, and positions held by foreign notes can still
+surface as a `409 position_conflict`.
+
 **Response** `200 OK`:
 ```json
 {
@@ -808,7 +815,11 @@ takes its slot. Notes are scoped to `request.user`, as in
 - `409 {"error": "position_conflict", "constraint":
   "unique_tag_position_per_tag", ...}` — position collision,
   same contract as `notes/reorder/`.
-- `403` when unauthenticated.
+- `403` only as a defense-in-depth fallback: anonymous
+  requests are auto-authenticated by
+  `DeviceAndCountryMiddleware` as the shared device (or
+  `guest`) user, so they act as that user and can move notes
+  it owns.
 
 ---
 

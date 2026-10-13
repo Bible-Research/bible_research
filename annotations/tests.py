@@ -1565,7 +1565,8 @@ class TestNoteMove(TestCase):
     def test_move_then_order_index_reflects_new_order(self):
         """After a move, order-index lists the note in its new
         slot."""
-        self._move(self.notes[0], self.notes[4])
+        move_resp = self._move(self.notes[0], self.notes[4])
+        self.assertEqual(move_resp.status_code, 200)
         resp = self.client.get(
             '/api/v1/notes/order-index/',
             {'tag_id': self.tag.id},
@@ -1606,6 +1607,38 @@ class TestNoteMove(TestCase):
         self.assertEqual(a.tag_position, 1.0)
         self.assertEqual(m.tag_position, 2.0)
         self.assertEqual(b.tag_position, 3.0)
+
+    def test_rebalance_parks_below_negative_positions(self):
+        """Regression: repeated 'before first' moves leave real
+        negative positions (0, -1, -2, ...). Rebalance temp
+        slots must park below them — naive -(idx+1) temps
+        collide mid-update and turn every retry into a 409."""
+        tag2 = Tag.objects.create(
+            name='NegPos', user=self.user
+        )
+        made = {}
+        for name, pos in (
+            ('a', -2.0), ('b', -1.0), ('c', 0.0),
+            ('d', 1e-10), ('m', 5.0),
+        ):
+            made[name] = Note.objects.create(
+                note_text=name, tag=tag2, user=self.user,
+                tag_position=pos,
+            )
+        # The 0.0 -> 1e-10 gap is below MOVE_GAP_EPSILON, so
+        # moving m after c forces a full rebalance.
+        resp = self._move(made['m'], made['c'], tag=tag2)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data['rebalanced'])
+        self.assertEqual(data['tag_position'], 4.0)
+        # Final order a, b, c, m, d renumbered 1..5.
+        for name, expected in (
+            ('a', 1.0), ('b', 2.0), ('c', 3.0),
+            ('m', 4.0), ('d', 5.0),
+        ):
+            made[name].refresh_from_db()
+            self.assertEqual(made[name].tag_position, expected)
 
     def test_move_same_note_rejected(self):
         """note_id == target_note_id is a 400."""
