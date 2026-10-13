@@ -11,7 +11,13 @@ from annotations.serializers import (
     NoteSerializer,
     build_comment_tree,
 )
-from annotations.models import Comment, Note, NoteVerse, Tag
+from annotations.models import (
+    Comment,
+    Note,
+    NoteVerse,
+    Tag,
+    generate_note_id,
+)
 from bible.models import Verse
 
 
@@ -1111,6 +1117,123 @@ class TestPartialReordering(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('not found', str(response.data))
 
+    def test_reorder_rejects_non_object_updates(self):
+        """updates entries that are not JSON objects return a
+        400, not a 500 from update.get."""
+        for bad in ('x', 42, None, [1, 2]):
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                {'tag_id': self.tag.id, 'updates': [bad]},
+                format='json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'update={bad!r}'
+            )
+            self.assertEqual(
+                response.json()['error'], 'validation_error'
+            )
+
+    def test_reorder_rejects_non_numeric_position(self):
+        """A position float() cannot parse returns a 400, not a
+        500 ValueError/TypeError."""
+        for bad_pos in ('abc', {}, [1]):
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                {
+                    'tag_id': self.tag.id,
+                    'updates': [
+                        {
+                            'note_id': self.notes[0].id,
+                            'position': bad_pos,
+                        },
+                    ],
+                },
+                format='json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'position={bad_pos!r}'
+            )
+            self.assertEqual(
+                response.json()['error'], 'validation_error'
+            )
+
+    def test_reorder_rejects_non_string_note_id(self):
+        """A non-string note_id returns a 400, not a 500
+        TypeError from the duplicate-check dict."""
+        for bad_id in ({'x': 1}, [1], 42):
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                {
+                    'tag_id': self.tag.id,
+                    'updates': [
+                        {'note_id': bad_id, 'position': 1.0},
+                    ],
+                },
+                format='json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'note_id={bad_id!r}'
+            )
+            self.assertEqual(
+                response.json()['error'], 'validation_error'
+            )
+
+    def test_reorder_rejects_non_finite_position(self):
+        """'nan'/'inf' parse via float() but must be rejected
+        with a 400 — storing NaN on SQLite raises a misleading
+        IntegrityError (and Postgres would persist it). Huge
+        ints raise OverflowError inside float() — also a 400."""
+        for bad_pos in ('nan', 'inf', '-inf', 10 ** 400):
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                {
+                    'tag_id': self.tag.id,
+                    'updates': [
+                        {
+                            'note_id': self.notes[0].id,
+                            'position': bad_pos,
+                        },
+                    ],
+                },
+                format='json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'position={bad_pos!r}'
+            )
+            self.assertEqual(
+                response.json()['error'], 'validation_error'
+            )
+        # Raw NaN/Infinity JSON literals are also rejected —
+        # by the JSON parser or the math.isfinite guard,
+        # depending on DRF version.
+        for literal in ('NaN', 'Infinity', '-Infinity'):
+            raw = (
+                f'{{"tag_id": "{self.tag.id}", "updates": '
+                f'[{{"note_id": "{self.notes[0].id}", '
+                f'"position": {literal}}}]}}'
+            )
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                raw,
+                content_type='application/json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'literal={literal}'
+            )
+
+    def test_reorder_rejects_non_dict_body(self):
+        """A top-level JSON array body returns a 400, not a 500
+        AttributeError from request.data.get."""
+        response = self.client.post(
+            '/api/v1/notes/reorder/',
+            [1, 2],
+            format='json'
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()['error'], 'validation_error'
+        )
+
 
 class ReadingPositionViewSetTest(TestCase):
     """Integration tests for the ReadingPositionViewSet API."""
@@ -1271,3 +1394,502 @@ class NoteProviderErrorTest(TestCase):
 
         self.assertEqual(data['error_code'], 'not_found')
         self.assertEqual(data['verses'][0]['text'], '')
+
+
+class TestNoteOrderIndex(TestCase):
+    """Tests for GET /api/v1/notes/order-index/."""
+
+    URL = '/api/v1/notes/order-index/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='idx_user', password='pass123'
+        )
+        self.other_user = User.objects.create_user(
+            username='idx_other', password='pass123'
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.tag = Tag.objects.create(
+            name='IdxTag', user=self.user
+        )
+        self.notes = [
+            Note.objects.create(
+                note_text=f'Idx note {i}',
+                tag=self.tag,
+                user=self.user,
+                tag_position=float(i),
+            )
+            for i in range(1, 11)
+        ]
+
+    def _verse(self, book, chapter, verse):
+        verse_obj, _ = Verse.objects.get_or_create(
+            book=book,
+            chapter=chapter,
+            verse=verse,
+        )
+        return verse_obj
+
+    def _link(self, note, *verses):
+        for verse in verses:
+            NoteVerse.objects.create(note=note, verse=verse)
+
+    def test_requires_tag_id(self):
+        """GET without tag_id returns 400 validation_error."""
+        resp = self.client.get(self.URL)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['error'], 'validation_error')
+
+    def test_canonical_ascending_order(self):
+        """Rows come back in tag_position ASC order regardless of
+        creation order (canonical 'custom' ordering)."""
+        tag2 = Tag.objects.create(
+            name='IdxTag2', user=self.user
+        )
+        created = [
+            Note.objects.create(
+                note_text=f'scrambled {pos}',
+                tag=tag2,
+                user=self.user,
+                tag_position=pos,
+            )
+            for pos in (30.0, 10.0, 20.0)
+        ]
+        resp = self.client.get(self.URL, {'tag_id': tag2.id})
+        self.assertEqual(resp.status_code, 200)
+        ids = [row['id'] for row in resp.json()]
+        expected = [
+            n.id
+            for n in sorted(
+                created, key=lambda n: n.tag_position
+            )
+        ]
+        self.assertEqual(ids, expected)
+
+    def test_payload_shape_is_compact(self):
+        """Each row exposes exactly the compact field set —
+        no heavy note/verse payload."""
+        resp = self.client.get(
+            self.URL, {'tag_id': self.tag.id}
+        )
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.json()
+        self.assertEqual(len(rows), 10)
+        for row in rows:
+            self.assertEqual(
+                set(row.keys()),
+                {
+                    'id', 'tag_position', 'book', 'chapter',
+                    'verse_start', 'verse_end',
+                },
+            )
+
+    def test_verse_labeling_range(self):
+        """A note on John 3:16-18 reports book/chapter and the
+        min/max verse of that block."""
+        note = self.notes[0]
+        self._link(
+            note,
+            self._verse('John', 3, 16),
+            self._verse('John', 3, 18),
+            self._verse('John', 3, 17),
+        )
+        resp = self.client.get(
+            self.URL, {'tag_id': self.tag.id}
+        )
+        row = resp.json()[0]
+        self.assertEqual(row['id'], note.id)
+        self.assertEqual(row['book'], 'John')
+        self.assertEqual(row['chapter'], 3)
+        self.assertEqual(row['verse_start'], 16)
+        self.assertEqual(row['verse_end'], 18)
+
+    def test_verse_labeling_multi_chapter_quirk(self):
+        """Verses sort by verse number only (NoteSerializer
+        quirk): with John 3:16 and John 4:1 the 'first' verse is
+        John 4:1, so the label block is John 4:1-1."""
+        note = self.notes[0]
+        self._link(
+            note,
+            self._verse('John', 3, 16),
+            self._verse('John', 3, 17),
+            self._verse('John', 4, 1),
+        )
+        resp = self.client.get(
+            self.URL, {'tag_id': self.tag.id}
+        )
+        row = resp.json()[0]
+        self.assertEqual(row['book'], 'John')
+        self.assertEqual(row['chapter'], 4)
+        self.assertEqual(row['verse_start'], 1)
+        self.assertEqual(row['verse_end'], 1)
+
+    def test_note_without_verses_has_null_label(self):
+        """Notes with no verses report all label fields null."""
+        resp = self.client.get(
+            self.URL, {'tag_id': self.tag.id}
+        )
+        row = resp.json()[0]
+        self.assertIsNone(row['book'])
+        self.assertIsNone(row['chapter'])
+        self.assertIsNone(row['verse_start'])
+        self.assertIsNone(row['verse_end'])
+
+    def test_excludes_other_users_private_notes(self):
+        """Another user's private note in the tag is omitted;
+        their public note is included."""
+        private = Note.objects.create(
+            note_text='foreign private',
+            tag=self.tag,
+            user=self.other_user,
+            public=False,
+            tag_position=50.0,
+        )
+        public = Note.objects.create(
+            note_text='foreign public',
+            tag=self.tag,
+            user=self.other_user,
+            public=True,
+            tag_position=51.0,
+        )
+        resp = self.client.get(
+            self.URL, {'tag_id': self.tag.id}
+        )
+        ids = [row['id'] for row in resp.json()]
+        self.assertNotIn(private.id, ids)
+        self.assertIn(public.id, ids)
+
+    def test_anonymous_sees_public_only(self):
+        """Anonymous requests get public notes in the tag only."""
+        public = Note.objects.create(
+            note_text='public note',
+            tag=self.tag,
+            user=self.user,
+            public=True,
+            tag_position=60.0,
+        )
+        client = APIClient()
+        resp = client.get(self.URL, {'tag_id': self.tag.id})
+        self.assertEqual(resp.status_code, 200)
+        ids = [row['id'] for row in resp.json()]
+        self.assertEqual(ids, [public.id])
+
+    def test_tag_with_over_100_notes(self):
+        """The index is unpaginated: a 150-note tag returns all
+        rows in ascending position order in one request."""
+        big_tag = Tag.objects.create(
+            name='BigTag', user=self.user
+        )
+        Note.objects.bulk_create([
+            Note(
+                id=generate_note_id(),
+                note_text=f'big {i}',
+                tag=big_tag,
+                user=self.user,
+                tag_position=float(i),
+            )
+            for i in range(1, 151)
+        ])
+        resp = self.client.get(
+            self.URL, {'tag_id': big_tag.id}
+        )
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.json()
+        self.assertEqual(len(rows), 150)
+        positions = [row['tag_position'] for row in rows]
+        self.assertEqual(positions, sorted(positions))
+
+
+class TestNoteMove(TestCase):
+    """Tests for POST /api/v1/notes/move/."""
+
+    URL = '/api/v1/notes/move/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='move_user', password='pass123'
+        )
+        self.other_user = User.objects.create_user(
+            username='move_other', password='pass123'
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.tag = Tag.objects.create(
+            name='MoveTag', user=self.user
+        )
+        # Positions 1.0..10.0, like TestPartialReordering.
+        self.notes = [
+            Note.objects.create(
+                note_text=f'Move note {i}',
+                tag=self.tag,
+                user=self.user,
+                tag_position=float(i),
+            )
+            for i in range(1, 11)
+        ]
+
+    def _move(self, note, target, placement='after',
+              tag=None, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.post(
+            self.URL,
+            {
+                'tag_id': (tag or self.tag).id,
+                'note_id': note.id,
+                'target_note_id': target.id,
+                'placement': placement,
+            },
+            format='json',
+        )
+
+    def test_move_after_middle_uses_midpoint(self):
+        """Moving note 1 after note 5 lands it at 5.5."""
+        resp = self._move(self.notes[0], self.notes[4])
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['note_id'], self.notes[0].id)
+        self.assertEqual(data['tag_position'], 5.5)
+        self.assertFalse(data['rebalanced'])
+        self.notes[0].refresh_from_db()
+        self.assertEqual(self.notes[0].tag_position, 5.5)
+
+    def test_move_after_last_appends(self):
+        """'after' the last note assigns last+1."""
+        resp = self._move(self.notes[0], self.notes[9])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['tag_position'], 11.0)
+
+    def test_move_before_first_prepends(self):
+        """'before' the first note assigns first-1."""
+        resp = self._move(
+            self.notes[9], self.notes[0], placement='before'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['tag_position'], 0.0)
+
+    def test_move_before_middle_uses_midpoint(self):
+        """'before' note 5 lands note 10 at 4.5."""
+        resp = self._move(
+            self.notes[9], self.notes[4], placement='before'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['tag_position'], 4.5)
+
+    def test_move_then_order_index_reflects_new_order(self):
+        """After a move, order-index lists the note in its new
+        slot."""
+        move_resp = self._move(self.notes[0], self.notes[4])
+        self.assertEqual(move_resp.status_code, 200)
+        resp = self.client.get(
+            '/api/v1/notes/order-index/',
+            {'tag_id': self.tag.id},
+        )
+        ids = [row['id'] for row in resp.json()]
+        self.assertEqual(
+            ids.index(self.notes[0].id),
+            ids.index(self.notes[4].id) + 1,
+        )
+
+    def test_rebalance_on_tiny_gap(self):
+        """When neighbours are adjacent floats, the endpoint
+        renumbers the tag 1..N and reports rebalanced=True."""
+        tag2 = Tag.objects.create(
+            name='TinyGap', user=self.user
+        )
+        a = Note.objects.create(
+            note_text='a', tag=tag2, user=self.user,
+            tag_position=1.0,
+        )
+        b = Note.objects.create(
+            note_text='b', tag=tag2, user=self.user,
+            tag_position=1.0 + 2.0 ** -52,
+        )
+        m = Note.objects.create(
+            note_text='m', tag=tag2, user=self.user,
+            tag_position=5.0,
+        )
+        resp = self._move(m, a, tag=tag2)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data['rebalanced'])
+        self.assertEqual(data['tag_position'], 2.0)
+        a.refresh_from_db()
+        b.refresh_from_db()
+        m.refresh_from_db()
+        # New order: a(1), m(2), b(3).
+        self.assertEqual(a.tag_position, 1.0)
+        self.assertEqual(m.tag_position, 2.0)
+        self.assertEqual(b.tag_position, 3.0)
+
+    def test_rebalance_parks_below_negative_positions(self):
+        """Regression: repeated 'before first' moves leave real
+        negative positions (0, -1, -2, ...). Rebalance temp
+        slots must park below them — naive -(idx+1) temps
+        collide mid-update and turn every retry into a 409."""
+        tag2 = Tag.objects.create(
+            name='NegPos', user=self.user
+        )
+        made = {}
+        for name, pos in (
+            ('a', -2.0), ('b', -1.0), ('c', 0.0),
+            ('d', 1e-10), ('m', 5.0),
+        ):
+            made[name] = Note.objects.create(
+                note_text=name, tag=tag2, user=self.user,
+                tag_position=pos,
+            )
+        # A foreign user's public note in the same tag holds
+        # the tag-wide minimum. unique_tag_position_per_tag is
+        # tag-wide, not per-user, so temps must park below it
+        # too — parking below only the requester's own minimum
+        # (-2.0) would put a temp on -7.0 and 409.
+        foreign = Note.objects.create(
+            note_text='foreign', tag=tag2, user=self.other_user,
+            public=True, tag_position=-7.0,
+        )
+        # The 0.0 -> 1e-10 gap is below MOVE_GAP_EPSILON, so
+        # moving m after c forces a full rebalance.
+        resp = self._move(made['m'], made['c'], tag=tag2)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data['rebalanced'])
+        self.assertEqual(data['tag_position'], 4.0)
+        # Final order a, b, c, m, d renumbered 1..5.
+        for name, expected in (
+            ('a', 1.0), ('b', 2.0), ('c', 3.0),
+            ('m', 4.0), ('d', 5.0),
+        ):
+            made[name].refresh_from_db()
+            self.assertEqual(made[name].tag_position, expected)
+        # The foreign note is not part of the rebalance and
+        # keeps its negative position.
+        foreign.refresh_from_db()
+        self.assertEqual(foreign.tag_position, -7.0)
+
+    def test_move_same_note_rejected(self):
+        """note_id == target_note_id is a 400."""
+        resp = self._move(self.notes[0], self.notes[0])
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['error'], 'validation_error')
+
+    def test_move_invalid_placement_rejected(self):
+        resp = self._move(
+            self.notes[0], self.notes[1], placement='sideways'
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['error'], 'validation_error')
+
+    def test_move_missing_fields_rejected(self):
+        """tag_id, note_id, target_note_id and placement are all
+        required."""
+        base = {
+            'tag_id': self.tag.id,
+            'note_id': self.notes[0].id,
+            'target_note_id': self.notes[1].id,
+            'placement': 'after',
+        }
+        for field in base:
+            payload = {k: v for k, v in base.items() if k != field}
+            resp = self.client.post(
+                self.URL, payload, format='json'
+            )
+            self.assertEqual(
+                resp.status_code, 400, f'missing {field}'
+            )
+            self.assertEqual(
+                resp.json()['error'], 'validation_error'
+            )
+
+    def test_move_unknown_note_rejected(self):
+        """A note_id that does not exist returns 400."""
+        resp = self.client.post(
+            self.URL,
+            {
+                'tag_id': self.tag.id,
+                'note_id': 'NOTDOESNOTEXIST',
+                'target_note_id': self.notes[1].id,
+                'placement': 'after',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('not found', str(resp.data))
+
+    def test_move_rejects_other_users_note(self):
+        """A note owned by another user in the same tag cannot
+        be moved — even a PUBLIC one, which order-index lists
+        but move must still reject as note_id."""
+        foreign = Note.objects.create(
+            note_text='foreign',
+            tag=self.tag,
+            user=self.other_user,
+            public=True,
+            tag_position=99.0,
+        )
+        resp = self._move(foreign, self.notes[0])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('not found', str(resp.data))
+
+    def test_move_rejects_other_users_target(self):
+        """A target_note_id owned by another user is not a valid
+        anchor — even a PUBLIC one, which order-index lists but
+        move must still reject as target."""
+        foreign = Note.objects.create(
+            note_text='foreign target',
+            tag=self.tag,
+            user=self.other_user,
+            public=True,
+            tag_position=99.0,
+        )
+        resp = self._move(self.notes[0], foreign)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('not found', str(resp.data))
+
+    def test_move_rejects_note_from_other_tag(self):
+        """A note in a different tag cannot be moved via
+        this tag's id."""
+        other_tag = Tag.objects.create(
+            name='OtherTag', user=self.user
+        )
+        outsider = Note.objects.create(
+            note_text='outsider',
+            tag=other_tag,
+            user=self.user,
+            tag_position=1.0,
+        )
+        resp = self._move(outsider, self.notes[0])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('not found', str(resp.data))
+
+    def test_move_rejects_non_string_ids(self):
+        """Non-string note_id/target_note_id values return a
+        400, not a 500 TypeError on the id lookup."""
+        for field in ('note_id', 'target_note_id'):
+            for bad in ({'x': 1}, [1], 42):
+                payload = {
+                    'tag_id': self.tag.id,
+                    'note_id': self.notes[0].id,
+                    'target_note_id': self.notes[1].id,
+                    'placement': 'after',
+                }
+                payload[field] = bad
+                resp = self.client.post(
+                    self.URL, payload, format='json'
+                )
+                self.assertEqual(
+                    resp.status_code, 400, f'{field}={bad!r}'
+                )
+                self.assertEqual(
+                    resp.json()['error'], 'validation_error'
+                )
+
+    def test_move_rejects_non_dict_body(self):
+        """A top-level JSON array body returns a 400, not a 500
+        AttributeError from request.data.get."""
+        resp = self.client.post(self.URL, [1, 2], format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['error'], 'validation_error')

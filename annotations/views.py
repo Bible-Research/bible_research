@@ -1,4 +1,5 @@
 import logging
+import math
 
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from rest_framework.decorators import action
@@ -12,8 +13,10 @@ from rest_framework.views import APIView
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import models, transaction, IntegrityError
-from django.db.models import Count, Q, F
+from django.db.models import Count, Q, F, Min, Prefetch
 from django.shortcuts import get_object_or_404
+
+from bible.models import Verse
 
 from .models import (
     Tag,
@@ -42,6 +45,11 @@ logger = logging.getLogger(__name__)
 
 NOTE_IDS_CAP = 200
 
+# Below this float gap between neighbouring tag positions the
+# midpoint may no longer be representable; /notes/move/ then
+# rebalances the whole tag instead of bisecting.
+MOVE_GAP_EPSILON = 1e-9
+
 
 def get_accessible_notes_qs(user):
     """
@@ -54,6 +62,29 @@ def get_accessible_notes_qs(user):
             Q(user=user) | Q(public=True)
         )
     return Note.objects.filter(public=True)
+
+
+def _park_notes_for_renumber(notes, tag_id, extra_floor=None):
+    """
+    Assign every note a temporary tag_position parked below
+    all positions currently used in the tag — including real
+    negative values left behind by repeated 'before first'
+    moves — and below the 1..N range a renumber writes next,
+    so unique_tag_position_per_tag cannot trip mid-update.
+
+    *extra_floor* is the lowest final position the caller will
+    write in phase two (e.g. reorder's minimum requested
+    position); temps park below it too so client-requested
+    finals can never land inside the temp range.
+    """
+    lowest = Note.objects.filter(tag_id=tag_id).aggregate(
+        lowest=Min('tag_position')
+    )['lowest']
+    base = min(0, lowest) if lowest is not None else 0
+    if extra_floor is not None:
+        base = min(base, extra_floor)
+    for idx, note in enumerate(notes):
+        note.tag_position = base - idx - 1
 
 
 class TagViewSet(viewsets.ModelViewSet):
@@ -181,6 +212,8 @@ class NoteViewSet(viewsets.ModelViewSet):
     - GET /api/v1/notes/?page_size={size} - Set page size
     - GET /api/v1/notes/?fileset_id={fileset_id} - Bible translation
     - POST /api/v1/notes/linked/ - Notes sharing given verses
+    - GET /api/v1/notes/order-index/?tag_id= - Compact order index
+    - POST /api/v1/notes/move/ - Move one note relative to another
     """
     serializer_class = NoteSerializer
     pagination_class = NotesPagination
@@ -586,8 +619,13 @@ class NoteViewSet(viewsets.ModelViewSet):
         The database enforces unique positions per tag via
         the 'unique_tag_position_per_tag' constraint.
         """
-        tag_id = request.data.get('tag_id')
-        updates = request.data.get('updates', [])
+        # Non-dict JSON bodies (array/scalar) get no fields
+        # and fall through to the usual 400s.
+        data = (
+            request.data if isinstance(request.data, dict) else {}
+        )
+        tag_id = data.get('tag_id')
+        updates = data.get('updates', [])
 
         if not tag_id:
             return Response(
@@ -619,27 +657,51 @@ class NoteViewSet(viewsets.ModelViewSet):
                 },
                 status=drf_status.HTTP_400_BAD_REQUEST,
             )
-        
+
         # Validate update structure
         note_ids = []
         position_map = {}
-        
+
         for idx, update in enumerate(updates):
+            if not isinstance(update, dict):
+                return Response(
+                    {
+                        'error': 'validation_error',
+                        'message': (
+                            f'Update at index {idx} must be an '
+                            f'object with note_id and position.'
+                        ),
+                    },
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
+
             note_id = update.get('note_id')
             position = update.get('position')
-            
-            if not note_id or position is None:
+
+            if not isinstance(note_id, str) or not note_id:
+                return Response(
+                    {
+                        'error': 'validation_error',
+                        'message': (
+                            f'Update at index {idx} needs a '
+                            f'non-empty string note_id.'
+                        ),
+                    },
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
+
+            if position is None:
                 return Response(
                     {
                         'error': 'validation_error',
                         'message': (
                             f'Update at index {idx} is missing '
-                            f'note_id or position.'
+                            f'position.'
                         ),
                     },
                     status=drf_status.HTTP_400_BAD_REQUEST,
                 )
-            
+
             # Check for duplicate note_ids in request
             if note_id in position_map:
                 return Response(
@@ -652,10 +714,37 @@ class NoteViewSet(viewsets.ModelViewSet):
                     },
                     status=drf_status.HTTP_400_BAD_REQUEST,
                 )
-            
+
+            try:
+                position_map[note_id] = float(position)
+            except (TypeError, ValueError, OverflowError):
+                return Response(
+                    {
+                        'error': 'validation_error',
+                        'message': (
+                            f'Update at index {idx} has a '
+                            f'non-numeric position.'
+                        ),
+                    },
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
+            # 'nan'/'inf' strings and JSON NaN/Infinity literals
+            # survive float(); Postgres happily persists NaN and
+            # SQLite turns it into a misleading IntegrityError.
+            if not math.isfinite(position_map[note_id]):
+                return Response(
+                    {
+                        'error': 'validation_error',
+                        'message': (
+                            f'Update at index {idx} has a '
+                            f'non-finite position.'
+                        ),
+                    },
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
+
             note_ids.append(note_id)
-            position_map[note_id] = float(position)
-        
+
         # Check for duplicate positions in request
         positions = list(position_map.values())
         if len(positions) != len(set(positions)):
@@ -666,9 +755,9 @@ class NoteViewSet(viewsets.ModelViewSet):
                 },
                 status=drf_status.HTTP_400_BAD_REQUEST,
             )
-        
+
         user = request.user
-        
+
         try:
             with transaction.atomic():
                 # Fetch and lock notes
@@ -679,7 +768,7 @@ class NoteViewSet(viewsets.ModelViewSet):
                         tag_id=tag_id
                     )
                 )
-                
+
                 if len(notes) != len(note_ids):
                     found = {n.id for n in notes}
                     missing = set(note_ids) - found
@@ -694,28 +783,34 @@ class NoteViewSet(viewsets.ModelViewSet):
                         },
                         status=drf_status.HTTP_400_BAD_REQUEST,
                     )
-                
+
                 # Two-phase update to avoid constraint violations
                 # during swaps:
-                # Phase 1: Move to temporary negative positions
-                for idx, note in enumerate(notes):
-                    note.tag_position = -(idx + 1)
-                
+                # Phase 1: Move to temporary negative positions,
+                # parked below any real negatives already in
+                # the tag and below the lowest requested final
+                # position, so client-requested finals cannot
+                # land inside the temp range and trip the
+                # constraint as a misleading 409.
+                _park_notes_for_renumber(
+                    notes, tag_id, extra_floor=min(positions)
+                )
+
                 Note.objects.bulk_update(notes, ['tag_position'])
-                
+
                 # Phase 2: Move to final positions
                 for note in notes:
                     note.tag_position = position_map[note.id]
-                
+
                 Note.objects.bulk_update(notes, ['tag_position'])
-            
+
             return Response(status=drf_status.HTTP_204_NO_CONTENT)
-        
+
         except IntegrityError as e:
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
             error_msg = str(e).lower()
-            
+
             if 'unique_tag_position_per_tag' in error_msg:
                 return Response(
                     {
@@ -734,6 +829,322 @@ class NoteViewSet(viewsets.ModelViewSet):
                 # Generic integrity error
                 logger.error(
                     f'Unexpected IntegrityError in reorder: {e}'
+                )
+                return Response(
+                    {
+                        'error': 'database_error',
+                        'message': (
+                            'A database constraint was violated. '
+                            'Please try again.'
+                        ),
+                    },
+                    status=drf_status.HTTP_409_CONFLICT,
+                )
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='tag_id',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description=(
+                    'Tag whose accessible notes to list as a '
+                    'compact order index.'
+                ),
+                required=True,
+            ),
+        ],
+    )
+    @action(
+        detail=False, methods=['get'], url_path='order-index'
+    )
+    def order_index(self, request):
+        """
+        Compact, unpaginated index of every accessible note in a
+        tag, in canonical custom order (tag_position ASC, nulls
+        last, created_at DESC — same as ordering=custom).
+
+        GET /api/v1/notes/order-index/?tag_id=TAG123
+
+        Each row carries the note id, tag_position and passage
+        label coordinates: book/chapter of the note's "first"
+        verse and the min/max verse within that book+chapter
+        block. Mirroring NoteSerializer, verses are ordered by
+        verse NUMBER only, so the first verse is the smallest
+        verse number across all books/chapters. Notes without
+        verses return null for all four label fields. Built via
+        values/prefetch — no NoteSerializer, so no upstream
+        provider call per note.
+        """
+        tag_id = request.query_params.get('tag_id')
+        if not tag_id:
+            return Response(
+                {
+                    'error': 'validation_error',
+                    'message': 'tag_id query parameter is required.',
+                },
+                status=drf_status.HTTP_400_BAD_REQUEST,
+            )
+
+        notes = (
+            get_accessible_notes_qs(request.user)
+            .filter(tag_id=tag_id)
+            # Avoid loading heavy note_text rows at scale; the
+            # verse prefetch runs as a separate query and is
+            # unaffected by .only().
+            .only('id', 'tag_position', 'created_at')
+            .order_by(
+                F('tag_position').asc(nulls_last=True),
+                '-created_at',
+            )
+            .prefetch_related(
+                Prefetch(
+                    'verses',
+                    queryset=Verse.objects.order_by('verse'),
+                )
+            )
+        )
+        entries = []
+        for note in notes:
+            verses = list(note.verses.all())
+            book = chapter = verse_start = verse_end = None
+            if verses:
+                book = verses[0].book
+                chapter = verses[0].chapter
+                block = [
+                    v.verse for v in verses
+                    if v.book == book and v.chapter == chapter
+                ]
+                verse_start = min(block)
+                verse_end = max(block)
+            entries.append({
+                'id': note.id,
+                'tag_position': note.tag_position,
+                'book': book,
+                'chapter': chapter,
+                'verse_start': verse_start,
+                'verse_end': verse_end,
+            })
+        return Response(entries)
+
+    @action(detail=False, methods=['post'], url_path='move')
+    def move(self, request):
+        """
+        Move a single note next to another note within a tag.
+
+        POST /api/v1/notes/move/
+        {
+          "tag_id": "TAG123",
+          "note_id": "NOT456",
+          "target_note_id": "NOT789",
+          "placement": "after"   # or "before"
+        }
+
+        placement is interpreted in canonical ascending order
+        (tag_position ASC): 'after' the last note appends at
+        last+1, 'before' the first note prepends at first-1, and
+        between two notes the new position is the float midpoint.
+        When the float gap is exhausted, all of the tag's notes
+        are renumbered 1..N in current order and the moved note
+        takes its slot — one transaction, with the same two-phase
+        temp-position trick as reorder to satisfy
+        unique_tag_position_per_tag.
+
+        Returns 200 {"note_id", "tag_position", "rebalanced"}.
+        """
+        def _err(message):
+            return Response(
+                {
+                    'error': 'validation_error',
+                    'message': message,
+                },
+                status=drf_status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Non-dict JSON bodies (array/scalar) get no fields
+        # and fall through to the usual 400s.
+        data = (
+            request.data if isinstance(request.data, dict) else {}
+        )
+        tag_id = data.get('tag_id')
+        note_id = data.get('note_id')
+        target_note_id = data.get('target_note_id')
+        placement = data.get('placement')
+
+        if not tag_id:
+            return _err('tag_id is required.')
+        if not note_id:
+            return _err('note_id is required.')
+        if not target_note_id:
+            return _err('target_note_id is required.')
+        # Unhashable/non-string ids would raise TypeError on the
+        # by_id lookup below instead of failing validation.
+        if not isinstance(note_id, str):
+            return _err('note_id must be a string.')
+        if not isinstance(target_note_id, str):
+            return _err('target_note_id must be a string.')
+        if placement not in ('after', 'before'):
+            return _err("placement must be 'after' or 'before'.")
+        if note_id == target_note_id:
+            return _err('note_id and target_note_id must differ.')
+        if not request.user.is_authenticated:
+            raise PermissionDenied('Authentication required.')
+
+        user = request.user
+
+        try:
+            with transaction.atomic():
+                # Lock the tag's ordered notes; placement is
+                # computed against canonical ascending order.
+                # Scope note: order-index (like GET /notes/)
+                # also lists other users' PUBLIC notes in the
+                # tag, but move only sees/locks the requester's
+                # own — a foreign public note anchor 400s, and
+                # foreign positions in a shared tag can 409.
+                notes = list(
+                    Note.objects.select_for_update()
+                    .filter(user=user, tag_id=tag_id)
+                    .order_by(
+                        F('tag_position').asc(nulls_last=True),
+                        '-created_at',
+                    )
+                )
+                by_id = {n.id: n for n in notes}
+                note = by_id.get(note_id)
+                target = by_id.get(target_note_id)
+                missing = [
+                    nid
+                    for nid, found in (
+                        (note_id, note),
+                        (target_note_id, target),
+                    )
+                    if found is None
+                ]
+                if missing:
+                    return _err(
+                        f'Notes not found or do not belong to '
+                        f'tag {tag_id}: {missing}'
+                    )
+
+                # Extract the moved note, then find the neighbours
+                # bracketing the target slot.
+                ordered = [n for n in notes if n.id != note_id]
+                target_idx = next(
+                    i for i, n in enumerate(ordered)
+                    if n.id == target_note_id
+                )
+                if placement == 'after':
+                    low_idx = target_idx
+                    high_idx = target_idx + 1
+                else:
+                    low_idx = target_idx - 1
+                    high_idx = target_idx
+                low = ordered[low_idx] if low_idx >= 0 else None
+                high = (
+                    ordered[high_idx]
+                    if high_idx < len(ordered)
+                    else None
+                )
+                low_pos = low.tag_position if low else None
+                high_pos = high.tag_position if high else None
+
+                new_pos = None
+                rebalanced = False
+                if low_pos is not None and high_pos is not None:
+                    gap = high_pos - low_pos
+                    midpoint = low_pos + gap / 2.0
+                    if (
+                        gap > MOVE_GAP_EPSILON
+                        and low_pos < midpoint < high_pos
+                    ):
+                        new_pos = midpoint
+                    else:
+                        # Float exhaustion: no representable
+                        # midpoint left between the neighbours.
+                        rebalanced = True
+                elif high is None:
+                    # 'after' the last note.
+                    if low_pos is not None:
+                        new_pos = low_pos + 1.0
+                    else:
+                        rebalanced = True
+                else:
+                    # 'before' the first note.
+                    if high_pos is not None:
+                        new_pos = high_pos - 1.0
+                    else:
+                        rebalanced = True
+
+                # No position is client-supplied here, but a
+                # non-finite value already stored in the DB
+                # (Postgres persists NaN) makes the midpoint /
+                # last+1 / first-1 arithmetic above meaningless;
+                # renumber 1..N instead of writing it back.
+                if new_pos is not None and not math.isfinite(
+                    new_pos
+                ):
+                    rebalanced = True
+
+                if rebalanced:
+                    # Insert the moved note at the slot bracketed
+                    # by low/high, then renumber 1..N.
+                    final_order = (
+                        ordered[:high_idx]
+                        + [note]
+                        + ordered[high_idx:]
+                    )
+                    # Phase 1: park every tag note on a temporary
+                    # position below all existing values — 'before
+                    # first' moves leave real negatives (0, -1,
+                    # -2, ...) that would collide with naive
+                    # -(idx+1) temps — and below the final 1..N
+                    # range.
+                    _park_notes_for_renumber(notes, tag_id)
+                    Note.objects.bulk_update(
+                        notes, ['tag_position']
+                    )
+                    # Phase 2: write the final sequential slots.
+                    for idx, n in enumerate(final_order):
+                        n.tag_position = float(idx + 1)
+                    Note.objects.bulk_update(
+                        final_order, ['tag_position']
+                    )
+                    new_pos = note.tag_position
+                else:
+                    note.tag_position = new_pos
+                    note.save(update_fields=['tag_position'])
+
+            return Response(
+                {
+                    'note_id': note.id,
+                    'tag_position': new_pos,
+                    'rebalanced': rebalanced,
+                },
+                status=drf_status.HTTP_200_OK,
+            )
+
+        except IntegrityError as e:
+            # Database rejected due to unique constraint
+            # violation (unique_tag_position_per_tag)
+            error_msg = str(e).lower()
+
+            if 'unique_tag_position_per_tag' in error_msg:
+                return Response(
+                    {
+                        'error': 'position_conflict',
+                        'message': (
+                            'Position conflict: the computed '
+                            'position is already occupied by '
+                            'another note in this tag. Please '
+                            'refresh and try again.'
+                        ),
+                        'constraint': 'unique_tag_position_per_tag',
+                    },
+                    status=drf_status.HTTP_409_CONFLICT,
+                )
+            else:
+                logger.error(
+                    f'Unexpected IntegrityError in move: {e}'
                 )
                 return Response(
                     {

@@ -719,6 +719,108 @@ enriches verse text from the upstream Bible provider, so
 }
 ```
 
+#### Note Order Index
+```
+GET /api/v1/notes/order-index/?tag_id=TAG123456789ABCDE
+Authorization: Token <your-token>
+```
+
+Returns every accessible note in the tag — unpaginated — as a
+compact row in canonical custom order (`tag_position`
+ascending, nulls last, `-created_at` tiebreak — identical to
+`ordering=custom` on `GET /notes/`). Built for UIs that need
+every note's rank + passage at once (e.g. a "move note"
+dropdown listing 1-based order IDs), without paging through
+full note payloads. Anonymous callers see only public notes.
+
+**Response**:
+```json
+[
+  {
+    "id": "NOT123...",
+    "tag_position": 1788499374.59,
+    "book": "John",
+    "chapter": 3,
+    "verse_start": 16,
+    "verse_end": 18
+  }
+]
+```
+
+`book`/`chapter`/`verse_start`/`verse_end` describe the note's
+first verse block for display as `Book chapter:start[-end]`.
+Mirroring `NoteSerializer`, verses are ordered by verse number
+only — for a note spanning multiple books/chapters the "first"
+verse is the smallest verse number, and `verse_start`/
+`verse_end` are the min/max verse within that verse's
+book+chapter. All four fields are `null` when the note has no
+verses. The endpoint never calls the upstream Bible provider.
+
+**Errors**:
+- `400 {"error": "validation_error", "message": ...}` when
+  `tag_id` is missing.
+
+#### Move Note
+```
+POST /api/v1/notes/move/
+Authorization: Token <your-token>
+Content-Type: application/json
+
+{
+  "tag_id": "TAG123",
+  "note_id": "NOT456",
+  "target_note_id": "NOT789",
+  "placement": "after"
+}
+```
+
+Moves `note_id` immediately after or before `target_note_id`
+(`placement`: `"after"` | `"before"`), interpreted in canonical
+ascending order (`tag_position` ASC). Clients displaying
+descending custom order must translate a visual "move after"
+into the canonical placement themselves.
+
+The new position is the float midpoint of the target's
+neighbours — `last + 1` when moving after the last note,
+`first - 1` before the first. When the float gap is exhausted,
+all of the tag's notes are renumbered `1..N` in their current
+order inside a single `transaction.atomic()` +
+`select_for_update()` block (reusing the two-phase
+temp-negative-position write that `notes/reorder/` uses to
+satisfy `unique_tag_position_per_tag`), and the moved note
+takes its slot. Notes are scoped to `request.user`, as in
+`notes/reorder/`.
+
+Scope caveat: `order-index` (like `GET /notes/`) also lists
+other users' *public* notes in the tag, but `move` only sees
+and reorders the requester's own notes. In a shared tag, a
+`note_id`/`target_note_id` naming a foreign public note
+returns `400`, and positions held by foreign notes can still
+surface as a `409 position_conflict`.
+
+**Response** `200 OK`:
+```json
+{
+  "note_id": "NOT456",
+  "tag_position": 5.5,
+  "rebalanced": false
+}
+```
+
+**Errors**:
+- `400 {"error": "validation_error", "message": ...}` — missing
+  or invalid `tag_id`/`note_id`/`target_note_id`/`placement`,
+  `note_id` equal to `target_note_id`, or a note that does not
+  exist or does not belong to the requester/`tag_id`.
+- `409 {"error": "position_conflict", "constraint":
+  "unique_tag_position_per_tag", ...}` — position collision,
+  same contract as `notes/reorder/`.
+- `403` only as a defense-in-depth fallback: anonymous
+  requests are auto-authenticated by
+  `DeviceAndCountryMiddleware` as the shared device (or
+  `guest`) user, so they act as that user and can move notes
+  it owns.
+
 ---
 
 ## Database Schema

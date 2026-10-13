@@ -53,7 +53,8 @@ is no `__init__.py` in `bible/utils/` — it is a namespace package.
 - `GET /api/v1/bible/search/?query=&fileset_id=&limit=&page=`
 
 `annotations/urls.py` (DRF router):
-- `tags/`, `notes/` (supports `notes/reorder/` bulk update)
+- `tags/`, `notes/` (supports `notes/reorder/` bulk update,
+  `notes/order-index/`, `notes/move/`)
 - `reading-positions/`
 - `notes/<note_pk>/comments/`, `notes/<note_pk>/images/`,
   `notes/<note_pk>/comments/<comment_pk>/images/`
