@@ -22,7 +22,8 @@ _GCS_UPLOAD_CONFLICT = (_gax.PreconditionFailed, _gax.Conflict)
 
 
 def _utc_naive_now() -> datetime.datetime:
-    """UTC 'now' as naive datetime (matches historical lock JSON timestamps)."""
+    """UTC 'now' as naive datetime (matches historical lock JSON
+    timestamps)."""
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 _client: Optional[storage.Client] = None
@@ -38,15 +39,33 @@ def get_default_client() -> storage.Client:
     return _client
 
 
+# GCS object prefix per generation mode. ``verse`` keeps the
+# historical ``audio/`` prefix so existing objects stay valid;
+# ``chapter`` writes whole-chapter-synthesized artifacts under a
+# parallel prefix so the two modes coexist without collisions.
+_MODE_PREFIXES = {
+    "verse": "audio",
+    "chapter": "audio_chapter",
+}
+
+
+def _mode_prefix(mode: str) -> str:
+    try:
+        return _MODE_PREFIXES[mode]
+    except KeyError:
+        raise ValueError(f"Unknown audio mode: {mode!r}")
+
+
 def chapter_object_paths(
     fileset_id: str,
     book_id: str,
     chapter: int,
     voice_name: str,
+    mode: str = "verse",
 ) -> Tuple[str, str]:
     """Return ``(audio_path, timestamps_path)`` for a chapter."""
     base = (
-        f"audio/{fileset_id}/{voice_name}"
+        f"{_mode_prefix(mode)}/{fileset_id}/{voice_name}"
         f"/{book_id}/{int(chapter)}"
     )
     return f"{base}_audio.mp3", f"{base}_timestamps.json"
@@ -61,24 +80,26 @@ def chapter_audio_exists(
     book_id: str,
     chapter: int,
     voice_name: str,
+    mode: str = "verse",
 ) -> bool:
     audio_path, _ = chapter_object_paths(
-        fileset_id, book_id, chapter, voice_name,
+        fileset_id, book_id, chapter, voice_name, mode=mode,
     )
     return _bucket().blob(audio_path).exists()
 
 
 def list_completed_chapters(
-    fileset_id: str, voice_name: str,
+    fileset_id: str, voice_name: str, mode: str = "verse",
 ) -> Set[Tuple[str, int]]:
     """Return the set of ``(book_id, chapter)`` pairs that have **both**
-    ``_audio.mp3`` and ``_timestamps.json`` present."""
-    prefix = f"audio/{fileset_id}/{voice_name}/"
+    ``_audio.mp3`` and ``_timestamps.json`` present under the mode's
+    prefix."""
+    prefix = f"{_mode_prefix(mode)}/{fileset_id}/{voice_name}/"
     audio: Set[Tuple[str, int]] = set()
     json_done: Set[Tuple[str, int]] = set()
 
     for blob in _bucket().list_blobs(prefix=prefix):
-        # name = audio/<fileset>/<voice>/<BOOK>/<CHAPTER>_audio.mp3
+        # name = <prefix>/<fileset>/<voice>/<BOOK>/<CH>_audio.mp3
         rest = blob.name[len(prefix):]
         try:
             book_id, fname = rest.split("/", 1)
@@ -107,11 +128,12 @@ def upload_chapter_artifacts(
     mp3_bytes: bytes,
     timestamps_payload: dict,
     voice_name: str,
+    mode: str = "verse",
 ) -> None:
     """Write timestamps JSON first, then MP3, so an MP3 always implies a
     JSON exists (resume logic depends on this)."""
     audio_path, json_path = chapter_object_paths(
-        fileset_id, book_id, chapter, voice_name,
+        fileset_id, book_id, chapter, voice_name, mode=mode,
     )
     bucket = _bucket()
 
@@ -140,16 +162,18 @@ def upload_chapter_artifacts(
 def read_timestamps_json(
     fileset_id: str, book_id: str, chapter: int,
     voice_name: str,
+    mode: str = "verse",
 ) -> dict:
     _, json_path = chapter_object_paths(
-        fileset_id, book_id, chapter, voice_name,
+        fileset_id, book_id, chapter, voice_name, mode=mode,
     )
     blob = _bucket().blob(json_path)
     return json.loads(blob.download_as_bytes())
 
 
-# Cache of live signed URLs keyed by ``(fileset_id, book_id, chapter)``.
-# Each value is ``(url, expires_at_monotonic)``. Signing a URL does a
+# Cache of live signed URLs keyed by ``(fileset_id, book_id, chapter,
+# mode)``. Each value is ``(url, expires_at_monotonic)``. Signing a URL
+# does a
 # round-trip to IAM's signBlob API, which is measurable latency and
 # rate-limited; caching for slightly less than the TTL means clients
 # that hit the same chapter repeatedly pay that cost at most once per
@@ -165,20 +189,21 @@ def signed_audio_url(
     chapter: int,
     voice_name: str,
     ttl_seconds: Optional[int] = None,
+    mode: str = "verse",
 ) -> str:
     """Return a V4 signed URL for the chapter's MP3.
 
     Works without a JSON key on App Engine / Cloud Run by passing the
     runtime SA's email + an OAuth access token; GCS asks IAM to sign.
 
-    The URL is cached per ``(fileset_id, voice_name, book_id, chapter)``
-    until ``_SIGNED_URL_SAFETY_MARGIN_SECONDS`` before its real expiry
-    so back-to-back requests for the same chapter don't each trigger
-    an IAM signBlob call."""
+    The URL is cached per ``(fileset_id, voice_name, book_id, chapter,
+    mode)`` until ``_SIGNED_URL_SAFETY_MARGIN_SECONDS`` before its real
+    expiry so back-to-back requests for the same chapter don't each
+    trigger an IAM signBlob call."""
     if ttl_seconds is None:
         ttl_seconds = settings.AUDIO_SIGNED_URL_TTL_SECONDS
 
-    cache_key = (fileset_id, voice_name, book_id, chapter)
+    cache_key = (fileset_id, voice_name, book_id, chapter, mode)
     now = time.monotonic()
     with _signed_url_cache_lock:
         cached = _signed_url_cache.get(cache_key)
@@ -186,7 +211,7 @@ def signed_audio_url(
             return cached[0]
 
     audio_path, _ = chapter_object_paths(
-        fileset_id, book_id, chapter, voice_name,
+        fileset_id, book_id, chapter, voice_name, mode=mode,
     )
     blob = _bucket().blob(audio_path)
 
@@ -218,8 +243,23 @@ def get_current_year_month() -> str:
     return _utc_naive_now().strftime("%Y-%m")
 
 
-def _state_object_path(kind: str, fileset_id: str, ym: str) -> str:
-    return f"state/{kind}/{fileset_id}/{ym}.json"
+def _state_object_path(
+    kind: str, fileset_id: str, ym: str, mode: str | None = None,
+) -> str:
+    """Path of a per-month run-state object.
+
+    ``mode=None`` keeps the shared (pre-modes) layout
+    ``state/{kind}/{fileset}/{ym}.json``; a mode adds a level:
+    ``state/{kind}/{fileset}/{mode}/{ym}.json``.
+
+    Locks are per-mode so a completed verse-mode run must not block a
+    chapter-mode run. Usage counters stay shared (``mode=None``):
+    ``MONTHLY_TTS_CHAR_LIMIT`` is a spend ceiling on the whole fileset,
+    not per artifact set, so both modes draw from the same counter —
+    a combined verse+chapter run can never exceed 1x the cap."""
+    if mode is None:
+        return f"state/{kind}/{fileset_id}/{ym}.json"
+    return f"state/{kind}/{fileset_id}/{mode}/{ym}.json"
 
 
 def read_monthly_usage(fileset_id: str, ym: str | None = None) -> int:
@@ -313,8 +353,9 @@ def acquire_run_lock(
     fileset_id: str,
     stale_after_hours: int,
     ym: str | None = None,
+    mode: str = "verse",
 ) -> Tuple[bool, str]:
-    """Try to acquire the once-per-month run lock.
+    """Try to acquire the once-per-month run lock for ``mode``.
 
     Returns ``(acquired, reason)``. ``reason`` is one of:
       - ``"acquired"`` — fresh lock created; caller may proceed.
@@ -325,7 +366,7 @@ def acquire_run_lock(
       - ``"active_run"`` — another run is in progress and is fresh.
         Caller must exit without doing work."""
     ym = ym or get_current_year_month()
-    path = _state_object_path("lock", fileset_id, ym)
+    path = _state_object_path("lock", fileset_id, ym, mode=mode)
     blob = _bucket().blob(path)
     now = _utc_naive_now()
 
@@ -389,10 +430,12 @@ def mark_run_complete(
     chapters_generated: int,
     reason: str,
     ym: str | None = None,
+    mode: str = "verse",
 ) -> None:
-    """Mark the current month's lock as completed. Idempotent."""
+    """Mark the current month's lock for ``mode`` as completed.
+    Idempotent."""
     ym = ym or get_current_year_month()
-    path = _state_object_path("lock", fileset_id, ym)
+    path = _state_object_path("lock", fileset_id, ym, mode=mode)
     blob = _bucket().blob(path)
     if not blob.exists():
         return
@@ -412,4 +455,6 @@ def mark_run_complete(
             if_generation_match=blob.generation,
         )
     except _GCS_UPLOAD_CONFLICT:
-        logger.warning("Lock object changed concurrently; cannot mark complete.")
+        logger.warning(
+            "Lock object changed concurrently; cannot mark complete."
+        )

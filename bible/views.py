@@ -12,6 +12,7 @@ from bible.utils.provider_errors import provider_error_fields
 from bible.services.google_tts.registry import get_tts_config
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import (
+    audio_mode_for_fileset,
     canonical_sword_fileset_id,
     is_sword_fileset,
 )
@@ -248,9 +249,14 @@ class AudioTimestampView(APIView):
             if is_sword_fileset(fileset_id):
                 canon = canonical_sword_fileset_id(fileset_id)
                 voice_name = get_tts_config(canon)["voice_name"]
+                # Audio fileset id selects the artifact layout:
+                # LVSGLU8C1DA -> audio/ (verse mode),
+                # LVSGLU8C2DA -> audio_chapter/ (chapter mode).
+                audio_mode = audio_mode_for_fileset(fileset_id)
                 try:
                     payload = gcs.read_timestamps_json(
                         canon, book_id, int(chapter), voice_name,
+                        mode=audio_mode,
                     )
                 except gcs_exceptions.NotFound:
                     return Response(

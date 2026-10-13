@@ -17,10 +17,14 @@ SWORD_TRANSLATIONS = {
         "language": "Latvian",
         "language_iso": "lvs",  # ISO 639-3
         "license": "Public Domain",
-        # Audio fileset id follows DBT convention:
+        # Audio fileset ids follow DBT convention:
         #   {base_id}{size}{version}{type}
-        #   C = Complete, 1 = version, DA = Digital Audio
+        #   C = Complete, N = version, DA = Digital Audio
+        # C1DA serves artifacts stitched from per-verse TTS calls
+        # (generation mode "verse"); C2DA serves whole-chapter TTS
+        # artifacts with SSML-mark verse timestamps (mode "chapter").
         "audio_fileset_id": "LVSGLU8C1DA",
+        "audio_fileset_id_chapter": "LVSGLU8C2DA",
     },
 }
 
@@ -38,7 +42,21 @@ def canonical_sword_fileset_id(fileset_id: str) -> str | None:
             return sfid
         if meta.get("audio_fileset_id", "").upper() == key:
             return sfid
+        if meta.get("audio_fileset_id_chapter", "").upper() == key:
+            return sfid
     return None
+
+
+def audio_mode_for_fileset(fileset_id: str) -> str:
+    """Return the GCS audio generation mode a fileset id reads from:
+    ``"chapter"`` for ``audio_fileset_id_chapter`` ids (e.g.
+    LVSGLU8C2DA), ``"verse"`` for everything else. Unknown ids default
+    to ``"verse"`` — the historical layout."""
+    key = (fileset_id or "").strip().upper()
+    for meta in SWORD_TRANSLATIONS.values():
+        if meta.get("audio_fileset_id_chapter", "").upper() == key:
+            return "chapter"
+    return "verse"
 
 
 def is_sword_fileset(fileset_id: str) -> bool:
