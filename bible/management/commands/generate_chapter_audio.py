@@ -199,13 +199,30 @@ class Command(BaseCommand):
                             delta, book_id, chap,
                         )
 
-        gcs.mark_run_complete(
-            fileset_id,
-            chars_used=budget.used,
-            chapters_generated=generated,
-            reason=complete_reason,
-            mode=mode,
-        )
+        # If every pending chapter hit the generic
+        # ``except -> continue`` path, marking the run complete
+        # would lock the month out with zero artifacts — a bug or
+        # outage would then wait a whole month for a retry. Leave
+        # the lock "running" instead; it goes stale after
+        # ``LOCK_STALE_HOURS`` so a later run can retry.
+        if (
+            pending and generated == 0
+            and complete_reason == "all_done"
+        ):
+            complete_reason = "all_failed"
+            logger.error(
+                "mode=%s all %d pending chapters failed; leaving "
+                "the run lock un-completed so a later run retries.",
+                mode, len(pending),
+            )
+        else:
+            gcs.mark_run_complete(
+                fileset_id,
+                chars_used=budget.used,
+                chapters_generated=generated,
+                reason=complete_reason,
+                mode=mode,
+            )
         self.stdout.write(
             f"mode={mode} done generated={generated} "
             f"chars_used={budget.used} "

@@ -1,6 +1,7 @@
 """Per-chapter audio synthesis: SWORD verses -> Cloud TTS -> MP3
 plus per-verse timestamps."""
 import io
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape
@@ -21,6 +22,8 @@ MAX_SSML_INPUT_BYTES = 4500
 
 _SSML_OPEN = "<speak>"
 _SSML_CLOSE = "</speak>"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -49,6 +52,11 @@ class Synthesizer:
             raise ValueError(f"Unknown SWORD fileset: {fileset_id!r}")
         cfg = get_tts_config(canon)
 
+        # Validate the mode before touching SWORD so a bogus mode
+        # fails fast instead of after expensive module I/O.
+        if mode not in ("verse", "chapter"):
+            raise ValueError(f"Unknown synthesis mode: {mode!r}")
+
         verses = self._sword.get_chapter_verses(canon, book_id, chapter)
         if not verses:
             raise ValueError(
@@ -57,9 +65,7 @@ class Synthesizer:
 
         if mode == "verse":
             return self._run_per_verse(verses, cfg, budget)
-        if mode == "chapter":
-            return self._run_per_chapter(verses, cfg, budget)
-        raise ValueError(f"Unknown synthesis mode: {mode!r}")
+        return self._run_per_chapter(verses, cfg, budget)
 
     def _run_per_verse(
         self,
@@ -144,6 +150,7 @@ class Synthesizer:
         chunks: list[bytes] = []
         timestamps: list[dict] = []
         cumulative = 0.0
+        missing_marks: List[str] = []
         # Consume budget per-segment right after each billed
         # ``synthesize_ssml`` call, mirroring the per-verse mode.
         for ssml, seg_verses in segments:
@@ -162,10 +169,16 @@ class Synthesizer:
             }
             # If the voice drops a mark (unsupported SSML subset), a
             # verse falls back to the previous verse's timestamp
-            # rather than disappearing from the payload entirely.
+            # rather than disappearing from the payload entirely —
+            # but the drop is counted and warned about below, since
+            # the fallback produces plausible-looking wrong data.
             last_ts = 0.0
             for v in seg_verses:
-                ts = mark_seconds.get(f"v{v['verse_start']}", last_ts)
+                mark = f"v{v['verse_start']}"
+                ts = mark_seconds.get(mark)
+                if ts is None:
+                    missing_marks.append(mark)
+                    ts = last_ts
                 timestamps.append({
                     "verse_start": v["verse_start"],
                     "timestamp": round(cumulative + ts, 3),
@@ -173,6 +186,14 @@ class Synthesizer:
                 last_ts = ts
             cumulative += duration
             chunks.append(audio)
+
+        if missing_marks:
+            logger.warning(
+                "Cloud TTS returned no timepoint for %d mark(s) "
+                "(%s); those verses reuse the previous verse's "
+                "timestamp and may be inaccurate.",
+                len(missing_marks), ", ".join(missing_marks),
+            )
 
         return ChapterArtifacts(
             mp3_bytes=b"".join(chunks),
@@ -203,6 +224,18 @@ class Synthesizer:
                 f'{escape(v["verse_text"])}'
             )
             frag_bytes = len(fragment.encode("utf-8"))
+            if frag_bytes + overhead > MAX_SSML_INPUT_BYTES:
+                # A single verse alone busts the segment budget; it
+                # is still emitted as its own over-budget segment
+                # (the API hard-rejects >5000 bytes with a 400), so
+                # make the anomaly loud in the logs.
+                logger.warning(
+                    "Verse %s fragment is %d bytes alone, over the "
+                    "%d-byte segment budget; the API rejects SSML "
+                    "inputs over 5000 bytes.",
+                    v["verse_start"], frag_bytes,
+                    MAX_SSML_INPUT_BYTES,
+                )
             if seg_verses and (
                 seg_bytes + frag_bytes > MAX_SSML_INPUT_BYTES
             ):

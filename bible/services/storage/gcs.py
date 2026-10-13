@@ -171,13 +171,12 @@ def read_timestamps_json(
     return json.loads(blob.download_as_bytes())
 
 
-# Cache of live signed URLs keyed by ``(fileset_id, book_id, chapter,
-# mode)``. Each value is ``(url, expires_at_monotonic)``. Signing a URL
-# does a
-# round-trip to IAM's signBlob API, which is measurable latency and
-# rate-limited; caching for slightly less than the TTL means clients
-# that hit the same chapter repeatedly pay that cost at most once per
-# TTL window per process.
+# Cache of live signed URLs keyed by ``(fileset_id, book_id,
+# chapter, mode)``. Each value is ``(url, expires_at_monotonic)``.
+# Signing a URL does a round-trip to IAM's signBlob API, which is
+# measurable latency and rate-limited; caching for slightly less
+# than the TTL means clients that hit the same chapter repeatedly
+# pay that cost at most once per TTL window per process.
 _SIGNED_URL_SAFETY_MARGIN_SECONDS = 60
 _signed_url_cache: dict = {}
 _signed_url_cache_lock = threading.Lock()
