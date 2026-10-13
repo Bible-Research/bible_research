@@ -34,8 +34,11 @@ provider. Routing happens in `bible/services/translation_service.py`:
 3. Everything else → DBT API v4 via `bible/services/dbt/client.py`.
 
 Known fileset ids: `ENGKJV` (KJV), `ENGESV_API` (ESV), `LVSGLU8`
-(Latvian Glück text), `LVSGLU8C1DA` (Latvian Glück generated audio).
-`*DA`-suffixed ids are audio filesets.
+(Latvian Glück text), `LVSGLU8C1DA` (Latvian Glück generated audio,
+verse-synthesis mode), `LVSGLU8C2DA` (same audio, chapter-synthesis
+mode via SSML marks — see `audio_mode_for_fileset` in
+`sword/registry.py`; artifacts live under GCS `audio/` vs
+`audio_chapter/`). `*DA`-suffixed ids are audio filesets.
 
 Book-name handling lives in `bible/utils/bible_books.py`
 (`get_dbt_book_id`, `get_book_name_from_id`, `get_testament`). There
