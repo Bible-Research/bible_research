@@ -947,7 +947,14 @@ unchanged. The translations listing emits both audio filesets.
 
 - Locks are per mode:
   `state/lock/{fileset}/{mode}/{YYYY-MM}.json` — a completed
-  verse-mode run does not block a chapter-mode run.
+  verse-mode run does not block a chapter-mode run. Locks written
+  before per-mode paths existed
+  (`state/lock/{fileset}/{YYYY-MM}.json`, no mode segment) are
+  orphaned and ignored by new runs.
+- If every pending chapter fails, the lock is left `running`
+  (the run reports `reason=all_failed`) rather than marked
+  completed with zero artifacts; it goes stale after
+  `LOCK_STALE_HOURS` so a later run retries.
 - Usage is shared:
   `state/usage/{fileset}/{YYYY-MM}.json` — the
   `MONTHLY_TTS_CHAR_LIMIT` cap is a per-fileset spend ceiling
