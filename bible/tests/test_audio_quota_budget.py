@@ -8,6 +8,9 @@ from django.test import override_settings
 from bible.services.google_tts.budget import BudgetExceeded, CharBudget
 
 
+_CMD = "bible.management.commands.generate_chapter_audio"
+
+
 def test_char_budget_basic():
     b = CharBudget(remaining=100)
     assert b.can_afford(60)
@@ -19,13 +22,13 @@ def test_char_budget_basic():
 
 
 @override_settings(MONTHLY_TTS_CHAR_LIMIT=300, LOCK_STALE_HOURS=24)
-@patch("bible.management.commands.generate_chapter_audio.gcs.mark_run_complete")
-@patch("bible.management.commands.generate_chapter_audio.gcs.increment_monthly_usage")
-@patch("bible.management.commands.generate_chapter_audio.gcs.read_monthly_usage")
-@patch("bible.management.commands.generate_chapter_audio.gcs.acquire_run_lock")
-@patch("bible.management.commands.generate_chapter_audio.gcs.list_completed_chapters")
-@patch("bible.management.commands.generate_chapter_audio.gcs.upload_chapter_artifacts")
-@patch("bible.management.commands.generate_chapter_audio.Synthesizer")
+@patch(f"{_CMD}.gcs.mark_run_complete")
+@patch(f"{_CMD}.gcs.increment_monthly_usage")
+@patch(f"{_CMD}.gcs.read_monthly_usage")
+@patch(f"{_CMD}.gcs.acquire_run_lock")
+@patch(f"{_CMD}.gcs.list_completed_chapters")
+@patch(f"{_CMD}.gcs.upload_chapter_artifacts")
+@patch(f"{_CMD}.Synthesizer")
 def test_command_stops_when_budget_too_small_for_next_chapter(
     synth_cls, upload, list_done, acquire, read_usage, increment, mark_done,
 ):
@@ -35,7 +38,9 @@ def test_command_stops_when_budget_too_small_for_next_chapter(
 
     inst = MagicMock()
 
-    def run_side_effect(fileset_id, book_id, chap, budget=None):
+    def run_side_effect(
+        fileset_id, book_id, chap, budget=None, mode="verse",
+    ):
         if budget is None:
             raise AssertionError("budget must be passed")
         if budget.remaining >= 200:

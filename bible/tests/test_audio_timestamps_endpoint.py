@@ -62,3 +62,32 @@ def test_sword_timestamps_gcs_failure_surfaces_provider_error(
     body = resp.json()
     assert body["error_code"] == "provider_error"
     assert "SECRET" not in body["error"]
+
+
+@patch("bible.views.get_tts_config")
+@patch("bible.views.gcs.read_timestamps_json")
+@pytest.mark.django_db
+def test_chapter_audio_fileset_reads_chapter_mode_paths(
+    read_ts, tts_cfg, auth_client,
+):
+    """LVSGLU8C2DA is the chapter-mode audio fileset: the timestamps
+    endpoint must read from the audio_chapter/ prefix (mode=chapter),
+    while the existing LVSGLU8C1DA keeps mode=verse."""
+    tts_cfg.return_value = {
+        "voice_name": "lv-LV-Chirp3-HD-Sadachbia",
+    }
+    read_ts.return_value = {"duration_seconds": 60.0, "data": []}
+
+    resp = auth_client.get(
+        "/api/v1/bible/timestamps/",
+        {"fileset_id": "LVSGLU8C2DA", "book": "John", "chapter": "3"},
+    )
+    assert resp.status_code == 200, resp.content
+    assert read_ts.call_args.kwargs["mode"] == "chapter"
+
+    resp = auth_client.get(
+        "/api/v1/bible/timestamps/",
+        {"fileset_id": "LVSGLU8C1DA", "book": "John", "chapter": "3"},
+    )
+    assert resp.status_code == 200, resp.content
+    assert read_ts.call_args.kwargs["mode"] == "verse"
