@@ -1117,6 +1117,67 @@ class TestPartialReordering(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('not found', str(response.data))
 
+    def test_reorder_rejects_non_object_updates(self):
+        """updates entries that are not JSON objects return a
+        400, not a 500 from update.get."""
+        for bad in ('x', 42, None, [1, 2]):
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                {'tag_id': self.tag.id, 'updates': [bad]},
+                format='json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'update={bad!r}'
+            )
+            self.assertEqual(
+                response.json()['error'], 'validation_error'
+            )
+
+    def test_reorder_rejects_non_numeric_position(self):
+        """A position float() cannot parse returns a 400, not a
+        500 ValueError/TypeError."""
+        for bad_pos in ('abc', {}, [1]):
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                {
+                    'tag_id': self.tag.id,
+                    'updates': [
+                        {
+                            'note_id': self.notes[0].id,
+                            'position': bad_pos,
+                        },
+                    ],
+                },
+                format='json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'position={bad_pos!r}'
+            )
+            self.assertEqual(
+                response.json()['error'], 'validation_error'
+            )
+
+    def test_reorder_rejects_non_string_note_id(self):
+        """A non-string note_id returns a 400, not a 500
+        TypeError from the duplicate-check dict."""
+        for bad_id in ({'x': 1}, [1], 42):
+            response = self.client.post(
+                '/api/v1/notes/reorder/',
+                {
+                    'tag_id': self.tag.id,
+                    'updates': [
+                        {'note_id': bad_id, 'position': 1.0},
+                    ],
+                },
+                format='json'
+            )
+            self.assertEqual(
+                response.status_code, 400, f'note_id={bad_id!r}'
+            )
+            self.assertEqual(
+                response.json()['error'], 'validation_error'
+            )
+
 
 class ReadingPositionViewSetTest(TestCase):
     """Integration tests for the ReadingPositionViewSet API."""
@@ -1625,6 +1686,15 @@ class TestNoteMove(TestCase):
                 note_text=name, tag=tag2, user=self.user,
                 tag_position=pos,
             )
+        # A foreign user's public note in the same tag holds
+        # the tag-wide minimum. unique_tag_position_per_tag is
+        # tag-wide, not per-user, so temps must park below it
+        # too — parking below only the requester's own minimum
+        # (-2.0) would put a temp on -7.0 and 409.
+        foreign = Note.objects.create(
+            note_text='foreign', tag=tag2, user=self.other_user,
+            public=True, tag_position=-7.0,
+        )
         # The 0.0 -> 1e-10 gap is below MOVE_GAP_EPSILON, so
         # moving m after c forces a full rebalance.
         resp = self._move(made['m'], made['c'], tag=tag2)
@@ -1639,6 +1709,10 @@ class TestNoteMove(TestCase):
         ):
             made[name].refresh_from_db()
             self.assertEqual(made[name].tag_position, expected)
+        # The foreign note is not part of the rebalance and
+        # keeps its negative position.
+        foreign.refresh_from_db()
+        self.assertEqual(foreign.tag_position, -7.0)
 
     def test_move_same_note_rejected(self):
         """note_id == target_note_id is a 400."""
@@ -1730,3 +1804,25 @@ class TestNoteMove(TestCase):
         resp = self._move(outsider, self.notes[0])
         self.assertEqual(resp.status_code, 400)
         self.assertIn('not found', str(resp.data))
+
+    def test_move_rejects_non_string_ids(self):
+        """Non-string note_id/target_note_id values return a
+        400, not a 500 TypeError on the id lookup."""
+        for field in ('note_id', 'target_note_id'):
+            for bad in ({'x': 1}, [1], 42):
+                payload = {
+                    'tag_id': self.tag.id,
+                    'note_id': self.notes[0].id,
+                    'target_note_id': self.notes[1].id,
+                    'placement': 'after',
+                }
+                payload[field] = bad
+                resp = self.client.post(
+                    self.URL, payload, format='json'
+                )
+                self.assertEqual(
+                    resp.status_code, 400, f'{field}={bad!r}'
+                )
+                self.assertEqual(
+                    resp.json()['error'], 'validation_error'
+                )

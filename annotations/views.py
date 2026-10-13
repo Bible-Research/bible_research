@@ -63,18 +63,25 @@ def get_accessible_notes_qs(user):
     return Note.objects.filter(public=True)
 
 
-def _park_notes_for_renumber(notes, tag_id):
+def _park_notes_for_renumber(notes, tag_id, extra_floor=None):
     """
     Assign every note a temporary tag_position parked below
     all positions currently used in the tag — including real
     negative values left behind by repeated 'before first'
     moves — and below the 1..N range a renumber writes next,
     so unique_tag_position_per_tag cannot trip mid-update.
+
+    *extra_floor* is the lowest final position the caller will
+    write in phase two (e.g. reorder's minimum requested
+    position); temps park below it too so client-requested
+    finals can never land inside the temp range.
     """
     lowest = Note.objects.filter(tag_id=tag_id).aggregate(
         lowest=Min('tag_position')
     )['lowest']
     base = min(0, lowest) if lowest is not None else 0
+    if extra_floor is not None:
+        base = min(base, extra_floor)
     for idx, note in enumerate(notes):
         note.tag_position = base - idx - 1
 
@@ -653,23 +660,47 @@ class NoteViewSet(viewsets.ModelViewSet):
         # Validate update structure
         note_ids = []
         position_map = {}
-        
+
         for idx, update in enumerate(updates):
+            if not isinstance(update, dict):
+                return Response(
+                    {
+                        'error': 'validation_error',
+                        'message': (
+                            f'Update at index {idx} must be an '
+                            f'object with note_id and position.'
+                        ),
+                    },
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
+
             note_id = update.get('note_id')
             position = update.get('position')
-            
-            if not note_id or position is None:
+
+            if not isinstance(note_id, str) or not note_id:
+                return Response(
+                    {
+                        'error': 'validation_error',
+                        'message': (
+                            f'Update at index {idx} needs a '
+                            f'non-empty string note_id.'
+                        ),
+                    },
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
+
+            if position is None:
                 return Response(
                     {
                         'error': 'validation_error',
                         'message': (
                             f'Update at index {idx} is missing '
-                            f'note_id or position.'
+                            f'position.'
                         ),
                     },
                     status=drf_status.HTTP_400_BAD_REQUEST,
                 )
-            
+
             # Check for duplicate note_ids in request
             if note_id in position_map:
                 return Response(
@@ -682,9 +713,22 @@ class NoteViewSet(viewsets.ModelViewSet):
                     },
                     status=drf_status.HTTP_400_BAD_REQUEST,
                 )
-            
+
+            try:
+                position_map[note_id] = float(position)
+            except (TypeError, ValueError):
+                return Response(
+                    {
+                        'error': 'validation_error',
+                        'message': (
+                            f'Update at index {idx} has a '
+                            f'non-numeric position.'
+                        ),
+                    },
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
+
             note_ids.append(note_id)
-            position_map[note_id] = float(position)
         
         # Check for duplicate positions in request
         positions = list(position_map.values())
@@ -729,8 +773,13 @@ class NoteViewSet(viewsets.ModelViewSet):
                 # during swaps:
                 # Phase 1: Move to temporary negative positions,
                 # parked below any real negatives already in
-                # the tag.
-                _park_notes_for_renumber(notes, tag_id)
+                # the tag and below the lowest requested final
+                # position, so client-requested finals cannot
+                # land inside the temp range and trip the
+                # constraint as a misleading 409.
+                _park_notes_for_renumber(
+                    notes, tag_id, extra_floor=min(positions)
+                )
 
                 Note.objects.bulk_update(notes, ['tag_position'])
                 
@@ -913,6 +962,12 @@ class NoteViewSet(viewsets.ModelViewSet):
             return _err('note_id is required.')
         if not target_note_id:
             return _err('target_note_id is required.')
+        # Unhashable/non-string ids would raise TypeError on the
+        # by_id lookup below instead of failing validation.
+        if not isinstance(note_id, str):
+            return _err('note_id must be a string.')
+        if not isinstance(target_note_id, str):
+            return _err('target_note_id must be a string.')
         if placement not in ('after', 'before'):
             return _err("placement must be 'after' or 'before'.")
         if note_id == target_note_id:
