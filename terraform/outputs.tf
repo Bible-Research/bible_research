@@ -49,9 +49,13 @@ output "audio_generator_job_name" {
   value = google_cloud_run_v2_job.audio_generator.name
 }
 
-output "audio_scheduler_job_name" {
-  value = google_cloud_scheduler_job.monthly_audio_generator.name
-}
+# Commented out alongside the scheduler resources in scheduler.tf
+# (disabled 2026-09-17) — the reference would fail terraform
+# validate while the resource is commented out. Uncomment when the
+# scheduler is re-enabled.
+# output "audio_scheduler_job_name" {
+#   value = google_cloud_scheduler_job.monthly_audio_generator.name
+# }
 
 # Base image path (without tag) for the audio-generator Cloud Run Job.
 # The Deploy workflow appends ":<git-sha>" when building, pushing, and
