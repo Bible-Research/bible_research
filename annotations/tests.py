@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 from django.contrib.auth import get_user_model
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.test import APIRequestFactory, APIClient
 from rest_framework.request import Request
+from rest_framework.views import APIView
 from annotations.serializers import (
     TagSerializer,
     NoteSerializer,
@@ -19,6 +21,7 @@ from annotations.models import (
     generate_note_id,
 )
 from bible.models import Verse
+from bible_research.permissions import GuestReadOnly
 
 
 class FakeProviderError(Exception):
@@ -1893,3 +1896,193 @@ class TestNoteMove(TestCase):
         resp = self.client.post(self.URL, [1, 2], format='json')
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()['error'], 'validation_error')
+
+
+class TestGuestReadOnly(TestCase):
+    """
+    Regression tests for the shared 'guest' account being
+    read-only (GitHub issue #58).
+
+    DeviceAndCountryMiddleware falls back to authenticating
+    requests as the single shared 'guest' user, and anyone can
+    end up acting as that account. Guest may read its own data
+    but every write must be rejected with 403.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # pytest's conftest does not define REST_FRAMEWORK, so
+        # DRF binds APIView.permission_classes to its AllowAny
+        # default at import time — a class attribute that
+        # override_settings cannot change afterwards. Patch the
+        # attribute to mirror what production
+        # DEFAULT_PERMISSION_CLASSES yields (IsAuthenticated +
+        # GuestReadOnly) for the viewsets relying on it.
+        cls._permission_classes_patch = patch.object(
+            APIView,
+            'permission_classes',
+            [IsAuthenticated, GuestReadOnly],
+        )
+        cls._permission_classes_patch.start()
+        cls.addClassCleanup(cls._permission_classes_patch.stop)
+
+    def setUp(self):
+        User = get_user_model()
+        self.guest = User.objects.create_user(
+            username='guest',
+            email='guest@example.com',
+            password=None,
+        )
+        self.user = User.objects.create_user(
+            username='regular_user',
+            email='regular@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.guest, name='Guest tag'
+        )
+        self.note = Note.objects.create(
+            user=self.guest,
+            tag=self.tag,
+            note_text='Guest note',
+        )
+        self.comment = Comment.objects.create(
+            user=self.guest,
+            note=self.note,
+            content='Guest comment',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.guest)
+
+    def test_guest_can_read_own_tags(self):
+        """GET /api/v1/tags/ still works for guest."""
+        resp = self.client.get('/api/v1/tags/')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_guest_can_read_own_notes(self):
+        """GET /api/v1/notes/ still works for guest."""
+        resp = self.client.get('/api/v1/notes/')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_guest_can_read_comments(self):
+        """GET note comments still works for guest."""
+        resp = self.client.get(
+            f'/api/v1/notes/{self.note.id}/comments/'
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    def test_guest_cannot_create_tag(self):
+        resp = self.client.post(
+            '/api/v1/tags/', {'name': 'Hijack'}, format='json'
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(
+            Tag.objects.filter(name='Hijack').exists()
+        )
+
+    def test_guest_cannot_update_tag(self):
+        resp = self.client.patch(
+            f'/api/v1/tags/{self.tag.id}/',
+            {'name': 'Renamed'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_delete_tag(self):
+        """The tag-delete cascade can't be triggered by guest."""
+        resp = self.client.delete(
+            f'/api/v1/tags/{self.tag.id}/'
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(
+            Tag.objects.filter(pk=self.tag.pk).exists()
+        )
+        self.assertTrue(
+            Note.objects.filter(pk=self.note.pk).exists()
+        )
+
+    def test_guest_cannot_create_note(self):
+        resp = self.client.post(
+            '/api/v1/notes/',
+            {'note_text': 'Hijack note'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_update_note(self):
+        resp = self.client.patch(
+            f'/api/v1/notes/{self.note.id}/',
+            {'note_text': 'Hijacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_delete_note(self):
+        resp = self.client.delete(
+            f'/api/v1/notes/{self.note.id}/'
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(
+            Note.objects.filter(pk=self.note.pk).exists()
+        )
+
+    def test_guest_cannot_create_comment(self):
+        resp = self.client.post(
+            f'/api/v1/notes/{self.note.id}/comments/',
+            {'content': 'Hijack comment'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_update_comment(self):
+        resp = self.client.patch(
+            f'/api/v1/notes/{self.note.id}'
+            f'/comments/{self.comment.id}/',
+            {'content': 'Hijacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_delete_comment(self):
+        resp = self.client.delete(
+            f'/api/v1/notes/{self.note.id}'
+            f'/comments/{self.comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_reorder_notes(self):
+        """Custom POST actions are covered too."""
+        resp = self.client.post(
+            '/api/v1/notes/reorder/',
+            {
+                'tag_id': self.tag.id,
+                'updates': [
+                    {'note_id': self.note.id, 'position': 1.0}
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_write_reading_position(self):
+        resp = self.client.post(
+            '/api/v1/reading-positions/',
+            {'book': 'John', 'chapter': 1, 'verse': 1},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_upload_note_image(self):
+        resp = self.client.post(
+            f'/api/v1/notes/{self.note.id}/images/'
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_regular_user_can_still_write(self):
+        """Non-guest authenticated users are unaffected."""
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.post(
+            '/api/v1/tags/', {'name': 'My tag'}, format='json'
+        )
+        self.assertEqual(resp.status_code, 201)
