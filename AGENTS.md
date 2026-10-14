@@ -86,6 +86,10 @@ can contain request URLs with credentials.
 - `DeviceAndCountryMiddleware` auto-provisions/authenticates users
   from device + language headers and falls back to a `guest` user —
   anonymous requests are not necessarily unauthenticated.
+- The shared `guest` account is read-only:
+  `bible_research/permissions.py` `GuestReadOnly` (wired into
+  `DEFAULT_PERMISSION_CLASSES` plus the image/reading-position
+  views that override permissions) rejects its writes with 403.
 - Serializers scope tag/note querysets to `request.user`, else to the
   `guest` user.
 

@@ -49,10 +49,8 @@ output "audio_generator_job_name" {
   value = google_cloud_run_v2_job.audio_generator.name
 }
 
-# Commented out alongside the scheduler resources in scheduler.tf
-# (disabled 2026-09-17) — the reference would fail terraform
-# validate while the resource is commented out. Uncomment when the
-# scheduler is re-enabled.
+# Disabled together with the scheduler resources in scheduler.tf
+# (2026-09-17). Uncomment when re-enabling the monthly job.
 # output "audio_scheduler_job_name" {
 #   value = google_cloud_scheduler_job.monthly_audio_generator.name
 # }
