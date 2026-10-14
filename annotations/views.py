@@ -217,7 +217,16 @@ class NoteViewSet(viewsets.ModelViewSet):
     """
     serializer_class = NoteSerializer
     pagination_class = NotesPagination
-    # permission_classes = [permissions.IsAuthenticated]
+
+    def get_permissions(self):
+        # Reads are open: get_queryset scopes anonymous
+        # requests to public notes only. Writes and the
+        # other actions always require authentication —
+        # explicitly, not just via DeviceAndCountryMiddleware
+        # auto-provisioning (issue #47).
+        if self.action in ('list', 'retrieve', 'order_index'):
+            return [AllowAny()]
+        return [IsAuthenticated()]
 
     def get_serializer_context(self):
         """Add fileset_id from query params to serializer context."""
@@ -248,6 +257,9 @@ class NoteViewSet(viewsets.ModelViewSet):
                 "Unauthenticated user attempted "
                 "to create a note"
             )
+            raise PermissionDenied(
+                "Authentication required to create a note."
+            )
 
     def perform_update(self, serializer):
         """
@@ -264,7 +276,9 @@ class NoteViewSet(viewsets.ModelViewSet):
             f"{user.username if user.is_authenticated else 'Anonymous'}"
         )
 
-        if user.is_authenticated and instance.user != user:
+        if not user.is_authenticated:
+            raise PermissionDenied("Authentication required.")
+        if instance.user != user:
             logger.warning(
                 f"Permission denied: User {user.username} "
                 f"attempted to update note ID: {instance.id} "
@@ -294,8 +308,9 @@ class NoteViewSet(viewsets.ModelViewSet):
             f"{user.username if user.is_authenticated else 'Anonymous'}"
         )
 
-        if (user.is_authenticated and
-                instance.user != user):
+        if not user.is_authenticated:
+            raise PermissionDenied("Authentication required.")
+        if instance.user != user:
             logger.warning(
                 f"Permission denied: User {user.username} "
                 f"attempted to delete note ID: {instance.id} "
@@ -460,7 +475,10 @@ class NoteViewSet(viewsets.ModelViewSet):
                         f"Fetching only own notes"
                     )
             else:
-                queryset = Note.objects.filter(public=public)
+                # Anonymous callers always see public notes
+                # only; the ?public= flag must not widen the
+                # scope to private notes (issue #47).
+                queryset = get_accessible_notes_qs(user)
                 logger.debug(
                     "Unauthenticated user: "
                     "Fetching public notes only"
@@ -491,6 +509,8 @@ class NoteViewSet(viewsets.ModelViewSet):
         Bulk-create notes under a single tag.
         POST /api/v1/notes/bulk/
         """
+        if not request.user.is_authenticated:
+            raise PermissionDenied('Authentication required.')
         serializer = BulkNoteCreateSerializer(
             data=request.data,
             context=self.get_serializer_context(),
@@ -560,10 +580,10 @@ class NoteViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         user = request.user
-        # Defense-in-depth: under production settings a truly
-        # anonymous request is rejected earlier by the default
-        # IsAuthenticated permission (and the device middleware
-        # auto-provisions a user for almost every request).
+        # Defense-in-depth: anonymous requests are rejected
+        # earlier by this viewset's IsAuthenticated permission
+        # (and the device middleware auto-provisions a user for
+        # almost every request).
         if not user.is_authenticated:
             return Response({'count': 0, 'results': []})
 
@@ -757,6 +777,10 @@ class NoteViewSet(viewsets.ModelViewSet):
             )
 
         user = request.user
+        # Defense-in-depth (mirrors move/): filtering on an
+        # AnonymousUser would raise TypeError -> 500.
+        if not user.is_authenticated:
+            raise PermissionDenied('Authentication required.')
 
         try:
             with transaction.atomic():

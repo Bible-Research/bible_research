@@ -552,6 +552,13 @@ GET /api/v1/notes/?tag_id=TAG123456789ABCDE
 Authorization: Token <your-token>
 ```
 
+Anonymous callers (no `Authorization` header) may read
+public notes; all other note operations require
+authentication (401/403 otherwise). In production the
+`DeviceAndCountryMiddleware` usually auto-provisions a
+device (or `guest`) user, so truly anonymous requests are
+rare — the viewset still enforces the contract explicitly.
+
 **Query Parameters**:
 - `tag_id` (required): Tag ID to filter notes
 - `ordering` (optional): Sort order
@@ -952,8 +959,15 @@ curl http://localhost:8000/api/v1/notes/ \
 
 When no authenticated user is available:
 - Tags: Guest user's tags are shown
-- Notes: Only public notes are visible
-- Creation: New content is assigned to guest user
+- Notes: Only public notes are visible. Note reads (`GET
+  /api/v1/notes/`, `GET /api/v1/notes/{id}/`,
+  `GET /api/v1/notes/order-index/`) are open to anonymous
+  callers and scoped to public notes. All note writes
+  (`POST`/`PUT`/`PATCH`/`DELETE`, `reorder/`, `move/`,
+  `bulk/`, `linked/`) require authentication and return
+  401/403 for anonymous callers — content is NOT assigned to
+  the guest user.
+- Creation (tags): New content is assigned to guest user
 
 ---
 

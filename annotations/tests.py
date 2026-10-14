@@ -933,7 +933,8 @@ class LinkedNotesTest(TestCase):
         resp = self._post([])
         self.assertEqual(resp.status_code, 400)
 
-    def test_unauthenticated_returns_empty(self):
+    def test_unauthenticated_requires_auth(self):
+        """Anonymous linked/ requests are rejected (401/403)."""
         self._note(self.user, 'On John 3:16', [self.v316])
         client = APIClient()
         resp = client.post(
@@ -943,8 +944,7 @@ class LinkedNotesTest(TestCase):
             ]},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()['count'], 0)
+        self.assertIn(resp.status_code, (401, 403))
 
     def test_no_upstream_calls_and_no_n_plus_1(self):
         """linked/ makes no per-note provider calls and issues a
@@ -977,6 +977,174 @@ class LinkedNotesTest(TestCase):
         self.assertEqual(data['results'][0]['headings'], [])
         tag = data['results'][0]['tag']
         self.assertEqual(tag['name'], 'LinkedTag')
+
+
+class NoteAnonymousAccessTest(TestCase):
+    """
+    Anonymous /notes/ requests (issue #47): reads must expose
+    only public notes and writes must be rejected with
+    401/403 rather than 500ing or silently succeeding. The
+    test environment omits DeviceAndCountryMiddleware, so
+    request.user is a real AnonymousUser here.
+    """
+
+    LIST_URL = '/api/v1/notes/'
+    REORDER_URL = '/api/v1/notes/reorder/'
+    BULK_URL = '/api/v1/notes/bulk/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='anon_notes_owner',
+            email='anon_notes@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='AnonTag',
+        )
+        self.public_note = Note.objects.create(
+            user=self.user,
+            tag=self.tag,
+            note_text='public note',
+            public=True,
+            tag_position=1,
+        )
+        self.private_note = Note.objects.create(
+            user=self.user,
+            tag=self.tag,
+            note_text='private note',
+            public=False,
+            tag_position=2,
+        )
+        # Unauthenticated client on purpose — do NOT
+        # force_authenticate.
+        self.client = APIClient()
+
+    def _list_ids(self, params=''):
+        resp = self.client.get(f'{self.LIST_URL}{params}')
+        self.assertEqual(resp.status_code, 200)
+        return [n['id'] for n in resp.json()['results']]
+
+    def test_anonymous_list_sees_public_only(self):
+        """GET /notes/ anonymous must not leak private notes."""
+        ids = self._list_ids()
+        self.assertIn(self.public_note.id, ids)
+        self.assertNotIn(self.private_note.id, ids)
+
+    def test_anonymous_list_public_param_still_public_only(self):
+        """?public=true must not widen anonymous scope."""
+        ids = self._list_ids('?public=true')
+        self.assertIn(self.public_note.id, ids)
+        self.assertNotIn(self.private_note.id, ids)
+
+    def test_anonymous_retrieve_public_note_200(self):
+        """GET /notes/{id}/ on a public note works for anon."""
+        resp = self.client.get(
+            f'{self.LIST_URL}{self.public_note.id}/'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['id'], self.public_note.id)
+
+    def test_anonymous_retrieve_private_note_404(self):
+        """Private notes are invisible to anon (no leak)."""
+        resp = self.client.get(
+            f'{self.LIST_URL}{self.private_note.id}/'
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_anonymous_create_rejected(self):
+        """POST /notes/ anonymous -> 401/403, nothing saved."""
+        resp = self.client.post(
+            self.LIST_URL,
+            {'tag': self.tag.id, 'note_text': 'anon note'},
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertEqual(
+            Note.objects.filter(note_text='anon note').count(),
+            0,
+        )
+
+    def test_anonymous_update_public_note_rejected(self):
+        """PATCH on a public note anonymous -> 401/403."""
+        resp = self.client.patch(
+            f'{self.LIST_URL}{self.public_note.id}/',
+            {'note_text': 'hijacked'},
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.public_note.refresh_from_db()
+        self.assertEqual(self.public_note.note_text, 'public note')
+        self.assertEqual(self.public_note.user, self.user)
+
+    def test_anonymous_delete_public_note_rejected(self):
+        """DELETE on a public note anonymous -> 401/403."""
+        resp = self.client.delete(
+            f'{self.LIST_URL}{self.public_note.id}/'
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertTrue(
+            Note.objects.filter(
+                id=self.public_note.id
+            ).exists()
+        )
+
+    def test_anonymous_reorder_rejected(self):
+        """POST /notes/reorder/ anonymous -> 401/403, no 500."""
+        resp = self.client.post(
+            self.REORDER_URL,
+            {
+                'tag_id': self.tag.id,
+                'updates': [
+                    {
+                        'note_id': self.public_note.id,
+                        'position': 99.0,
+                    }
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_anonymous_bulk_create_rejected(self):
+        """POST /notes/bulk/ anonymous -> 401/403, no 500."""
+        resp = self.client.post(
+            self.BULK_URL,
+            {
+                'tag_id': self.tag.id,
+                'notes': [{'note_text': 'anon bulk'}],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertEqual(
+            Note.objects.filter(
+                note_text='anon bulk'
+            ).count(),
+            0,
+        )
+
+    def test_anonymous_move_rejected(self):
+        """POST /notes/move/ anonymous -> 401/403, no 500."""
+        resp = self.client.post(
+            '/api/v1/notes/move/',
+            {
+                'tag_id': self.tag.id,
+                'note_id': self.public_note.id,
+                'target_note_id': self.private_note.id,
+                'placement': 'after',
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_authenticated_owner_still_sees_private(self):
+        """Regression guard: the owner still lists own notes."""
+        self.client.force_authenticate(user=self.user)
+        ids = self._list_ids()
+        self.assertIn(self.public_note.id, ids)
+        self.assertIn(self.private_note.id, ids)
 
 
 class TestPartialReordering(TestCase):
