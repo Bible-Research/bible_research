@@ -1,0 +1,19 @@
+name: Terraform (skip)
+
+# Branch protection requires the "terraform" check on every PR, but
+# terraform.yml only runs when terraform/** changes. This stub emits
+# a passing check of the same name so non-terraform PRs (e.g.
+# Dependabot bumps) are not blocked forever by a pending check.
+on:
+  pull_request:
+    paths-ignore:
+      - "terraform/**"
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No terraform changes; skipping."

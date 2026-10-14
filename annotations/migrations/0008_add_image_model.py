@@ -35,6 +35,19 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='image',
-            constraint=models.CheckConstraint(check=models.Q(models.Q(('comment__isnull', False), ('note__isnull', True)), models.Q(('comment__isnull', True), ('note__isnull', False)), _connector='OR'), name='image_exactly_one_parent'),
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(
+                        ('comment__isnull', False),
+                        ('note__isnull', True),
+                    ),
+                    models.Q(
+                        ('comment__isnull', True),
+                        ('note__isnull', False),
+                    ),
+                    _connector='OR',
+                ),
+                name='image_exactly_one_parent',
+            ),
         ),
     ]
