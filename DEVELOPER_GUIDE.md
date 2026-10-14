@@ -1080,13 +1080,48 @@ python manage.py collectstatic --noinput
 
 ### Database Backups
 
-```bash
-# Backup
-pg_dump bibledb > db_backups/backup_$(date +%Y%m%d).sql
+Backups are automated by `db_backups/local_db_backup.sh`, which
+reads the connection details from `config.yaml`
+(`DATABASES.default`) and runs `pg_dump` over TCP. No local
+PostgreSQL server or role is needed — only the client tools.
 
-# Restore
-psql bibledb < db_backups/backup_20251228.sql
+**Ubuntu/Debian setup** (first time only):
+
+```bash
+sudo apt update
+sudo apt install postgresql-client
 ```
+
+**Run a backup** (from the repo root — the script uses relative
+paths):
+
+```bash
+bash db_backups/local_db_backup.sh
+```
+
+This writes a timestamped custom-format dump to
+`db_backups/backup_<YYYYMMDD_HHMMSS>.dump`.
+
+**Restore**: the dumps are custom format, so use `pg_restore`
+(not `psql`). The configured DB user is read-only, so restores
+target a local PostgreSQL instance:
+
+```bash
+# Install and start a local server (first time only)
+sudo apt install postgresql
+sudo systemctl enable --now postgresql
+
+# Create a role matching your OS user and a target database
+sudo -u postgres createuser "$USER"
+sudo -u postgres createdb -O "$USER" bibledb
+
+# Restore a dump into it
+pg_restore -d bibledb --clean --if-exists \
+  db_backups/backup_20251228_055249.dump
+```
+
+To run the app against the restored copy, repoint `config.yaml`'s
+`DATABASES.default` at the local database.
 
 ### Vercel Deployment
 
