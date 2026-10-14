@@ -201,6 +201,83 @@ class TagViewSet(viewsets.ModelViewSet):
         )
         serializer.save()
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='delete_notes',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                description=(
+                    'Pass delete_notes=true to delete the tag '
+                    'together with every note under it and its '
+                    'descendant tags. Without it, deleting a tag '
+                    'that still has notes fails with 409 '
+                    'Conflict.'
+                ),
+                required=False,
+            ),
+        ],
+    )
+    def destroy(self, request, *args, **kwargs):
+        """
+        DELETE /api/v1/tags/<pk>/[?delete_notes=true]
+
+        Deleting a tag cascades to its notes — and to any
+        descendant tags and their notes. To prevent silent data
+        loss the delete is rejected with 409 Conflict while the
+        tag subtree still has notes, unless the caller
+        explicitly opts in with ?delete_notes=true.
+        """
+        instance = self.get_object()
+        delete_notes = (
+            request.query_params.get('delete_notes', '').lower()
+            == 'true'
+        )
+        note_count = Note.objects.filter(
+            tag_id__in=self._subtree_tag_ids(instance)
+        ).count()
+        if note_count and not delete_notes:
+            logger.warning(
+                f"Refusing to delete tag '{instance.name}' "
+                f"(ID: {instance.id}): {note_count} note(s) "
+                f"still attached"
+            )
+            return Response(
+                {
+                    'error': 'tag_has_notes',
+                    'message': (
+                        f'This tag still has {note_count} '
+                        f'note(s). Delete or move the notes '
+                        f'first, or retry with '
+                        f'?delete_notes=true to delete the tag '
+                        f'together with its notes.'
+                    ),
+                    'note_count': note_count,
+                },
+                status=drf_status.HTTP_409_CONFLICT,
+            )
+        self.perform_destroy(instance)
+        return Response(status=drf_status.HTTP_204_NO_CONTENT)
+
+    @staticmethod
+    def _subtree_tag_ids(tag):
+        """
+        Return the ids of *tag* plus all of its descendant tags
+        via parent_tag chains, so the blast radius of a cascade
+        delete can be measured before it happens.
+        """
+        tag_ids = {tag.id}
+        frontier = [tag.id]
+        while frontier:
+            children = set(
+                Tag.objects.filter(
+                    parent_tag_id__in=frontier
+                ).values_list('id', flat=True)
+            )
+            frontier = list(children - tag_ids)
+            tag_ids |= children
+        return tag_ids
+
     def perform_destroy(self, instance):
         """
         Ensures that a user can only delete their own tags.

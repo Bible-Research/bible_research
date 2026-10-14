@@ -2576,3 +2576,93 @@ class TestNoteMove(TestCase):
         resp = self.client.post(self.URL, [1, 2], format='json')
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()['error'], 'validation_error')
+
+
+class TagDeleteViewTest(TestCase):
+    """
+    Regression tests for issue #50: DELETE /api/v1/tags/<pk>/
+    must not silently cascade-delete every note under the tag.
+    """
+
+    BASE_URL = '/api/v1/tags/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='tagdel_user',
+            email='tagdel@example.com',
+            password='pass',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='TagWithNotes',
+        )
+
+    def _make_note(self, tag, user=None):
+        return Note.objects.create(
+            user=user or self.user,
+            note_text='note',
+            tag=tag,
+        )
+
+    def test_delete_empty_tag_succeeds(self):
+        """A tag with no notes deletes normally with 204."""
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Tag.objects.filter(id=self.tag.id).exists())
+
+    def test_delete_tag_with_notes_returns_409(self):
+        """A tag that still has notes is not deleted; the
+        response names the problem and the note count."""
+        self._make_note(self.tag)
+        self._make_note(self.tag)
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 409)
+        body = resp.json()
+        self.assertEqual(body['error'], 'tag_has_notes')
+        self.assertEqual(body['note_count'], 2)
+        self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
+        self.assertEqual(
+            Note.objects.filter(tag_id=self.tag.id).count(), 2
+        )
+
+    def test_delete_notes_false_still_blocks(self):
+        """An explicit delete_notes=false does not opt in."""
+        self._make_note(self.tag)
+        resp = self.client.delete(
+            f'{self.BASE_URL}{self.tag.id}/?delete_notes=false'
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
+
+    def test_delete_notes_true_cascades(self):
+        """?delete_notes=true restores the explicit cascade:
+        tag and its notes are all removed."""
+        self._make_note(self.tag)
+        self._make_note(self.tag)
+        resp = self.client.delete(
+            f'{self.BASE_URL}{self.tag.id}/?delete_notes=true'
+        )
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Tag.objects.filter(id=self.tag.id).exists())
+        self.assertEqual(
+            Note.objects.filter(tag_id=self.tag.id).count(), 0
+        )
+
+    def test_descendant_tag_notes_counted(self):
+        """Notes on child tags count too: deleting a parent tag
+        cascades to children, so their notes must trigger the
+        same 409 guard."""
+        child = Tag.objects.create(
+            user=self.user,
+            name='ChildTag',
+            parent_tag=self.tag,
+        )
+        self._make_note(child)
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()['note_count'], 1)
+        self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
+        self.assertTrue(Tag.objects.filter(id=child.id).exists())

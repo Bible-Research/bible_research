@@ -541,6 +541,27 @@ DELETE /api/v1/tags/{tag_id}/
 Authorization: Token <your-token>
 ```
 
+Deleting a tag cascades to every note under it — and to any
+descendant tags and their notes. To prevent silent data loss,
+the delete is rejected with `409 Conflict` while the tag
+subtree still has notes:
+
+```json
+{
+  "error": "tag_has_notes",
+  "message": "This tag still has 2 note(s). ...",
+  "note_count": 2
+}
+```
+
+To intentionally delete a tag together with all of its notes,
+pass the explicit opt-in flag:
+
+```
+DELETE /api/v1/tags/{tag_id}/?delete_notes=true
+Authorization: Token <your-token>
+```
+
 ### Notes
 
 #### List Notes
