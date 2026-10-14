@@ -73,6 +73,10 @@ resource "google_cloud_run_v2_job" "audio_generator" {
         command = [
           "python", "manage.py", "generate_chapter_audio",
           "--fileset-id", "LVSGLU8",
+          # Run a verse-mode pass then a chapter-mode pass over the
+          # same worklist; each mode has its own monthly run lock and
+          # writes under its own GCS prefix (audio/ vs audio_chapter/).
+          "--mode", "both",
         ]
 
         env {

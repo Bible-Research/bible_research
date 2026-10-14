@@ -10,6 +10,7 @@ from bible.services.esv.registry import is_esv_fileset
 from bible.services.sword.client import get_default_sword_client
 from bible.services.google_tts.registry import get_tts_config
 from bible.services.sword.registry import (
+    audio_mode_for_fileset,
     canonical_sword_fileset_id,
     is_sword_fileset,
 )
@@ -140,8 +141,13 @@ class BiblePassageSerializer(serializers.Serializer):
             if is_sword_fileset(fileset_id) and response_format == 'audio':
                 canon = canonical_sword_fileset_id(fileset_id)
                 voice_name = get_tts_config(canon)["voice_name"]
+                # The audio fileset id selects the generation mode:
+                # LVSGLU8C1DA -> verse-mode artifacts under audio/,
+                # LVSGLU8C2DA -> chapter-mode under audio_chapter/.
+                audio_mode = audio_mode_for_fileset(fileset_id)
                 if not gcs.chapter_audio_exists(
                     canon, book_id, chapter, voice_name,
+                    mode=audio_mode,
                 ):
                     return _book_not_in_fileset_body(
                         book_id, book_name, chapter, fileset_id,
@@ -152,6 +158,7 @@ class BiblePassageSerializer(serializers.Serializer):
                     )
                 timestamps = gcs.read_timestamps_json(
                     canon, book_id, chapter, voice_name,
+                    mode=audio_mode,
                 )
                 # ``file_size_bytes`` is embedded by the generator
                 # (see gcs.upload_chapter_artifacts) so the request
@@ -162,6 +169,7 @@ class BiblePassageSerializer(serializers.Serializer):
                 if file_size_bytes is None:
                     audio_path, _ = gcs.chapter_object_paths(
                         canon, book_id, chapter, voice_name,
+                        mode=audio_mode,
                     )
                     blob = gcs.get_default_client().bucket(
                         settings.AUDIO_BUCKET_NAME
@@ -178,6 +186,7 @@ class BiblePassageSerializer(serializers.Serializer):
                         chapter,
                         voice_name,
                         settings.AUDIO_SIGNED_URL_TTL_SECONDS,
+                        mode=audio_mode,
                     ),
                     'duration_seconds': timestamps.get('duration_seconds'),
                     'file_size_bytes': file_size_bytes,

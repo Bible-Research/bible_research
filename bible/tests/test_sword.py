@@ -123,3 +123,38 @@ class SwordAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         abbrs = [t['abbr'] for t in resp.json()['results']]
         self.assertIn('GLU8', abbrs)
+
+
+class AudioModeRegistryTests(TestCase):
+    def test_chapter_audio_fileset_resolves_to_canonical(self):
+        from bible.services.sword.registry import (
+            canonical_sword_fileset_id,
+        )
+        self.assertEqual(
+            canonical_sword_fileset_id('LVSGLU8C2DA'), 'LVSGLU8'
+        )
+        self.assertEqual(
+            canonical_sword_fileset_id('LVSGLU8C1DA'), 'LVSGLU8'
+        )
+
+    def test_audio_mode_for_fileset(self):
+        from bible.services.sword.registry import audio_mode_for_fileset
+        self.assertEqual(
+            audio_mode_for_fileset('LVSGLU8C2DA'), 'chapter'
+        )
+        self.assertEqual(
+            audio_mode_for_fileset('LVSGLU8C1DA'), 'verse'
+        )
+        # Text fileset id / abbr / unknown ids default to verse.
+        self.assertEqual(audio_mode_for_fileset('LVSGLU8'), 'verse')
+        self.assertEqual(audio_mode_for_fileset('GLU8'), 'verse')
+        self.assertEqual(audio_mode_for_fileset('ENGKJV'), 'verse')
+        self.assertEqual(audio_mode_for_fileset(None), 'verse')
+
+    def test_translation_listing_emits_both_audio_filesets(self):
+        listing = get_default_sword_client().get_translation_listing()
+        glu8 = next(t for t in listing if t['abbr'] == 'GLU8')
+        audio_ids = [
+            f['id'] for f in glu8['filesets'] if f['type'] == 'audio'
+        ]
+        self.assertEqual(audio_ids, ['LVSGLU8C1DA', 'LVSGLU8C2DA'])

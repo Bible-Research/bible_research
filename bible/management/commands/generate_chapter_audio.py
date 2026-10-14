@@ -25,6 +25,19 @@ class Command(BaseCommand):
             help="Canonical SWORD fileset id (default: LVSGLU8).",
         )
         parser.add_argument(
+            "--mode", choices=["verse", "chapter", "both"],
+            default="verse",
+            help=(
+                "Generation mode. 'verse' (default) synthesizes each "
+                "verse separately and concatenates — current behavior, "
+                "artifacts under audio/. 'chapter' synthesizes whole "
+                "chapters with SSML <mark> verse timestamps, artifacts "
+                "under audio_chapter/. 'both' runs a verse pass then a "
+                "chapter pass over the same worklist; each mode has "
+                "its own run lock but shares the monthly char budget."
+            ),
+        )
+        parser.add_argument(
             "--dry-run", action="store_true",
             help="List what would be generated; do not call TTS or write GCS.",
         )
@@ -35,49 +48,72 @@ class Command(BaseCommand):
             raise CommandError(
                 f"Unknown fileset_id: {options['fileset_id']!r}"
             )
-        dry_run = options["dry_run"]
+        modes = (
+            ["verse", "chapter"]
+            if options["mode"] == "both"
+            else [options["mode"]]
+        )
 
         # Worklist comes straight from the SWORD module so we never
         # assume ESV/KJV versification (e.g. Glück 1877 may have
         # different book / chapter counts).
         worklist = get_default_sword_client().list_chapters(fileset_id)
 
+        for mode in modes:
+            self._run_mode(
+                fileset_id, mode, worklist, options["dry_run"],
+            )
+
+    def _run_mode(
+        self,
+        fileset_id: str,
+        mode: str,
+        worklist,
+        dry_run: bool,
+    ) -> None:
         if dry_run:
             self.stdout.write(
-                f"would generate {len(worklist)} chapters total (dry-run)"
+                f"mode={mode} would generate {len(worklist)} "
+                f"chapters total (dry-run)"
             )
             return
 
         acquired, reason = gcs.acquire_run_lock(
             fileset_id, stale_after_hours=settings.LOCK_STALE_HOURS,
+            mode=mode,
         )
         if not acquired:
             logger.warning(
-                "Skipping run for %s %s: %s",
-                fileset_id, gcs.get_current_year_month(), reason,
+                "Skipping %s-mode run for %s %s: %s",
+                mode, fileset_id, gcs.get_current_year_month(), reason,
             )
-            self.stdout.write(f"skipped reason={reason}")
+            self.stdout.write(f"mode={mode} skipped reason={reason}")
             return
 
+        # The monthly usage counter is intentionally shared across
+        # modes (see gcs._state_object_path): the cap is a spend
+        # ceiling, not a per-artifact-set allowance. For ``both`` the
+        # chapter pass re-reads the counter here, so characters the
+        # verse pass just billed are already deducted.
         already_used = gcs.read_monthly_usage(fileset_id)
         cap = int(settings.MONTHLY_TTS_CHAR_LIMIT)
         remaining = max(0, cap - already_used)
         budget = CharBudget(remaining=remaining)
         logger.info(
-            "fileset=%s cap=%d already_used=%d remaining=%d",
-            fileset_id, cap, already_used, remaining,
+            "mode=%s fileset=%s cap=%d already_used=%d remaining=%d",
+            mode, fileset_id, cap, already_used, remaining,
         )
 
         cfg = get_tts_config(fileset_id)
         voice_name = cfg["voice_name"]
 
         completed = gcs.list_completed_chapters(
-            fileset_id, voice_name,
+            fileset_id, voice_name, mode=mode,
         )
         pending = [bc for bc in worklist if bc not in completed]
         logger.info(
-            "total=%d completed=%d pending=%d",
-            len(worklist), len(completed), len(pending),
+            "mode=%s total=%d completed=%d pending=%d",
+            mode, len(worklist), len(completed), len(pending),
         )
 
         synthesizer = Synthesizer()
@@ -94,7 +130,8 @@ class Command(BaseCommand):
             try:
                 try:
                     artifacts = synthesizer.run(
-                        fileset_id, book_id, chap, budget=budget,
+                        fileset_id, book_id, chap,
+                        budget=budget, mode=mode,
                     )
                 except BudgetExceeded as exc:
                     logger.warning(
@@ -103,7 +140,8 @@ class Command(BaseCommand):
                         book_id, chap, exc,
                     )
                     self.stdout.write(
-                        f"budget_exhausted next={book_id} {chap} "
+                        f"mode={mode} budget_exhausted "
+                        f"next={book_id} {chap} "
                         f"generated={generated} chars_used={budget.used}"
                     )
                     complete_reason = "budget_exhausted"
@@ -114,7 +152,8 @@ class Command(BaseCommand):
                         book_id, chap, exc,
                     )
                     self.stdout.write(
-                        f"quota_exhausted next={book_id} {chap} "
+                        f"mode={mode} quota_exhausted "
+                        f"next={book_id} {chap} "
                         f"generated={generated} chars_used={budget.used}"
                     )
                     complete_reason = "quota_exhausted"
@@ -132,6 +171,7 @@ class Command(BaseCommand):
                         artifacts.mp3_bytes,
                         artifacts.timestamps_payload,
                         voice_name,
+                        mode=mode,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
@@ -142,8 +182,8 @@ class Command(BaseCommand):
 
                 generated += 1
                 logger.info(
-                    "Generated %s %s chars=%d duration=%.2fs",
-                    book_id, chap, artifacts.chars_used,
+                    "Generated %s %s mode=%s chars=%d duration=%.2fs",
+                    book_id, chap, mode, artifacts.chars_used,
                     artifacts.duration_seconds,
                 )
             finally:
@@ -159,13 +199,32 @@ class Command(BaseCommand):
                             delta, book_id, chap,
                         )
 
-        gcs.mark_run_complete(
-            fileset_id,
-            chars_used=budget.used,
-            chapters_generated=generated,
-            reason=complete_reason,
-        )
+        # If every pending chapter hit the generic
+        # ``except -> continue`` path, marking the run complete
+        # would lock the month out with zero artifacts — a bug or
+        # outage would then wait a whole month for a retry. Leave
+        # the lock "running" instead; it goes stale after
+        # ``LOCK_STALE_HOURS`` so a later run can retry.
+        if (
+            pending and generated == 0
+            and complete_reason == "all_done"
+        ):
+            complete_reason = "all_failed"
+            logger.error(
+                "mode=%s all %d pending chapters failed; leaving "
+                "the run lock un-completed so a later run retries.",
+                mode, len(pending),
+            )
+        else:
+            gcs.mark_run_complete(
+                fileset_id,
+                chars_used=budget.used,
+                chapters_generated=generated,
+                reason=complete_reason,
+                mode=mode,
+            )
         self.stdout.write(
-            f"done generated={generated} chars_used={budget.used} "
+            f"mode={mode} done generated={generated} "
+            f"chars_used={budget.used} "
             f"reason={complete_reason}"
         )

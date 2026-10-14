@@ -181,23 +181,34 @@ class SwordClient:
         """Return registry entries shaped like DBT translations."""
         out = []
         for fid, meta in SWORD_TRANSLATIONS.items():
+            filesets = [
+                {
+                    "id": fid,
+                    "type": "text_plain",
+                    "size": "C",
+                },
+                {
+                    "id": meta.get("audio_fileset_id", fid),
+                    "type": "audio",
+                    "size": "C",
+                },
+            ]
+            # Chapter-mode audio (whole-chapter TTS synthesis) is
+            # exposed as a second audio fileset so clients pick a
+            # fileset id, not a query param, to select the mode.
+            chapter_audio = meta.get("audio_fileset_id_chapter")
+            if chapter_audio:
+                filesets.append({
+                    "id": chapter_audio,
+                    "type": "audio",
+                    "size": "C",
+                })
             out.append({
                 "abbr": meta["abbr"],
                 "name": meta["name"],
                 "language": meta["language"],
                 "iso": meta["language_iso"],
-                "filesets": [
-                    {
-                        "id": fid,
-                        "type": "text_plain",
-                        "size": "C",
-                    },
-                    {
-                        "id": meta.get("audio_fileset_id", fid),
-                        "type": "audio",
-                        "size": "C",
-                    },
-                ],
+                "filesets": filesets,
             })
         return out
 
