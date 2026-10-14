@@ -659,6 +659,10 @@ Content-Type: application/json
 }
 ```
 
+Note creation is atomic: if any `verse_references` entry fails to
+resolve, the request returns `400` and no note or verse links are
+persisted.
+
 #### Get Note by ID
 ```
 GET /api/v1/notes/{note_id}/
