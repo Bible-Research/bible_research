@@ -416,8 +416,10 @@ class CommentViewSetTest(TestCase):
             ).exists()
         )
 
-    def test_non_owner_cannot_delete(self):
-        """DELETE by a different user returns 403."""
+    def test_non_author_cannot_delete(self):
+        """DELETE by a different user on a public note -> 403."""
+        self.note.public = True
+        self.note.save()
         comment = Comment.objects.create(
             user=self.user,
             note=self.note,
@@ -431,8 +433,10 @@ class CommentViewSetTest(TestCase):
         )
         self.assertEqual(resp.status_code, 403)
 
-    def test_non_owner_cannot_update(self):
-        """PATCH by a different user returns 403."""
+    def test_non_author_cannot_update(self):
+        """PATCH by a different user on a public note -> 403."""
+        self.note.public = True
+        self.note.save()
         comment = Comment.objects.create(
             user=self.user,
             note=self.note,
@@ -468,6 +472,200 @@ class CommentViewSetTest(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, 400)
+
+
+class CommentNoteAccessTest(TestCase):
+    """
+    CommentViewSet must enforce the same note-accessibility
+    scope as notes themselves (issue #48): comments on a
+    private note owned by someone else are invisible (404),
+    while comments on public notes remain readable and
+    writable by any authenticated user.
+    """
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(
+            username='cmnt_note_owner',
+            email='owner@example.com',
+            password='pass',
+        )
+        self.other = User.objects.create_user(
+            username='cmnt_note_other',
+            email='cmnt_other@example.com',
+            password='pass',
+        )
+        self.private_note = Note.objects.create(
+            user=self.owner,
+            note_text='Private note',
+            public=False,
+        )
+        self.public_note = Note.objects.create(
+            user=self.owner,
+            note_text='Public note',
+            public=True,
+        )
+        self.private_comment = Comment.objects.create(
+            user=self.owner,
+            note=self.private_note,
+            content='Private comment',
+        )
+        self.public_comment = Comment.objects.create(
+            user=self.owner,
+            note=self.public_note,
+            content='Public comment',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.other)
+        self.priv_url = (
+            f'/api/v1/notes/{self.private_note.id}/comments/'
+        )
+        self.pub_url = (
+            f'/api/v1/notes/{self.public_note.id}/comments/'
+        )
+
+    def test_private_note_comment_list_404(self):
+        """GET list on another user's private note -> 404."""
+        resp = self.client.get(self.priv_url)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_private_note_comment_retrieve_404(self):
+        """GET detail on a private note's comment -> 404."""
+        resp = self.client.get(
+            f'{self.priv_url}{self.private_comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_private_note_comment_create_404(self):
+        """POST on another user's private note -> 404."""
+        resp = self.client.post(
+            self.priv_url,
+            {'content': 'Sneaky comment'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(
+            Comment.objects.filter(
+                note=self.private_note,
+                content='Sneaky comment',
+            ).exists()
+        )
+
+    def test_private_note_comment_update_404(self):
+        """PATCH a comment on a private note -> 404."""
+        resp = self.client.patch(
+            f'{self.priv_url}{self.private_comment.id}/',
+            {'content': 'Hijacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.private_comment.refresh_from_db()
+        self.assertEqual(
+            self.private_comment.content, 'Private comment'
+        )
+
+    def test_private_note_comment_delete_404(self):
+        """DELETE a comment on a private note -> 404."""
+        resp = self.client.delete(
+            f'{self.priv_url}{self.private_comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.private_comment.refresh_from_db()
+        self.assertFalse(self.private_comment.is_deleted)
+
+    def test_nonexistent_note_404(self):
+        """A bogus note id returns the same 404 (no leak)."""
+        resp = self.client.get(
+            '/api/v1/notes/NOT_DOES_NOT_EXIST/comments/'
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_public_note_comment_list_allowed(self):
+        """Non-owner can read a public note's comment tree."""
+        resp = self.client.get(self.pub_url)
+        self.assertEqual(resp.status_code, 200)
+        tree = resp.json()
+        self.assertEqual(len(tree), 1)
+        self.assertEqual(tree[0]['content'], 'Public comment')
+
+    def test_public_note_comment_retrieve_allowed(self):
+        """Non-owner can retrieve a comment on a public note."""
+        resp = self.client.get(
+            f'{self.pub_url}{self.public_comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.json()['content'], 'Public comment'
+        )
+
+    def test_public_note_comment_create_allowed(self):
+        """Non-owner can comment on a public note."""
+        resp = self.client.post(
+            self.pub_url,
+            {
+                'content': 'Reply from another user',
+                'parent_comment': self.public_comment.id,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertEqual(data['note_id'], self.public_note.id)
+        self.assertEqual(
+            data['author']['username'], 'cmnt_note_other'
+        )
+
+    def test_public_note_non_author_update_403(self):
+        """Non-author PATCH on a public note comment -> 403."""
+        resp = self.client.patch(
+            f'{self.pub_url}{self.public_comment.id}/',
+            {'content': 'Hijacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_public_note_non_author_delete_403(self):
+        """Non-author DELETE on a public note comment -> 403."""
+        resp = self.client.delete(
+            f'{self.pub_url}{self.public_comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_owner_accesses_own_private_note(self):
+        """The owner still reads/writes their private note."""
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.get(self.priv_url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 1)
+        resp = self.client.post(
+            self.priv_url,
+            {'content': 'Owner reply'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+
+    def test_anonymous_private_note_list_404(self):
+        """Anonymous list on a private note -> 404."""
+        client = APIClient()
+        resp = client.get(self.priv_url)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_anonymous_public_note_list_200(self):
+        """Anonymous can read a public note's comments."""
+        client = APIClient()
+        resp = client.get(self.pub_url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 1)
+
+    def test_anonymous_public_note_create_403(self):
+        """Anonymous cannot write comments (auth required)."""
+        client = APIClient()
+        resp = client.post(
+            self.pub_url,
+            {'content': 'Anon comment'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
 
 
 class CommentCountViewTest(TestCase):
