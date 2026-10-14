@@ -250,6 +250,14 @@ POST /api/token/
   "token": "9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b"
 }
 ```
+**Notes**:
+- Username matching is case-insensitive
+- Accounts with `is_active=False` are rejected with HTTP 400
+- If two usernames differ only by case (e.g. `Alice`/`alice`),
+  the exact-case match is preferred; otherwise the first match
+  is used
+- Invalid credentials return HTTP 400 with a `non_field_errors`
+  list
 
 ### User Management
 
