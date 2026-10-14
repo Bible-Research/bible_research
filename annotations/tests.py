@@ -1048,23 +1048,25 @@ class TestPartialReordering(TestCase):
         # Should reject in validation before DB
         self.assertEqual(response.status_code, 400)
 
-    @expectedFailure
     def test_position_already_occupied(self):
         """DB rejects when position occupied by other note"""
         # Note at position 1 already exists
         updates = [
             {'note_id': self.notes[5].id, 'position': 1.0},
         ]
-        
+
         response = self.client.post(
             '/api/v1/notes/reorder/',
             {'tag_id': self.tag.id, 'updates': updates},
             format='json'
         )
-        
+
         self.assertEqual(response.status_code, 409)
         data = response.json()
-        self.assertEqual(data['error'], 'conflict')
+        self.assertEqual(data['error'], 'position_conflict')
+        self.assertEqual(
+            data['constraint'], 'unique_tag_position_per_tag'
+        )
 
     def test_reorder_notes_from_different_tags(self):
         """Cannot reorder notes from different tags"""

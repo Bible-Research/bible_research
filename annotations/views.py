@@ -87,6 +87,26 @@ def _park_notes_for_renumber(notes, tag_id, extra_floor=None):
         note.tag_position = base - idx - 1
 
 
+def _is_tag_position_conflict(exc):
+    """
+    Return True if *exc* is an IntegrityError raised by the
+    unique_tag_position_per_tag constraint.
+
+    Postgres reports the constraint by name; SQLite instead
+    lists the constrained columns
+    ("UNIQUE constraint failed: annotations_note.tag_id,
+    annotations_note.tag_position"), so match both forms.
+    """
+    error_msg = str(exc).lower()
+    if 'unique_tag_position_per_tag' in error_msg:
+        return True
+    return (
+        'unique constraint failed' in error_msg
+        and 'tag_id' in error_msg
+        and 'tag_position' in error_msg
+    )
+
+
 class TagViewSet(viewsets.ModelViewSet):
     """
     API endpoint that allows tags to be created, viewed, updated, or deleted.
@@ -809,9 +829,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         except IntegrityError as e:
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
-            error_msg = str(e).lower()
-
-            if 'unique_tag_position_per_tag' in error_msg:
+            if _is_tag_position_conflict(e):
                 return Response(
                     {
                         'error': 'position_conflict',
@@ -1126,9 +1144,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         except IntegrityError as e:
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
-            error_msg = str(e).lower()
-
-            if 'unique_tag_position_per_tag' in error_msg:
+            if _is_tag_position_conflict(e):
                 return Response(
                     {
                         'error': 'position_conflict',
