@@ -22,7 +22,7 @@ future; python_version<="2.7"
 six >= 1.17.0
 python_dateutil >= 2.9.0.post0
 setuptools >= 21.0.0
-urllib3 >= 1.15.1
+urllib3 >= 2.8.0
 
 # Development
 debugpy
