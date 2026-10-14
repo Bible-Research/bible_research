@@ -51,7 +51,6 @@ class DBTClient:
             host=self.base_url,
             api_key={'key': api_key}
         )
-        config.verify_ssl = False
 
         self.api_client = ApiClient(config)
 
@@ -157,7 +156,12 @@ class DBTClient:
             **kwargs
         )
 
-    def get_book(self, bible_id: str, book_id: str, **kwargs) -> Dict[str, Any]:
+    def get_book(
+        self,
+        bible_id: str,
+        book_id: str,
+        **kwargs
+    ) -> Dict[str, Any]:
         """
         Get details for a specific book.
 

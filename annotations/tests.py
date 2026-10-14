@@ -13,6 +13,7 @@ from annotations.serializers import (
 )
 from annotations.models import (
     Comment,
+    Image,
     Note,
     NoteVerse,
     Tag,
@@ -472,6 +473,88 @@ class CommentViewSetTest(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, 400)
+
+    def test_update_comment_content(self):
+        """PATCH updates a comment's content."""
+        comment = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Before edit',
+        )
+        resp = self.client.patch(
+            f'{self.base_url}{comment.id}/',
+            {'content': 'After edit'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['content'], 'After edit')
+        comment.refresh_from_db()
+        self.assertEqual(comment.content, 'After edit')
+
+    def test_retrieve_deleted_comment_redacts_content(self):
+        """GET detail masks content/images on a deleted comment."""
+        comment = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Must not be served',
+            is_deleted=True,
+        )
+        Image.objects.create(
+            comment=comment,
+            uploaded_by=self.user,
+            storage_url='gs://b/originals/x/source.png',
+        )
+        resp = self.client.get(f'{self.base_url}{comment.id}/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data['is_deleted'])
+        self.assertEqual(data['content'], '[deleted]')
+        self.assertEqual(data['images'], [])
+
+    def test_patch_cannot_undelete_comment(self):
+        """PATCH cannot clear is_deleted; delete stays final."""
+        comment = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='',
+            is_deleted=True,
+        )
+        resp = self.client.patch(
+            f'{self.base_url}{comment.id}/',
+            {'is_deleted': False},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()['is_deleted'])
+        comment.refresh_from_db()
+        self.assertTrue(comment.is_deleted)
+
+    def test_patch_cannot_reparent_comment(self):
+        """PATCH cannot re-point parent_comment (400)."""
+        root_a = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Root A',
+        )
+        root_b = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Root B',
+        )
+        reply = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            parent_comment=root_a,
+            content='Reply',
+        )
+        resp = self.client.patch(
+            f'{self.base_url}{reply.id}/',
+            {'parent_comment': root_b.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        reply.refresh_from_db()
+        self.assertEqual(reply.parent_comment_id, root_a.id)
 
 
 class CommentNoteAccessTest(TestCase):
@@ -1016,6 +1099,93 @@ class BulkNoteCreateTest(TestCase):
         )
 
 
+class NoteCreateViewTest(TestCase):
+    """Tests for POST /api/v1/notes/ (single note create)."""
+
+    URL = '/api/v1/notes/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='note_create_user',
+            email='note_create@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='NoteCreateTag',
+        )
+        self.verse, _ = Verse.objects.get_or_create(
+            book='John',
+            chapter=3,
+            verse=16,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        # NoteSerializer enriches verses via the DBT client on the
+        # 201 response; keep tests offline by making it fail fast
+        # into the serializer's fallback (empty verse text).
+        patcher = patch(
+            'annotations.serializers.get_default_dbt_client',
+            side_effect=ValueError('DBT disabled in tests'),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_create_note_with_verse_happy_path(self):
+        """POST creates the note and links the verse."""
+        payload = {
+            'note_text': 'A note on John 3:16',
+            'tag': self.tag.id,
+            'verse_references': [
+                {'book': 'John', 'chapter': 3, 'verse': 16},
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        note = Note.objects.get(user=self.user)
+        self.assertEqual(note.note_text, 'A note on John 3:16')
+        self.assertEqual(note.verses.count(), 1)
+        self.assertEqual(note.verses.first().verse, 16)
+
+    def test_failed_verse_resolution_leaves_no_orphan(self):
+        """A non-existent verse reference returns 400 and leaves
+        no orphan Note or NoteVerse rows behind."""
+        payload = {
+            'note_text': 'Orphan candidate',
+            'tag': self.tag.id,
+            'verse_references': [
+                {'book': 'John', 'chapter': 99, 'verse': 99},
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Verse not found', str(resp.content))
+        self.assertEqual(
+            Note.objects.filter(user=self.user).count(), 0
+        )
+        self.assertEqual(NoteVerse.objects.count(), 0)
+
+    def test_partial_verse_failure_rolls_back_links(self):
+        """When one of several verse references is bad, the whole
+        create rolls back — no note and no links for the good
+        verse either."""
+        payload = {
+            'note_text': 'Partial failure note',
+            'tag': self.tag.id,
+            'verse_references': [
+                {'book': 'John', 'chapter': 3, 'verse': 16},
+                {'book': 'John', 'chapter': 99, 'verse': 99},
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            Note.objects.filter(user=self.user).count(), 0
+        )
+        self.assertEqual(NoteVerse.objects.count(), 0)
+
+
 class LinkedNotesTest(TestCase):
     """Tests for POST /api/v1/notes/linked/."""
 
@@ -1246,23 +1416,25 @@ class TestPartialReordering(TestCase):
         # Should reject in validation before DB
         self.assertEqual(response.status_code, 400)
 
-    @expectedFailure
     def test_position_already_occupied(self):
         """DB rejects when position occupied by other note"""
         # Note at position 1 already exists
         updates = [
             {'note_id': self.notes[5].id, 'position': 1.0},
         ]
-        
+
         response = self.client.post(
             '/api/v1/notes/reorder/',
             {'tag_id': self.tag.id, 'updates': updates},
             format='json'
         )
-        
+
         self.assertEqual(response.status_code, 409)
         data = response.json()
-        self.assertEqual(data['error'], 'conflict')
+        self.assertEqual(data['error'], 'position_conflict')
+        self.assertEqual(
+            data['constraint'], 'unique_tag_position_per_tag'
+        )
 
     def test_reorder_notes_from_different_tags(self):
         """Cannot reorder notes from different tags"""
@@ -1592,6 +1764,151 @@ class NoteProviderErrorTest(TestCase):
 
         self.assertEqual(data['error_code'], 'not_found')
         self.assertEqual(data['verses'][0]['text'], '')
+
+
+class NoteFilesetRoutingTest(TestCase):
+    """Note verse enrichment routes through the same provider
+    dispatch as the passage endpoint: the request's fileset_id
+    selects ESV, SWORD, or DBT (issue #55 — previously every
+    non-ESV fileset silently fetched DBT ENGESV)."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='note_fs_user',
+            email='note_fs@example.com',
+            password='pass',
+        )
+        self.verse = Verse.objects.create(
+            book='John', chapter=1, verse=1, dbt_book_id='JHN'
+        )
+        self.note = Note.objects.create(
+            user=self.user, note_text='test note'
+        )
+        self.note.verses.add(self.verse)
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_dbt_fileset_id_is_forwarded(self, mock_get):
+        """fileset_id=ENGKJV must reach the DBT client's
+        bible_id instead of falling back to ENGESV."""
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {
+            'data': [
+                {'verse_start': 1, 'verse_text': 'KJV text'}
+            ]
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGKJV'}
+        ).data
+
+        mock_client.get_verses.assert_called_once_with(
+            'JHN', 1,
+            bible_id='ENGKJV',
+            verse_start=1, verse_end=1,
+        )
+        self.assertNotIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], 'KJV text')
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_missing_fileset_id_defaults_to_engesv(self, mock_get):
+        """No fileset_id in context keeps the ENGESV default."""
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {
+            'data': [
+                {'verse_start': 1, 'verse_text': 'ESV text'}
+            ]
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(self.note).data
+
+        mock_client.get_verses.assert_called_once_with(
+            'JHN', 1,
+            bible_id='ENGESV',
+            verse_start=1, verse_end=1,
+        )
+        self.assertNotIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], 'ESV text')
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('annotations.serializers.get_default_sword_client')
+    def test_sword_fileset_uses_sword_client(
+        self, mock_sword_get, mock_dbt_get
+    ):
+        """fileset_id=LVSGLU8 routes to the local SWORD module
+        and never touches the DBT client."""
+        mock_sword = MagicMock()
+        mock_sword.get_chapter_verses.return_value = [
+            {'verse_start': 1, 'verse_text': 'Latviesu teksts'}
+        ]
+        mock_sword_get.return_value = mock_sword
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'LVSGLU8'}
+        ).data
+
+        mock_sword.get_chapter_verses.assert_called_once_with(
+            'LVSGLU8', 'JHN', 1
+        )
+        mock_dbt_get.return_value.get_verses.assert_not_called()
+        self.assertNotIn('error', data)
+        self.assertEqual(
+            data['verses'][0]['text'], 'Latviesu teksts'
+        )
+        self.assertEqual(data['headings'], [])
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('annotations.serializers.get_default_sword_client')
+    def test_sword_audio_fileset_uses_sword_client(
+        self, mock_sword_get, mock_dbt_get
+    ):
+        """A SWORD audio fileset id (LVSGLU8C1DA) canonicalizes
+        to the same local module for text enrichment."""
+        mock_sword = MagicMock()
+        mock_sword.get_chapter_verses.return_value = [
+            {'verse_start': 1, 'verse_text': 'Latviesu teksts'}
+        ]
+        mock_sword_get.return_value = mock_sword
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'LVSGLU8C1DA'}
+        ).data
+
+        mock_sword.get_chapter_verses.assert_called_once_with(
+            'LVSGLU8C1DA', 'JHN', 1
+        )
+        mock_dbt_get.return_value.get_verses.assert_not_called()
+        self.assertNotIn('error', data)
+
+    @patch('annotations.serializers.get_default_esv_client')
+    def test_esv_fileset_returns_verse_text(self, mock_get):
+        """fileset_id=ENGESV_API still routes to the ESV API
+        and returns verse text plus filtered headings."""
+        mock_client = MagicMock()
+        mock_client.get_chapter_with_headings.return_value = {
+            'verses': [
+                {'verse_start': 1, 'verse_text': 'ESV text'}
+            ],
+            'headings': [
+                {'before_verse': 1, 'text': 'The Beginning'}
+            ],
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGESV_API'}
+        ).data
+
+        esv_method = mock_client.get_chapter_with_headings
+        esv_method.assert_called_once_with('JHN', 1)
+        self.assertNotIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], 'ESV text')
+        self.assertEqual(
+            data['headings'],
+            [{'before_verse': 1, 'text': 'The Beginning'}]
+        )
 
 
 class TestNoteOrderIndex(TestCase):

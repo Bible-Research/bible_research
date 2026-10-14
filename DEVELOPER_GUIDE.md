@@ -250,6 +250,14 @@ POST /api/token/
   "token": "9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b"
 }
 ```
+**Notes**:
+- Username matching is case-insensitive
+- Accounts with `is_active=False` are rejected with HTTP 400
+- If two usernames differ only by case (e.g. `Alice`/`alice`),
+  the exact-case match is preferred; otherwise the first match
+  is used
+- Invalid credentials return HTTP 400 with a `non_field_errors`
+  list
 
 ### User Management
 
@@ -554,6 +562,12 @@ Authorization: Token <your-token>
 
 **Query Parameters**:
 - `tag_id` (required): Tag ID to filter notes
+- `fileset_id` (optional): Bible translation used to enrich
+  each note's `verses[].text` — same provider routing as the
+  passage endpoint (`ENGESV_API` → ESV API, SWORD ids like
+  `LVSGLU8` → local module, anything else → DBT).
+  Defaults to `ENGESV` (DBT). SWORD translations return no
+  `headings`.
 - `ordering` (optional): Sort order
   - `custom` (default): Custom order ascending
   - `-custom`: Custom order descending
@@ -650,6 +664,10 @@ Content-Type: application/json
   "updated_at": "2025-12-28T03:51:55Z"
 }
 ```
+
+Note creation is atomic: if any `verse_references` entry fails to
+resolve, the request returns `400` and no note or verse links are
+persisted.
 
 #### Get Note by ID
 ```
@@ -825,17 +843,22 @@ surface as a `409 position_conflict`.
 
 Comments are threaded under a note (`parent_comment` enables
 replies; `is_deleted` soft-deletes while keeping the thread
-intact — deleted comments serialize as `content:
-"[deleted]"`, `images: []`).
+intact).
 
 ```
-GET    /api/v1/notes/{note_id}/comments/
-POST   /api/v1/notes/{note_id}/comments/
-GET    /api/v1/notes/{note_id}/comments/{comment_id}/
-PATCH  /api/v1/notes/{note_id}/comments/{comment_id}/
-DELETE /api/v1/notes/{note_id}/comments/{comment_id}/
-GET    /api/v1/comments/counts/?tag_id= | ?note_ids=
+GET    /api/v1/notes/{note_pk}/comments/
+POST   /api/v1/notes/{note_pk}/comments/
+GET    /api/v1/notes/{note_pk}/comments/{comment_pk}/
+PATCH  /api/v1/notes/{note_pk}/comments/{comment_pk}/
+DELETE /api/v1/notes/{note_pk}/comments/{comment_pk}/
+GET    /api/v1/comments/counts/?tag_id= | note_ids=
 ```
+
+`GET` list returns the comment tree (root comments with nested
+`replies`) rather than a flat list. `POST` accepts `content`
+and optional `parent_comment` to create a reply; the parent
+must belong to the same note (`400` otherwise). `DELETE`
+soft-deletes and returns `204`.
 
 **Access**: a note's comments follow the same visibility
 scope as the note itself (`get_accessible_notes_qs`) — a
@@ -848,11 +871,18 @@ remains restricted to its author (`403` otherwise). Reads
 require no token (anonymous callers see public-note
 comments); writes require authentication.
 
-`GET .../comments/` returns the comment tree (root comments
-with nested `replies`) rather than a flat list.
-`POST` accepts `{"content": "...", "parent_comment":
-"CMNT_..."}`; `parent_comment` must belong to the same note
-(`400` otherwise). `DELETE` soft-deletes and returns `204`.
+Soft-delete contract: `DELETE` sets `is_deleted=True` and
+clears `content`, but the row is retained so reply threads
+stay intact. On every read path (tree **and** detail GET) a
+deleted comment is serialized as a tombstone — `content` is
+`"[deleted]"` and `images` is `[]`. Clients should render an
+`[deleted]` placeholder when `is_deleted` is true; the API
+never returns `404` for a deleted comment.
+
+PATCH may only change `content`: `is_deleted` is read-only
+(deletion happens exclusively via `DELETE` and cannot be
+undone), and `parent_comment` is create-only — sending it on
+update returns `400`.
 
 ### Note & Comment Images
 ```
@@ -1129,13 +1159,48 @@ python manage.py collectstatic --noinput
 
 ### Database Backups
 
-```bash
-# Backup
-pg_dump bibledb > db_backups/backup_$(date +%Y%m%d).sql
+Backups are automated by `db_backups/local_db_backup.sh`, which
+reads the connection details from `config.yaml`
+(`DATABASES.default`) and runs `pg_dump` over TCP. No local
+PostgreSQL server or role is needed — only the client tools.
 
-# Restore
-psql bibledb < db_backups/backup_20251228.sql
+**Ubuntu/Debian setup** (first time only):
+
+```bash
+sudo apt update
+sudo apt install postgresql-client
 ```
+
+**Run a backup** (from the repo root — the script uses relative
+paths):
+
+```bash
+bash db_backups/local_db_backup.sh
+```
+
+This writes a timestamped custom-format dump to
+`db_backups/backup_<YYYYMMDD_HHMMSS>.dump`.
+
+**Restore**: the dumps are custom format, so use `pg_restore`
+(not `psql`). The configured DB user is read-only, so restores
+target a local PostgreSQL instance:
+
+```bash
+# Install and start a local server (first time only)
+sudo apt install postgresql
+sudo systemctl enable --now postgresql
+
+# Create a role matching your OS user and a target database
+sudo -u postgres createuser "$USER"
+sudo -u postgres createdb -O "$USER" bibledb
+
+# Restore a dump into it
+pg_restore -d bibledb --clean --if-exists \
+  db_backups/backup_20251228_055249.dump
+```
+
+To run the app against the restored copy, repoint `config.yaml`'s
+`DATABASES.default` at the local database.
 
 ### Vercel Deployment
 

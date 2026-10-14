@@ -87,6 +87,26 @@ def _park_notes_for_renumber(notes, tag_id, extra_floor=None):
         note.tag_position = base - idx - 1
 
 
+def _is_tag_position_conflict(exc):
+    """
+    Return True if *exc* is an IntegrityError raised by the
+    unique_tag_position_per_tag constraint.
+
+    Postgres reports the constraint by name; SQLite instead
+    lists the constrained columns
+    ("UNIQUE constraint failed: annotations_note.tag_id,
+    annotations_note.tag_position"), so match both forms.
+    """
+    error_msg = str(exc).lower()
+    if 'unique_tag_position_per_tag' in error_msg:
+        return True
+    return (
+        'unique constraint failed' in error_msg
+        and 'tag_id' in error_msg
+        and 'tag_position' in error_msg
+    )
+
+
 class TagViewSet(viewsets.ModelViewSet):
     """
     API endpoint that allows tags to be created, viewed, updated, or deleted.
@@ -809,9 +829,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         except IntegrityError as e:
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
-            error_msg = str(e).lower()
-
-            if 'unique_tag_position_per_tag' in error_msg:
+            if _is_tag_position_conflict(e):
                 return Response(
                     {
                         'error': 'position_conflict',
@@ -1126,9 +1144,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         except IntegrityError as e:
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
-            error_msg = str(e).lower()
-
-            if 'unique_tag_position_per_tag' in error_msg:
+            if _is_tag_position_conflict(e):
                 return Response(
                     {
                         'error': 'position_conflict',
@@ -1174,10 +1190,14 @@ class CommentViewSet(viewsets.ModelViewSet):
           Pass 'parent_comment' PK to create a reply.
 
       GET    /api/v1/notes/{note_pk}/comments/{pk}/
-          Retrieve a single comment (flat).
+          Retrieve a single comment (flat). Deleted
+          comments are redacted the same way as in the
+          tree ('[deleted]', images []).
 
       PATCH  /api/v1/notes/{note_pk}/comments/{pk}/
-          Update a comment's content.
+          Update a comment's content. 'is_deleted' is
+          read-only and 'parent_comment' is create-only,
+          so PATCH can neither un-delete nor re-parent.
 
       DELETE /api/v1/notes/{note_pk}/comments/{pk}/
           Soft-delete: sets is_deleted=True and clears
@@ -1640,7 +1660,9 @@ class ImageDestroyView(APIView):
     """
     DELETE /api/v1/images/{image_pk}/
 
-    Only the uploader or the parent owner may delete.
+    Only the uploader, the comment author, or the owner of the
+    parent note may delete. For comment-attached images the
+    parent note is reached through image.comment.note.
     Hard-delete: DB row removed and GCS object deleted
     (best-effort).
     """
@@ -1651,10 +1673,16 @@ class ImageDestroyView(APIView):
         image = get_object_or_404(Image, pk=image_pk)
         user = request.user
 
+        # Comment-attached images have note=NULL (XOR FK), so
+        # resolve the parent note through the comment.
+        parent_note = image.note
+        if parent_note is None and image.comment is not None:
+            parent_note = image.comment.note
+
         is_uploader = image.uploaded_by == user
         is_note_owner = (
-            image.note is not None
-            and image.note.user == user
+            parent_note is not None
+            and parent_note.user == user
         )
         is_comment_author = (
             image.comment is not None
