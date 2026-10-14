@@ -12,7 +12,7 @@ gunicorn==26.2.0
 google-cloud-secret-manager
 google-cloud-texttospeech>=2.38.0,<3
 google-cloud-storage>=3.16.0,<4
-google-auth>=2.30,<3
+google-auth>=2.61.0,<3
 mutagen>=1.48.1,<2
 Pillow>=12.3.0,<13
 
