@@ -143,7 +143,7 @@ class BiblePassageView(APIView):
             return Response(
                 {
                     "error": "Passage parameter is required. "
-                             "Example: ?passage=John+3:16"
+                             "Example: ?passage=John+3"
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -187,20 +187,24 @@ class BiblePassageView(APIView):
 
             try:
                 chapter = int(chapter_part)
-                if chapter <= 0:
-                    logger.error(
-                        f"Invalid chapter number: {chapter} "
-                        f"(must be positive)"
-                    )
-                    raise ValueError(
-                        "Chapter must be a positive number"
-                    )
                 logger.debug(f"Parsed chapter number: {chapter}")
             except ValueError as ve:
                 logger.error(
                     f"Failed to parse chapter: {chapter_part} - {ve}"
                 )
                 raise ValueError("Chapter must be a valid number")
+
+            # Kept outside the ``int()`` try/except so this
+            # ValueError is not swallowed and re-raised as
+            # "Chapter must be a valid number".
+            if chapter <= 0:
+                logger.error(
+                    f"Invalid chapter number: {chapter} "
+                    f"(must be positive)"
+                )
+                raise ValueError(
+                    "Chapter must be a positive number"
+                )
 
             data = {
                 'book': book_id,

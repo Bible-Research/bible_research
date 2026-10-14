@@ -61,7 +61,8 @@ is no `__init__.py` in `bible/utils/` — it is a namespace package.
 - `GET /api/v1/bible/search/?query=&fileset_id=&limit=&page=`
 
 `annotations/urls.py` (DRF router):
-- `tags/`, `notes/` (supports `notes/reorder/` bulk update)
+- `tags/`, `notes/` (supports `notes/reorder/` bulk update,
+  `notes/order-index/`, `notes/move/`)
 - `reading-positions/`
 - `notes/<note_pk>/comments/`, `notes/<note_pk>/images/`,
   `notes/<note_pk>/comments/<comment_pk>/images/`
@@ -90,6 +91,10 @@ can contain request URLs with credentials.
 - `DeviceAndCountryMiddleware` auto-provisions/authenticates users
   from device + language headers and falls back to a `guest` user —
   anonymous requests are not necessarily unauthenticated.
+- The shared `guest` account is read-only:
+  `bible_research/permissions.py` `GuestReadOnly` (wired into
+  `DEFAULT_PERMISSION_CLASSES` plus the image/reading-position
+  views that override permissions) rejects its writes with 403.
 - Serializers scope tag/note querysets to `request.user`, else to the
   `guest` user.
 
@@ -124,6 +129,27 @@ notes and comments via nested routes. Positions use float
 `tag_position`/`position` fields — reordering writes fractional
 values; uniqueness collisions are handled in `annotations/views.py`.
 
+## Code style & patterns
+
+- Imports ordered: stdlib → Django → third-party → local.
+- Docstrings: triple-quoted with Args/Returns on public methods.
+- ViewSets for model CRUD; APIView for custom endpoints
+  (`BiblePassageView`).
+- Serializers split write-only input fields
+  (`PrimaryKeyRelatedField`) from read-only `*_detail` fields;
+  `to_representation` adds computed data (e.g. verse text).
+- FKs: `CASCADE` for owned children, `PROTECT` for rows that
+  must not disappear (verses); M2M uses explicit `through`
+  models (`NoteVerse`).
+- Validate input in serializer `validate_*` methods; enforce
+  ownership in `perform_update`/`perform_destroy` via
+  `PermissionDenied`; `perform_create` assigns the request user
+  or falls back to `guest`.
+- Never: modify applied migrations, raw SQL in app code (use the
+  ORM — ad-hoc read-only investigation is the exception),
+  circular imports (use `get_user_model()`), secrets in code
+  (`config.yaml` is gitignored).
+
 ## Testing
 
 ```bash
@@ -138,6 +164,10 @@ off prod: `settings.py` overrides `DATABASES` to local SQLite
 (`db.sqlite3`) whenever `'test'` is in `sys.argv`.
 `bible/services/dbt/dbt_integration_test.py` hits the live DBT API —
 skip unless you have a real `DBT_KEY`.
+
+Test user accounts: `testuser`, `guest` — create via
+`python scripts/create_test_user.py` if a local DB lacks them
+(pytest's in-memory DB creates what it needs per test).
 
 Known pre-existing failures on `main` (not regressions):
 `test_note_serializer`, `test_single_query_assertion`,

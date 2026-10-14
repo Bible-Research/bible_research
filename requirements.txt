@@ -1,4 +1,4 @@
-Django==5.2.17
+Django==6.1.2
 PyYAML
 dj-database-url
 django-cors-headers
@@ -8,11 +8,11 @@ requests
 pysword
 pycountry
 psycopg2-binary==2.9.13
-gunicorn==23.0.0
+gunicorn==26.2.0
 google-cloud-secret-manager
-google-cloud-texttospeech>=2.16,<3
+google-cloud-texttospeech>=2.38.0,<3
 google-cloud-storage>=3.16.0,<4
-google-auth>=2.30,<3
+google-auth>=2.61.0,<3
 mutagen>=1.48.1,<2
 Pillow>=12.3.0,<13
 
@@ -22,7 +22,7 @@ future; python_version<="2.7"
 six >= 1.17.0
 python_dateutil >= 2.9.0.post0
 setuptools >= 21.0.0
-urllib3 >= 1.15.1
+urllib3 >= 2.8.0
 
 # Development
 debugpy
