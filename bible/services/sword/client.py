@@ -96,10 +96,19 @@ class SwordClient:
         return mapping
 
     def get_chapter_verses(
-        self, fileset_id: str, book_id: str, chapter: int
+        self,
+        fileset_id: str,
+        book_id: str,
+        chapter: int,
+        verse_start: int = None,
+        verse_end: int = None,
     ) -> List[Dict[str, Any]]:
         """Return [{verse_start, verse_text}, ...] for a chapter,
-        matching the shape used by `BiblePassageSerializer`."""
+        matching the shape used by `BiblePassageSerializer`.
+
+        When ``verse_start``/``verse_end`` are given the per-verse
+        lookup loop is bounded to that range instead of scanning
+        the whole chapter."""
         canon = canonical_sword_fileset_id(fileset_id)
         if canon is None:
             raise ValueError(f"Unknown SWORD fileset: {fileset_id!r}")
@@ -113,9 +122,11 @@ class SwordClient:
                 f"Book {book_id} not present in fileset {canon}"
             )
 
+        start = verse_start if verse_start else 1
+        stop = min(verse_end, 200) if verse_end else 200
         verses: List[Dict[str, Any]] = []
-        verse_num = 1
-        while True:
+        verse_num = start
+        while verse_num <= stop:
             try:
                 text = bible.get(
                     books=[pysword_book],
@@ -130,8 +141,6 @@ class SwordClient:
                 break
             verses.append({"verse_start": verse_num, "verse_text": text})
             verse_num += 1
-            if verse_num > 200:
-                break
 
         if not verses:
             raise PassageNotFoundError(

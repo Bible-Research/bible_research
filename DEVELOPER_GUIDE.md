@@ -305,6 +305,8 @@ Authorization: Token <your-token>
 #### Get Bible Passage (Text)
 ```
 GET /api/v1/bible/?passage=John+3&fileset_id=ENGESV
+GET /api/v1/bible/?passage=John+3:16&fileset_id=ENGESV
+GET /api/v1/bible/?passage=John+3:16-18&fileset_id=ENGESV
 ```
 **Response**:
 ```json
@@ -365,7 +367,14 @@ GET /api/v1/bible/?passage=John+3&response_format=audio&
 
 **Query Parameters**:
 - `passage` (required): Book and chapter
-  (e.g., "John 3", "2 Chronicles 14")
+  (e.g., "John 3", "2 Chronicles 14"), optionally with a verse
+  selector appended to the chapter: "John 3:16" (single verse),
+  "John 3:16-18" (range), or "John 3:16-18,20" (comma-separated
+  mix). With a selector, `verses` contains only the requested
+  verse numbers for `response_format=text`; audio responses are
+  always chapter-granular and ignore the selector. A selector
+  outside the chapter's verses returns `404` with
+  `error_code` `not_found`.
 - `response_format`: "text" or "audio" (default: "text")
 - `fileset_id`: DBT fileset ID for the specific translation and
   format (default: "ENGESV")
