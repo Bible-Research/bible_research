@@ -10,6 +10,7 @@ from bible.utils.bible_books import (
     _BIBLE_BOOKS,
     normalize_sword_book_name,
 )
+from bible.utils.provider_errors import PassageNotFoundError
 
 from .registry import (
     SWORD_MODULES_DIR,
@@ -108,7 +109,7 @@ class SwordClient:
             book_id.upper()
         )
         if not pysword_book:
-            raise ValueError(
+            raise PassageNotFoundError(
                 f"Book {book_id} not present in fileset {canon}"
             )
 
@@ -133,7 +134,7 @@ class SwordClient:
                 break
 
         if not verses:
-            raise ValueError(
+            raise PassageNotFoundError(
                 f"No verses found for {book_id} {chapter} "
                 f"in fileset_id={fileset_id}"
             )

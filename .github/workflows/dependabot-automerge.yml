@@ -1,0 +1,120 @@
+name: Dependabot auto-merge
+
+# pull_request_target runs in the base-repo context with a writable
+# GITHUB_TOKEN, which Dependabot's regular pull_request runs do not
+# get. Safe here because the PR code is never checked out.
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    concurrency:
+      group: >-
+        dependabot-automerge-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      REPO: ${{ github.repository }}
+      # Optional: a PAT stored as AUTOMERGE_TOKEN makes gh act as
+      # a user instead of github-actions[bot].
+      GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Major bumps stay manual (a human merges them). For
+      # requirement-range PRs update-type is null; CI gates those.
+      - name: Wait for checks to pass
+        if: >
+          steps.metadata.outputs.update-type !=
+          'version-update:semver-major'
+        run: |
+          # Poll check runs directly: this job's own "automerge"
+          # check appears on the PR, so `gh pr checks --watch`
+          # would wait for itself forever. Also poll legacy
+          # commit statuses (which never include check runs).
+          sha=$(gh pr view "$PR_URL" --json headRefOid \
+            -q .headRefOid)
+          ok=0
+          for i in $(seq 1 55); do
+            res=$(gh api \
+              "repos/$REPO/commits/$sha/check-runs" \
+              --jq '[.check_runs[] | select(.name != "automerge")]
+                    as $c |
+                    if ($c | length) == 0 then "none"
+                    elif ([$c[] | select(.status != "completed")]
+                          | length) > 0 then "pending"
+                    elif ([$c[] | select(.conclusion != "success"
+                          and .conclusion != "skipped"
+                          and .conclusion != "neutral")] | length)
+                         > 0 then "failed"
+                    else "passed" end')
+            # Statuses arrive newest-first; use only the latest
+            # event per context, else a superseded "pending"
+            # blocks the loop forever.
+            st=$(gh api "repos/$REPO/commits/$sha/statuses" \
+              --jq '[group_by(.context) | .[] | .[0]] as $s |
+                    if ($s | length) == 0 then "none"
+                    elif ([$s[] | select(.state == "error" or
+                          .state == "failure")] | length) > 0
+                    then "failed"
+                    elif ([$s[] | select(.state == "pending")]
+                          | length) > 0 then "pending"
+                    else "passed" end')
+            if [ "$res" = "failed" ] || [ "$st" = "failed" ]; then
+              echo "A PR check failed"; exit 1
+            fi
+            if [ "$res" != "pending" ] && [ "$st" != "pending" ] \
+               && { [ "$res" = "passed" ] \
+                    || [ "$st" = "passed" ]; }; then
+              ok=1; break
+            fi
+            sleep 10
+          done
+          if [ "$ok" != "1" ]; then
+            echo "Timed out waiting for checks"; exit 1
+          fi
+
+      # The ruleset requires 1 approving review. With the
+      # AUTOMERGE_TOKEN PAT this runs as the repo admin and
+      # satisfies it (org policy blocks GITHUB_TOKEN approvals).
+      - name: Approve PR
+        if: >
+          steps.metadata.outputs.update-type !=
+          'version-update:semver-major'
+        run: gh pr review "$PR_URL" --approve
+
+      - name: Merge PR
+        if: >
+          steps.metadata.outputs.update-type !=
+          'version-update:semver-major'
+        run: |
+          if out=$(gh pr merge "$PR_URL" --squash 2>&1); then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out"
+          status=$(gh pr view "$PR_URL" --json mergeStateStatus \
+            -q .mergeStateStatus)
+          if [ "$status" = "BEHIND" ]; then
+            # A workflow push would not trigger CI and would make
+            # Dependabot disown the PR ("edited by someone
+            # else"). Leave the branch alone: Dependabot rebases
+            # conflicting PRs itself, which re-runs this job.
+            echo "Branch behind main; awaiting Dependabot rebase."
+            exit 0
+          fi
+          exit 1

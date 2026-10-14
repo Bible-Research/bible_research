@@ -6,6 +6,14 @@ from rest_framework.test import APIRequestFactory
 from bible.views import AudioTimestampView
 
 
+class FakeProviderError(Exception):
+    """Mimics the DBT OpenAPI ``ApiException`` (``exc.status``)."""
+
+    def __init__(self, status_code):
+        super().__init__(f'HTTP {status_code}')
+        self.status = status_code
+
+
 @pytest.fixture
 def factory():
     return APIRequestFactory()
@@ -81,6 +89,58 @@ def test_get_timestamps_dbt_exception(
     assert response.status_code == status.HTTP_502_BAD_GATEWAY
     assert response.data['error_code'] == 'provider_error'
     assert 'DBT Error' not in response.data['error']
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+@patch('bible.views.get_dbt_book_id')
+def test_get_timestamps_rate_limited(
+    mock_get_dbt_book_id, mock_get_client, factory
+):
+    """An upstream 429 maps to HTTP 429 + rate_limited."""
+    mock_get_dbt_book_id.return_value = 'JHN'
+    mock_get_client.return_value.get_timestamps.side_effect = (
+        FakeProviderError(429)
+    )
+
+    request = factory.get('/fake-url/', {
+        'fileset_id': 'ENGESVN2DA',
+        'book': 'John',
+        'chapter': '1'
+    })
+    response = AudioTimestampView.as_view()(request)
+
+    assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+    assert response.data['error_code'] == 'rate_limited'
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+@patch('bible.views.get_dbt_book_id')
+def test_get_timestamps_error_does_not_leak_credentials(
+    mock_get_dbt_book_id, mock_get_client, factory
+):
+    """Network errors stringify with the request URL — including
+    DBT's ``?key=`` credential — so the raw exception text must
+    never reach the response body."""
+    mock_get_dbt_book_id.return_value = 'JHN'
+    mock_get_client.return_value.get_timestamps.side_effect = (
+        ConnectionError(
+            'Max retries exceeded with url: '
+            '/timestamps?key=SECRET'
+        )
+    )
+
+    request = factory.get('/fake-url/', {
+        'fileset_id': 'ENGESVN2DA',
+        'book': 'John',
+        'chapter': '1'
+    })
+    response = AudioTimestampView.as_view()(request)
+
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
+    assert 'SECRET' not in response.data['error']
 
 
 @pytest.mark.django_db
