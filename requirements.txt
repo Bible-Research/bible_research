@@ -1,4 +1,4 @@
-Django==6.1.1
+Django==6.1.2
 PyYAML
 dj-database-url
 django-cors-headers
