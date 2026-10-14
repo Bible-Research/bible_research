@@ -22,7 +22,9 @@ class _FakeBlob:
     def download_as_bytes(self):
         return self._store[self.name]["data"]
 
-    def upload_from_string(self, data, content_type=None, if_generation_match=None):
+    def upload_from_string(
+        self, data, content_type=None, if_generation_match=None,
+    ):
         existing = self._store.get(self.name)
         if if_generation_match == 0 and existing is not None:
             from google.api_core import exceptions as gax
@@ -49,6 +51,13 @@ class _FakeBucket:
 
     def blob(self, name):
         return _FakeBlob(name, self._store)
+
+    def list_blobs(self, prefix=None):
+        return [
+            type("ListedBlob", (), {"name": name})()
+            for name in self._store
+            if prefix is None or name.startswith(prefix)
+        ]
 
 
 @pytest.fixture
@@ -134,7 +143,7 @@ def test_acquire_lock_tolerates_aware_started_at(fake_bucket):
     ``TypeError: can't subtract offset-naive and offset-aware``. An
     old aware timestamp should be treated as stale and overridden."""
     ym = gcs.get_current_year_month()
-    path = f"state/lock/LVSGLU8/{ym}.json"
+    path = f"state/lock/LVSGLU8/verse/{ym}.json"
     stale_aware = (
         datetime.datetime.now(datetime.timezone.utc)
         - datetime.timedelta(hours=48)
@@ -209,7 +218,7 @@ def test_acquire_lock_tolerates_fresh_aware_started_at(fake_bucket):
     """Companion to the stale case: a *fresh* aware timestamp must
     also be comparable without crashing and correctly block re-entry."""
     ym = gcs.get_current_year_month()
-    path = f"state/lock/LVSGLU8/{ym}.json"
+    path = f"state/lock/LVSGLU8/verse/{ym}.json"
     fresh_aware = datetime.datetime.now(datetime.timezone.utc)
     fake_bucket._store[path] = {
         "data": json.dumps({
@@ -223,3 +232,123 @@ def test_acquire_lock_tolerates_fresh_aware_started_at(fake_bucket):
 
     assert ok is False
     assert reason == "active_run"
+
+
+def test_chapter_object_paths_per_mode():
+    audio, ts = gcs.chapter_object_paths(
+        "LVSGLU8", "JHN", 3, "lv-LV-Chirp3-HD-Sadachbia",
+    )
+    assert audio == (
+        "audio/LVSGLU8/lv-LV-Chirp3-HD-Sadachbia/JHN/3_audio.mp3"
+    )
+    assert ts == (
+        "audio/LVSGLU8/lv-LV-Chirp3-HD-Sadachbia/JHN/3_timestamps.json"
+    )
+
+    audio, ts = gcs.chapter_object_paths(
+        "LVSGLU8", "JHN", 3, "lv-LV-Chirp3-HD-Sadachbia",
+        mode="chapter",
+    )
+    assert audio.startswith("audio_chapter/LVSGLU8/")
+    assert ts.startswith("audio_chapter/LVSGLU8/")
+
+    with pytest.raises(ValueError):
+        gcs.chapter_object_paths(
+            "LVSGLU8", "JHN", 3, "voice", mode="bogus",
+        )
+
+
+def test_run_locks_are_isolated_per_mode(fake_bucket):
+    """A completed verse-mode lock must not block the chapter-mode
+    run for the same month."""
+    ok, reason = gcs.acquire_run_lock(
+        "LVSGLU8", stale_after_hours=24, mode="verse",
+    )
+    assert ok and reason == "acquired"
+    gcs.mark_run_complete(
+        "LVSGLU8", chars_used=10, chapters_generated=1,
+        reason="all_done", mode="verse",
+    )
+
+    ok, reason = gcs.acquire_run_lock(
+        "LVSGLU8", stale_after_hours=24, mode="verse",
+    )
+    assert not ok and reason == "already_completed"
+
+    ok, reason = gcs.acquire_run_lock(
+        "LVSGLU8", stale_after_hours=24, mode="chapter",
+    )
+    assert ok and reason == "acquired"
+
+
+def test_lock_state_path_includes_mode(fake_bucket):
+    gcs.acquire_run_lock(
+        "LVSGLU8", stale_after_hours=24, mode="chapter",
+    )
+    ym = gcs.get_current_year_month()
+    assert f"state/lock/LVSGLU8/chapter/{ym}.json" in fake_bucket._store
+
+
+def test_usage_counter_is_shared_across_modes(fake_bucket):
+    """Monthly usage stays on the shared (mode-less) path: the char
+    cap is a per-fileset spend ceiling, not per artifact set."""
+    gcs.increment_monthly_usage("LVSGLU8", 500)
+    ym = gcs.get_current_year_month()
+    assert f"state/usage/LVSGLU8/{ym}.json" in fake_bucket._store
+    assert gcs.read_monthly_usage("LVSGLU8") == 500
+
+
+def test_list_completed_chapters_isolated_between_modes(fake_bucket):
+    """Chapters generated in verse mode must not mark chapter-mode
+    work as done (different GCS prefixes)."""
+    verse_audio, verse_ts = gcs.chapter_object_paths(
+        "LVSGLU8", "JHN", 3, "voice", mode="verse",
+    )
+    fake_bucket._store[verse_audio] = {"data": b"mp3", "gen": 1}
+    fake_bucket._store[verse_ts] = {"data": b"{}", "gen": 1}
+
+    verse_done = gcs.list_completed_chapters(
+        "LVSGLU8", "voice", mode="verse",
+    )
+    chapter_done = gcs.list_completed_chapters(
+        "LVSGLU8", "voice", mode="chapter",
+    )
+
+    assert verse_done == {("JHN", 3)}
+    assert chapter_done == set()
+
+
+def test_signed_url_cache_keys_include_mode(fake_bucket, monkeypatch):
+    """Verse and chapter artifacts for the same chapter are different
+    objects — their signed URLs must not share a cache entry."""
+    gcs._signed_url_cache.clear()
+
+    class _FakeCreds:
+        service_account_email = "svc@example.iam.gserviceaccount.com"
+        token = "tok"
+
+        def refresh(self, _request):
+            pass
+
+    monkeypatch.setattr(
+        gcs.google.auth, "default",
+        lambda scopes=None: (_FakeCreds(), "proj"),
+    )
+
+    sign_calls = {"n": 0}
+
+    def fake_generate_signed_url(self, **_):
+        sign_calls["n"] += 1
+        return f"https://signed/{sign_calls['n']}"
+
+    _FakeBlob.generate_signed_url = fake_generate_signed_url
+
+    url_verse = gcs.signed_audio_url(
+        "LVSGLU8", "JHN", 3, "v", ttl_seconds=300, mode="verse",
+    )
+    url_chapter = gcs.signed_audio_url(
+        "LVSGLU8", "JHN", 3, "v", ttl_seconds=300, mode="chapter",
+    )
+
+    assert url_verse != url_chapter
+    assert sign_calls["n"] == 2

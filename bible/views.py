@@ -16,6 +16,7 @@ from bible.services.apibible.registry import (
 from bible.services.google_tts.registry import get_tts_config
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import (
+    audio_mode_for_fileset,
     canonical_sword_fileset_id,
     is_sword_fileset,
 )
@@ -46,6 +47,7 @@ logger = logging.getLogger(__name__)
 PROVIDER_ERROR_STATUSES = {
     'rate_limited': status.HTTP_429_TOO_MANY_REQUESTS,
     'not_found': status.HTTP_404_NOT_FOUND,
+    'book_not_in_fileset': status.HTTP_404_NOT_FOUND,
 }
 
 
@@ -119,11 +121,11 @@ class BiblePassageView(APIView):
           (e.g. LVSGLU8). SWORD translations also accept listing ``abbr``
           (e.g. GLU8 for Latvian Glück).
 
-    Example:
+    Examples:
         /api/v1/bible/?passage=John+3&fileset_id=ENGESV
-        /api/v1/bible/?passage=John+3&fileset_id=LVSGLU8   # LV
-        /api/v1/bible/?passage=Luke+20&fileset_id=GLU8
-            &response_format=audio   # LV audio
+        /api/v1/bible/?passage=John+3&fileset_id=LVSGLU8 (LV text)
+        # LV audio:
+        /api/v1/bible/?passage=Luke+20&fileset_id=GLU8&response_format=audio
     """
 
     def get(self, request, format=None):
@@ -228,7 +230,9 @@ class BiblePassageView(APIView):
                 body = serializer.to_representation(data)
                 # Provider failures come back with ``error`` /
                 # ``error_code`` fields — surface them with a real
-                # HTTP status so clients can branch on it.
+                # HTTP status so clients can branch on it. This
+                # includes ``book_not_in_fileset`` (404) so clients
+                # can fall back to another fileset.
                 if 'error' in body:
                     return Response(
                         body,
@@ -237,15 +241,27 @@ class BiblePassageView(APIView):
                             status.HTTP_502_BAD_GATEWAY,
                         ),
                     )
-                # Surface "audio requested but not generated yet" as
-                # a proper 404 instead of a 200 with ``audio_url: None``
-                # so clients can reliably branch on status code.
+                # Defensive: a serializer path reporting an audio
+                # miss as ``audio_url: None`` without the canonical
+                # error body still answers 404 with the stable
+                # error code and the same body shape.
                 if (
                     body.get('format') == 'audio'
                     and body.get('audio_url') is None
                 ):
                     return Response(
-                        body, status=status.HTTP_404_NOT_FOUND
+                        {
+                            'book': body.get('book'),
+                            'book_name': body.get('book_name'),
+                            'chapter': body.get('chapter'),
+                            'error': body.get(
+                                'message',
+                                'Audio not available for this '
+                                'passage',
+                            ),
+                            'error_code': 'book_not_in_fileset',
+                        },
+                        status=status.HTTP_404_NOT_FOUND,
                     )
                 return Response(body)
 
@@ -316,9 +332,14 @@ class AudioTimestampView(APIView):
             if is_sword_fileset(fileset_id):
                 canon = canonical_sword_fileset_id(fileset_id)
                 voice_name = get_tts_config(canon)["voice_name"]
+                # Audio fileset id selects the artifact layout:
+                # LVSGLU8C1DA -> audio/ (verse mode),
+                # LVSGLU8C2DA -> audio_chapter/ (chapter mode).
+                audio_mode = audio_mode_for_fileset(fileset_id)
                 try:
                     payload = gcs.read_timestamps_json(
-                        canon, book_id, chapter_num, voice_name,
+                        canon, book_id, int(chapter), voice_name,
+                        mode=audio_mode,
                     )
                 except gcs_exceptions.NotFound:
                     return Response(
@@ -851,6 +872,8 @@ class TranslationListView(APIView):
                     'language': t['language'],
                     'language_iso': t['iso'],
                     'filesets': t['filesets'],
+                    'text_options': t.get('text_options', []),
+                    'audio_options': t.get('audio_options', []),
                 }
                 for t in translations
             ]
