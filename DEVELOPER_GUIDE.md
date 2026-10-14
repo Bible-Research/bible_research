@@ -353,6 +353,15 @@ same `error`/`error_code` fields and the same HTTP status mapping
 (`429`/`404`/`502`). Raw exception text is never embedded in
 `error` because it can contain request URLs with credentials.
 
+**Client error response** (invalid input): returns `400` with an
+`error` message. `passage` accepts a book name and chapter number
+only (`John 3`) — verse selectors like `John 3:16` are rejected.
+Messages: `Passage parameter is required. Example:
+?passage=John+3`, `Invalid passage format. Use 'Book Chapter'
+(e.g., 'John 3')`, `Unknown book: <name>`, `Chapter must be a
+valid number` (non-numeric), `Chapter must be a positive number`
+(zero or negative).
+
 #### Get Bible Passage (Audio)
 ```
 GET /api/v1/bible/?passage=John+3&response_format=audio&
