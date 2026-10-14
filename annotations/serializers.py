@@ -630,13 +630,19 @@ class CommentSerializer(serializers.ModelSerializer):
     """
     Serializes a single Comment for both read and write operations.
 
-    - On write (POST/PATCH): accepts 'content' and optionally
-      'parent_comment' (its PK). 'user' and 'note' are injected
-      by the view.
+    - On write (POST/PATCH): accepts 'content' and, on create only,
+      optionally 'parent_comment' (its PK). 'user' and 'note' are
+      injected by the view. 'is_deleted' is read-only — deletion
+      happens exclusively via DELETE, so PATCH cannot un-delete.
     - On read (GET): exposes author info via 'author' and omits
       internal 'user' FK so clients receive a clean response.
       The 'replies' field is populated by build_comment_tree and
       is not part of the model schema.
+    - Soft-deleted comments are redacted on every read path
+      (to_representation): 'content' becomes '[deleted]' and
+      'images' becomes []. Clients must render a tombstone for
+      is_deleted=True; the row is never removed so reply threads
+      stay intact.
 
     N+1 prevention: this serializer is intentionally flat.
     The view fetches all comments in one query and delegates
@@ -668,11 +674,29 @@ class CommentSerializer(serializers.ModelSerializer):
             'images',
         ]
         read_only_fields = [
-            'id', 'author', 'note_id', 'timestamp', 'images',
+            'id', 'author', 'note_id', 'timestamp', 'is_deleted',
+            'images',
         ]
 
+    def to_representation(self, instance):
+        """Serialize; redact content/images of deleted comments."""
+        data = super().to_representation(instance)
+        if instance.is_deleted:
+            data['content'] = '[deleted]'
+            data['images'] = []
+        return data
+
     def validate_parent_comment(self, value):
-        """Ensure a reply targets a comment on the same note."""
+        """
+        Ensure a reply targets a comment on the same note.
+
+        parent_comment is create-only: once a comment exists its
+        position in the thread is immutable (no re-parenting).
+        """
+        if self.instance is not None:
+            raise serializers.ValidationError(
+                "parent_comment cannot be changed."
+            )
         if value is None:
             return value
         request = self.context.get('request')
@@ -697,8 +721,9 @@ def build_comment_tree(queryset):
     This function performs O(n) work in Python to build the tree,
     avoiding any additional database round-trips.
 
-    Deleted comments are represented with redacted content so that
-    reply threads remain structurally intact in the response.
+    Deleted comments are represented with redacted content
+    (handled by CommentSerializer.to_representation) so that reply
+    threads remain structurally intact in the response.
 
     Returns a list of root-level comment dicts, each containing a
     'replies' list that may itself contain further nested comment
@@ -708,9 +733,6 @@ def build_comment_tree(queryset):
 
     for comment in queryset:
         data = CommentSerializer(comment).data
-        if comment.is_deleted:
-            data['content'] = '[deleted]'
-            data['images'] = []
         data['replies'] = []
         comment_map[comment.id] = data
 
