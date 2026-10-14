@@ -321,10 +321,11 @@ class NoteViewSet(viewsets.ModelViewSet):
         # requests to public notes only. Writes and the
         # other actions always require authentication —
         # explicitly, not just via DeviceAndCountryMiddleware
-        # auto-provisioning (issue #47).
+        # auto-provisioning (issue #47) — and are denied for
+        # the shared read-only 'guest' account.
         if self.action in ('list', 'retrieve', 'order_index'):
             return [AllowAny()]
-        return [IsAuthenticated()]
+        return [IsAuthenticated(), GuestReadOnly()]
 
     def get_serializer_context(self):
         """Add fileset_id from query params to serializer context."""
@@ -1327,10 +1328,11 @@ class CommentViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         # Reads are open: visibility is enforced by
         # get_accessible_notes_qs (anon may see public notes).
-        # Writes always require authentication.
+        # Writes always require authentication and are denied
+        # for the shared read-only 'guest' account.
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
-        return [IsAuthenticated()]
+        return [IsAuthenticated(), GuestReadOnly()]
 
     def _get_note(self):
         """
