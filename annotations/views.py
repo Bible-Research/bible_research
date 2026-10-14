@@ -17,6 +17,7 @@ from django.db.models import Count, Q, F, Min, Prefetch
 from django.shortcuts import get_object_or_404
 
 from bible.models import Verse
+from bible_research.permissions import GuestReadOnly
 
 from .models import (
     Tag,
@@ -1564,10 +1565,11 @@ class NoteImageViewSet(viewsets.GenericViewSet):
     def get_permissions(self):
         # Reads are open: visibility is enforced by
         # get_accessible_notes_qs (anon may see public notes).
-        # Writes always require authentication.
+        # Writes always require authentication and are denied
+        # for the shared read-only 'guest' account.
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
-        return [IsAuthenticated()]
+        return [IsAuthenticated(), GuestReadOnly()]
 
     def _get_note(self):
         return get_object_or_404(
@@ -1668,7 +1670,7 @@ class CommentImageViewSet(viewsets.GenericViewSet):
     def get_permissions(self):
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
-        return [IsAuthenticated()]
+        return [IsAuthenticated(), GuestReadOnly()]
 
     def _get_comment(self):
         return get_object_or_404(
@@ -1768,7 +1770,7 @@ class ImageDestroyView(APIView):
     (best-effort).
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, GuestReadOnly]
 
     def delete(self, request, image_pk):
         image = get_object_or_404(Image, pk=image_pk)
@@ -1817,7 +1819,7 @@ class ReadingPositionViewSet(viewsets.ModelViewSet):
     POST /api/v1/reading-positions/bulk/
     """
     serializer_class = ReadingPositionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, GuestReadOnly]
 
     def get_queryset(self):
         """Filter positions to current user only."""

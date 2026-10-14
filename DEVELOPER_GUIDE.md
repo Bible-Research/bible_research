@@ -146,6 +146,8 @@ The project uses two special accounts:
    - Username: `guest`
    - Email: `guest@example.com`
    - Purpose: Default user for unauthenticated requests
+   - Read-only: API writes (POST/PUT/PATCH/DELETE)
+     authenticated as `guest` return 403
 
 2. **Test User** (for development)
    - Username: `testuser`
@@ -210,6 +212,9 @@ The project uses two special accounts:
 **Access Control**:
 - **Authenticated users**: See their own tags and notes
 - **Unauthenticated users**: See guest user's tags and public notes
+- **Shared `guest` account**: Read-only — reads allowed, writes
+  rejected with 403 (`GuestReadOnly` in
+  `bible_research/permissions.py`)
 - **Note visibility**: Controlled by `public` boolean field
 
 ---
@@ -870,11 +875,10 @@ surface as a `409 position_conflict`.
 - `409 {"error": "position_conflict", "constraint":
   "unique_tag_position_per_tag", ...}` — position collision,
   same contract as `notes/reorder/`.
-- `403` only as a defense-in-depth fallback: anonymous
-  requests are auto-authenticated by
-  `DeviceAndCountryMiddleware` as the shared device (or
-  `guest`) user, so they act as that user and can move notes
-  it owns.
+- `403` when the requester is authenticated as the shared
+  `guest` account — `guest` is read-only, so all writes
+  (including `notes/move/`) are rejected. Device-provisioned
+  users can still move the notes they own.
 
 ### Comments
 
@@ -1053,14 +1057,22 @@ curl http://localhost:8000/api/v1/notes/ \
    - Can view guest user's tags
    - Cannot create/modify content
 
-2. **Authenticated Users**:
+2. **Shared Guest User** (`guest`):
+   - Fallback account the device middleware authenticates
+     requests as when it cannot provision a per-device user
+   - Can read guest-owned tags/notes/comments and public
+     content
+   - Cannot write — every POST/PUT/PATCH/DELETE returns 403
+     (`GuestReadOnly` permission)
+
+3. **Authenticated Users**:
    - Full access to Bible passages
    - Can create/read/update/delete their own tags
    - Can create/read/update/delete their own notes
    - Can view public notes from other users
    - Cannot modify other users' content
 
-3. **Staff Users**:
+4. **Staff Users**:
    - Access to Django admin panel
    - Same API permissions as regular users
 
@@ -1074,9 +1086,9 @@ When no authenticated user is available:
   callers and scoped to public notes. All note writes
   (`POST`/`PUT`/`PATCH`/`DELETE`, `reorder/`, `move/`,
   `bulk/`, `linked/`) require authentication and return
-  401/403 for anonymous callers — content is NOT assigned to
-  the guest user.
-- Creation (tags): New content is assigned to guest user
+  401/403 for anonymous callers.
+- Creation: Rejected — requests authenticated as the shared
+  `guest` account are read-only (writes return 403)
 
 ---
 
