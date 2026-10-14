@@ -700,7 +700,8 @@ device (or `guest`) user, so truly anonymous requests are
 rare — the viewset still enforces the contract explicitly.
 
 **Query Parameters**:
-- `tag_id` (required): Tag ID to filter notes
+- `tag_id` (required): Tag ID to filter notes. The sentinel
+  `tag_id=untagged` lists notes with no tag instead.
 - `fileset_id` (optional): Bible translation used to enrich
   each note's `verses[].text` — same provider routing as the
   passage endpoint (`ENGESV_API` → ESV API, SWORD ids like

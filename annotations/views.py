@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 
 NOTE_IDS_CAP = 200
 
+# `tag_id` sentinel meaning "notes with no tag". Real tag ids
+# are `TAG…` strings, so this can never collide with one.
+UNTAGGED_TAG_ID = 'untagged'
+
 # Below this float gap between neighbouring tag positions the
 # midpoint may no longer be representable; /notes/move/ then
 # rebalances the whole tag instead of bisecting.
@@ -510,7 +514,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         - GET /api/v1/notes/<pk>/ - Retrieve a specific note
           by its ID
         - GET /api/v1/notes/?tag_id=<tag_id> - Filter by
-          tag ID
+          tag ID; `tag_id=untagged` lists notes with no tag
         - GET /api/v1/notes/?ordering=<ordering> - Sort order
           (custom, -custom, created, -created, verse, -verse)
         - GET /api/v1/notes/?page=<page> - Page number
@@ -583,7 +587,10 @@ class NoteViewSet(viewsets.ModelViewSet):
                     "Fetching public notes only"
                 )
 
-        if tag_id:
+        if tag_id == UNTAGGED_TAG_ID:
+            queryset = queryset.filter(tag__isnull=True)
+            logger.debug("Filtering untagged notes")
+        elif tag_id:
             queryset = queryset.filter(tag_id=tag_id)
             logger.debug(f"Filtering by tag_id: {tag_id}")
 
@@ -1482,6 +1489,7 @@ class CommentCountView(APIView):
 
     Returns the number of (non-deleted) comments per Note.
     Exactly one of tag_id or note_ids must be supplied.
+    `tag_id=untagged` counts comments on notes with no tag.
     """
 
     def get(self, request):
@@ -1521,7 +1529,10 @@ class CommentCountView(APIView):
         notes_qs = get_accessible_notes_qs(request.user)
 
         if has_tag:
-            notes_qs = notes_qs.filter(tag_id=tag_id)
+            if tag_id == UNTAGGED_TAG_ID:
+                notes_qs = notes_qs.filter(tag__isnull=True)
+            else:
+                notes_qs = notes_qs.filter(tag_id=tag_id)
         else:
             notes_qs = notes_qs.filter(id__in=note_ids)
 
