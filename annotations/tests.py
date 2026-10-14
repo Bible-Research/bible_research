@@ -1396,6 +1396,151 @@ class NoteProviderErrorTest(TestCase):
         self.assertEqual(data['verses'][0]['text'], '')
 
 
+class NoteFilesetRoutingTest(TestCase):
+    """Note verse enrichment routes through the same provider
+    dispatch as the passage endpoint: the request's fileset_id
+    selects ESV, SWORD, or DBT (issue #55 — previously every
+    non-ESV fileset silently fetched DBT ENGESV)."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='note_fs_user',
+            email='note_fs@example.com',
+            password='pass',
+        )
+        self.verse = Verse.objects.create(
+            book='John', chapter=1, verse=1, dbt_book_id='JHN'
+        )
+        self.note = Note.objects.create(
+            user=self.user, note_text='test note'
+        )
+        self.note.verses.add(self.verse)
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_dbt_fileset_id_is_forwarded(self, mock_get):
+        """fileset_id=ENGKJV must reach the DBT client's
+        bible_id instead of falling back to ENGESV."""
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {
+            'data': [
+                {'verse_start': 1, 'verse_text': 'KJV text'}
+            ]
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGKJV'}
+        ).data
+
+        mock_client.get_verses.assert_called_once_with(
+            'JHN', 1,
+            bible_id='ENGKJV',
+            verse_start=1, verse_end=1,
+        )
+        self.assertNotIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], 'KJV text')
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_missing_fileset_id_defaults_to_engesv(self, mock_get):
+        """No fileset_id in context keeps the ENGESV default."""
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {
+            'data': [
+                {'verse_start': 1, 'verse_text': 'ESV text'}
+            ]
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(self.note).data
+
+        mock_client.get_verses.assert_called_once_with(
+            'JHN', 1,
+            bible_id='ENGESV',
+            verse_start=1, verse_end=1,
+        )
+        self.assertNotIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], 'ESV text')
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('annotations.serializers.get_default_sword_client')
+    def test_sword_fileset_uses_sword_client(
+        self, mock_sword_get, mock_dbt_get
+    ):
+        """fileset_id=LVSGLU8 routes to the local SWORD module
+        and never touches the DBT client."""
+        mock_sword = MagicMock()
+        mock_sword.get_chapter_verses.return_value = [
+            {'verse_start': 1, 'verse_text': 'Latviesu teksts'}
+        ]
+        mock_sword_get.return_value = mock_sword
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'LVSGLU8'}
+        ).data
+
+        mock_sword.get_chapter_verses.assert_called_once_with(
+            'LVSGLU8', 'JHN', 1
+        )
+        mock_dbt_get.return_value.get_verses.assert_not_called()
+        self.assertNotIn('error', data)
+        self.assertEqual(
+            data['verses'][0]['text'], 'Latviesu teksts'
+        )
+        self.assertEqual(data['headings'], [])
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('annotations.serializers.get_default_sword_client')
+    def test_sword_audio_fileset_uses_sword_client(
+        self, mock_sword_get, mock_dbt_get
+    ):
+        """A SWORD audio fileset id (LVSGLU8C1DA) canonicalizes
+        to the same local module for text enrichment."""
+        mock_sword = MagicMock()
+        mock_sword.get_chapter_verses.return_value = [
+            {'verse_start': 1, 'verse_text': 'Latviesu teksts'}
+        ]
+        mock_sword_get.return_value = mock_sword
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'LVSGLU8C1DA'}
+        ).data
+
+        mock_sword.get_chapter_verses.assert_called_once_with(
+            'LVSGLU8C1DA', 'JHN', 1
+        )
+        mock_dbt_get.return_value.get_verses.assert_not_called()
+        self.assertNotIn('error', data)
+
+    @patch('annotations.serializers.get_default_esv_client')
+    def test_esv_fileset_returns_verse_text(self, mock_get):
+        """fileset_id=ENGESV_API still routes to the ESV API
+        and returns verse text plus filtered headings."""
+        mock_client = MagicMock()
+        mock_client.get_chapter_with_headings.return_value = {
+            'verses': [
+                {'verse_start': 1, 'verse_text': 'ESV text'}
+            ],
+            'headings': [
+                {'before_verse': 1, 'text': 'The Beginning'}
+            ],
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGESV_API'}
+        ).data
+
+        esv_method = mock_client.get_chapter_with_headings
+        esv_method.assert_called_once_with('JHN', 1)
+        self.assertNotIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], 'ESV text')
+        self.assertEqual(
+            data['headings'],
+            [{'before_verse': 1, 'text': 'The Beginning'}]
+        )
+
+
 class TestNoteOrderIndex(TestCase):
     """Tests for GET /api/v1/notes/order-index/."""
 

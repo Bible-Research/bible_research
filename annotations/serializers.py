@@ -7,6 +7,8 @@ from bible.models import Verse
 from bible.services.dbt.client import get_default_dbt_client
 from bible.services.esv.client import get_default_esv_client
 from bible.services.esv.registry import is_esv_fileset
+from bible.services.sword.client import get_default_sword_client
+from bible.services.sword.registry import is_sword_fileset
 from bible.utils.bible_books import get_dbt_book_id
 from bible.utils.provider_errors import (
     PassageNotFoundError,
@@ -335,6 +337,31 @@ class NoteSerializer(serializers.ModelSerializer):
                     for h in parsed.get('headings', [])
                     if h.get('before_verse') in verse_numbers
                 ]
+            elif is_sword_fileset(fileset_id):
+                # Local SWORD module (e.g. LVSGLU8) — same
+                # provider dispatch as the passage endpoint.
+                # SWORD modules carry no headings metadata.
+                sword_client = get_default_sword_client()
+                sword_verses = sword_client.get_chapter_verses(
+                    fileset_id, dbt_book_id, chapter
+                )
+                for verse in verses:
+                    matching_verse = next(
+                        (
+                            v for v in sword_verses
+                            if v['verse_start'] == verse.verse
+                        ),
+                        None
+                    )
+                    verses_with_text.append({
+                        'book': book_name,
+                        'chapter': chapter,
+                        'verse': verse.verse,
+                        'text': (
+                            matching_verse['verse_text']
+                            if matching_verse else ''
+                        )
+                    })
             else:
                 # Use DBT client for other filesets
                 kwargs = {
@@ -343,7 +370,8 @@ class NoteSerializer(serializers.ModelSerializer):
                 }
                 dbt_client = get_default_dbt_client()
                 verse_text = dbt_client.get_verses(
-                    dbt_book_id, chapter, **kwargs
+                    dbt_book_id, chapter,
+                    bible_id=fileset_id, **kwargs
                 )
                 # A successful-but-empty DBT body (or rows that
                 # all lack ``verse_text``) is missing content —

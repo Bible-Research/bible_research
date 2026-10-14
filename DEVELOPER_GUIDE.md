@@ -554,6 +554,12 @@ Authorization: Token <your-token>
 
 **Query Parameters**:
 - `tag_id` (required): Tag ID to filter notes
+- `fileset_id` (optional): Bible translation used to enrich
+  each note's `verses[].text` — same provider routing as the
+  passage endpoint (`ENGESV_API` → ESV API, SWORD ids like
+  `LVSGLU8` → local module, anything else → DBT).
+  Defaults to `ENGESV` (DBT). SWORD translations return no
+  `headings`.
 - `ordering` (optional): Sort order
   - `custom` (default): Custom order ascending
   - `-custom`: Custom order descending
