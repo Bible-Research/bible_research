@@ -29,12 +29,23 @@ class ESVClient:
         )
 
     def fetch_chapter_raw(
-        self, book_id: str, chapter: int
+        self,
+        book_id: str,
+        chapter: int,
+        verse_start: int = None,
+        verse_end: int = None,
     ) -> Dict[str, Any]:
-        """Return the raw ESV API JSON for one chapter."""
+        """Return the raw ESV API JSON for one chapter or, when
+        ``verse_start``/``verse_end`` are given, a verse range
+        within it."""
         book_name = get_book_name_from_id(book_id)
+        ref = f"{book_name} {chapter}"
+        if verse_start is not None:
+            ref += f":{verse_start}"
+            if verse_end is not None and verse_end != verse_start:
+                ref += f"-{verse_end}"
         params = {
-            "q": f"{book_name} {chapter}",
+            "q": ref,
             "include-headings": "true",
             "include-footnotes": "false",
             "include-passage-references": "false",
@@ -99,9 +110,16 @@ class ESVClient:
         return location
 
     def get_chapter_with_headings(
-        self, book_id: str, chapter: int
+        self,
+        book_id: str,
+        chapter: int,
+        verse_start: int = None,
+        verse_end: int = None,
     ) -> Dict[str, Any]:
         """Return parsed verses and section headings.
+
+        When ``verse_start``/``verse_end`` are given, only that
+        verse range within the chapter is fetched upstream.
 
         Returns::
 
@@ -119,7 +137,10 @@ class ESVClient:
                 ],
             }
         """
-        raw = self.fetch_chapter_raw(book_id, chapter)
+        raw = self.fetch_chapter_raw(
+            book_id, chapter,
+            verse_start=verse_start, verse_end=verse_end,
+        )
         passage = (raw.get("passages") or [""])[0]
         return _parse_passage(passage)
 

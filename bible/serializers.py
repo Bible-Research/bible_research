@@ -24,6 +24,15 @@ from bible.utils.provider_errors import (
 logger = logging.getLogger(__name__)
 
 
+def _select_verses(rows, verse_numbers):
+    """Filter ``[{'verse': n, 'text': ...}]`` rows to the
+    requested verse numbers (``None`` keeps every row)."""
+    if not verse_numbers:
+        return rows
+    wanted = set(verse_numbers)
+    return [v for v in rows if v['verse'] in wanted]
+
+
 def _book_not_in_fileset_body(book_id, book_name, chapter,
                               fileset_id, error=None):
     """Error body for a passage the fileset does not cover.
@@ -74,12 +83,27 @@ class BiblePassageSerializer(serializers.Serializer):
       required=True,
       help_text="DBT fileset ID for the specific translation and format"
     )
+    verses = serializers.ListField(
+      child=serializers.IntegerField(min_value=1),
+      required=False,
+      help_text=(
+        "Optional verse numbers to return (e.g. [16] or "
+        "[16, 17, 18]); omit to return the whole chapter"
+      )
+    )
 
     def to_representation(self, instance):
         book_id = instance.get('book')
         book_name = instance.get('book_name', '')
         chapter = int(instance.get('chapter'))
         fileset_id = instance.get('fileset_id')
+        # Optional verse selection (e.g. 'John 3:16-18'). Only
+        # verses in the selection are returned; providers that
+        # support narrowing get min/max as a hint to limit how
+        # much they fetch upstream.
+        verse_numbers = instance.get('verses')
+        verse_start = min(verse_numbers) if verse_numbers else None
+        verse_end = max(verse_numbers) if verse_numbers else None
         # The view passes this as ``response_format`` to avoid shadowing
         # DRF's own ``format`` kwarg on APIView. Fall back to the old
         # ``format`` key for backwards compatibility if a caller still
@@ -103,30 +127,49 @@ class BiblePassageSerializer(serializers.Serializer):
                             'format': 'audio',
                             'audio_url': audio_url,
                         }
-                    parsed = (
-                        get_default_esv_client()
-                        .get_chapter_with_headings(book_id, chapter)
-                    )
-                    # A successful-but-empty ESV body parses to no
-                    # verses — missing content, not provider_error.
-                    if not parsed['verses']:
-                        raise PassageNotFoundError(
-                            f"No verses found for {book_id} "
-                            f"{chapter} in fileset_id={fileset_id}"
+                    esv_client = get_default_esv_client()
+                    if verse_numbers:
+                        parsed = esv_client.get_chapter_with_headings(
+                            book_id, chapter,
+                            verse_start=verse_start,
+                            verse_end=verse_end,
                         )
-                    return {
-                        'book': book_id,
-                        'book_name': book_name,
-                        'chapter': chapter,
-                        'format': 'text',
-                        'verses': [
+                    else:
+                        parsed = esv_client.get_chapter_with_headings(
+                            book_id, chapter
+                        )
+                    selected = _select_verses(
+                        [
                             {
                                 'verse': v['verse_start'],
                                 'text': v['verse_text'],
                             }
                             for v in parsed['verses']
                         ],
-                        'headings': parsed['headings'],
+                        verse_numbers,
+                    )
+                    # A successful-but-empty ESV body (or a verse
+                    # selection outside the chapter) parses to no
+                    # verses — missing content, not provider_error.
+                    if not selected:
+                        raise PassageNotFoundError(
+                            f"No verses found for {book_id} "
+                            f"{chapter} in fileset_id={fileset_id}"
+                        )
+                    headings = parsed['headings']
+                    if verse_numbers:
+                        wanted = set(verse_numbers)
+                        headings = [
+                            h for h in headings
+                            if h.get('before_verse') in wanted
+                        ]
+                    return {
+                        'book': book_id,
+                        'book_name': book_name,
+                        'chapter': chapter,
+                        'format': 'text',
+                        'verses': selected,
+                        'headings': headings,
                     }
                 except requests.HTTPError as e:
                     # A 404 from api.esv.org means the passage is
@@ -193,13 +236,18 @@ class BiblePassageSerializer(serializers.Serializer):
                 }
 
             if is_sword_fileset(fileset_id):
+                sword_client = get_default_sword_client()
                 try:
-                    verses = (
-                        get_default_sword_client()
-                        .get_chapter_verses(
+                    if verse_numbers:
+                        verses = sword_client.get_chapter_verses(
+                            fileset_id, book_id, chapter,
+                            verse_start=verse_start,
+                            verse_end=verse_end,
+                        )
+                    else:
+                        verses = sword_client.get_chapter_verses(
                             fileset_id, book_id, chapter
                         )
-                    )
                 except ValueError:
                     # ``is_sword_fileset`` guarantees the fileset
                     # is known, so a ValueError here means the
@@ -210,15 +258,27 @@ class BiblePassageSerializer(serializers.Serializer):
                     return _book_not_in_fileset_body(
                         book_id, book_name, chapter, fileset_id
                     )
+                selected = _select_verses(
+                    [
+                        {
+                            'verse': v['verse_start'],
+                            'text': v['verse_text'],
+                        }
+                        for v in verses
+                    ],
+                    verse_numbers,
+                )
+                if not selected:
+                    raise PassageNotFoundError(
+                        f"No verses found for {book_id} "
+                        f"{chapter} in fileset_id={fileset_id}"
+                    )
                 return {
                     'book': book_id,
                     'book_name': book_name,
                     'chapter': chapter,
                     'format': 'text',
-                    'verses': [
-                        {'verse': v['verse_start'], 'text': v['verse_text']}
-                        for v in verses
-                    ],
+                    'verses': selected,
                 }
 
             dbt_client = get_default_dbt_client()
@@ -265,12 +325,14 @@ class BiblePassageSerializer(serializers.Serializer):
                 return _book_not_in_fileset_body(
                     book_id, book_name, chapter, fileset_id
                 )
-            return {
-                'book': book_id,
-                'book_name': book_name,
-                'chapter': chapter,
-                'format': 'text',
-                'verses': [
+            # DBT rows are post-filtered rather than narrowed
+            # upstream via ``verse_start``/``verse_end`` query
+            # params: for audio filesets (``*DA`` ids) verse
+            # filters could exclude whole-chapter audio files and
+            # turn a valid request into a spurious 404. The exact
+            # selection is still enforced below for text.
+            selected = _select_verses(
+                [
                     {
                         'verse': v['verse_start'],
                         'text': v.get('verse_text', ''),
@@ -278,6 +340,19 @@ class BiblePassageSerializer(serializers.Serializer):
                     for v in rows
                     if 'verse_text' in v
                 ],
+                verse_numbers,
+            )
+            if not selected:
+                raise PassageNotFoundError(
+                    f"No verses found for {book_id} "
+                    f"{chapter} in fileset_id={fileset_id}"
+                )
+            return {
+                'book': book_id,
+                'book_name': book_name,
+                'chapter': chapter,
+                'format': 'text',
+                'verses': selected,
             }
         except Exception as e:
             logger.exception(f"Error fetching Bible passage: {e}")

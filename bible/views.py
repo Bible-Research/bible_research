@@ -1,4 +1,5 @@
 import logging
+import re
 
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -41,6 +42,47 @@ PROVIDER_ERROR_STATUSES = {
     'book_not_in_fileset': status.HTTP_404_NOT_FOUND,
 }
 
+# Trailing token of a ``passage`` value: "Chapter",
+# "Chapter:Verse", "Chapter:Start-End", or a comma-separated
+# mix — e.g. "3", "3:16", "3:16-18", "3:16-18,20".
+_CHAPTER_PART_RE = re.compile(
+    r"^(\d+)(?::(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*))?$"
+)
+
+
+def _parse_chapter_part(chapter_part):
+    """Parse the trailing ``chapter[:verses]`` token of a passage.
+
+    Returns ``(chapter, verses)`` where ``verses`` is a sorted
+    list of requested verse numbers, or ``None`` when only a
+    chapter was given (whole-chapter retrieval).
+    """
+    match = _CHAPTER_PART_RE.match(chapter_part)
+    if not match:
+        raise ValueError(
+            "Invalid passage format. Use 'Book Chapter' "
+            "(e.g., 'John 3') or 'Book Chapter:Verse[-End]' "
+            "(e.g., 'John 3:16', 'John 3:16-18')"
+        )
+    chapter = int(match.group(1))
+    if chapter <= 0:
+        raise ValueError("Chapter must be a positive number")
+    selector = match.group(2)
+    if not selector:
+        return chapter, None
+    verses = set()
+    for segment in selector.split(','):
+        bounds = segment.split('-')
+        start = int(bounds[0])
+        end = int(bounds[1]) if len(bounds) > 1 else start
+        if start < 1 or end < start:
+            raise ValueError(
+                "Verse selectors must be positive numbers "
+                "with Start <= End (e.g., '3:16-18')"
+            )
+        verses.update(range(start, end + 1))
+    return chapter, sorted(verses)
+
 
 def provider_error_response(exc):
     """Build an error ``Response`` for an upstream provider failure.
@@ -64,7 +106,9 @@ class BiblePassageView(APIView):
     API endpoint to retrieve Bible passages.
 
     Query Parameters:
-        - passage: Book and chapter (e.g., '2 Chronicles 14')
+        - passage: Book and chapter (e.g., '2 Chronicles 14'),
+          optionally with a verse selector
+          (e.g., 'John 3:16', 'John 3:16-18', 'John 3:16,18')
         - response_format: 'text' or 'audio' (default: 'text')
         - fileset_id: DBT fileset ID (e.g. ENGESV) or bundled SWORD id
           (e.g. LVSGLU8). SWORD translations also accept listing ``abbr``
@@ -121,7 +165,9 @@ class BiblePassageView(APIView):
                     "Use 'Book Chapter' (e.g., 'John 3')"
                 )
 
-            # The book name might have spaces (e.g., "1 John")
+            # The book name might have spaces (e.g., "1 John");
+            # the final token is 'Chapter' or
+            # 'Chapter:Verse[-End][,...]'.
             chapter_part = parts[-1]
             book_name = ' '.join(parts[:-1])
             logger.debug(
@@ -137,13 +183,19 @@ class BiblePassageView(APIView):
             logger.debug(f"Resolved book_id: {book_id}")
 
             try:
-                chapter = int(chapter_part)
-                logger.debug(f"Parsed chapter number: {chapter}")
+                chapter, verse_numbers = _parse_chapter_part(
+                    chapter_part
+                )
+                logger.debug(
+                    f"Parsed chapter {chapter}, "
+                    f"verse selector: {verse_numbers}"
+                )
             except ValueError as ve:
                 logger.error(
-                    f"Failed to parse chapter: {chapter_part} - {ve}"
+                    f"Failed to parse chapter part: "
+                    f"{chapter_part} - {ve}"
                 )
-                raise ValueError("Chapter must be a valid number")
+                raise
 
             # Kept outside the ``int()`` try/except so this
             # ValueError is not swallowed and re-raised as
@@ -168,6 +220,8 @@ class BiblePassageView(APIView):
                 'response_format': response_format,
                 'fileset_id': fileset_id,
             }
+            if verse_numbers:
+                data['verses'] = verse_numbers
             logger.debug(f"Prepared data for serializer: {data}")
 
             serializer = BiblePassageSerializer(data=data)

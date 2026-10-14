@@ -10,10 +10,11 @@ class BiblePassageViewValidationTests(TestCase):
     """Input-validation error contract for ``BiblePassageView``.
 
     Regression tests for GitHub issue #57: the missing-``passage``
-    400 used to document ``?passage=John+3:16`` even though verse
-    selectors are rejected by the endpoint, and the "positive
-    number" chapter error was dead code swallowed by the
-    ``int()`` ``except ValueError`` handler.
+    400 used to document ``?passage=John+3:16``; verse selectors
+    are now supported (issue #19), but the documented example
+    stays chapter-only. Non-numeric or malformed chapter parts
+    fail ``_parse_chapter_part``'s format check before reaching
+    the positive-number guard.
     """
 
     def setUp(self):
@@ -36,35 +37,29 @@ class BiblePassageViewValidationTests(TestCase):
         self.assertIn('?passage=John+3', error)
         self.assertNotIn('3:16', error)
 
-    def test_verse_selector_is_rejected_as_invalid_number(self):
+    def test_non_positive_chapter_reports_positive_number(self):
         resp = self.client.get(
             self.url,
-            {'passage': 'John 3:16', 'fileset_id': 'LVSGLU8'},
+            {'passage': 'John 0', 'fileset_id': 'LVSGLU8'},
         )
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(
-            resp.json()['error'], 'Chapter must be a valid number'
+            resp.json()['error'],
+            'Chapter must be a positive number',
         )
 
-    def test_non_positive_chapter_reports_positive_number(self):
-        for passage in ('John 0', 'John -2'):
+    def test_malformed_chapter_reports_passage_format(self):
+        # Signed and non-numeric chapter parts do not match the
+        # chapter[:verses] grammar, so they surface the generic
+        # passage-format error instead of the chapter messages.
+        for passage in ('John -2', 'John three'):
             with self.subTest(passage=passage):
                 resp = self.client.get(
                     self.url,
                     {'passage': passage, 'fileset_id': 'LVSGLU8'},
                 )
                 self.assertEqual(resp.status_code, 400)
-                self.assertEqual(
+                self.assertIn(
+                    'Invalid passage format',
                     resp.json()['error'],
-                    'Chapter must be a positive number',
                 )
-
-    def test_non_numeric_chapter_reports_valid_number(self):
-        resp = self.client.get(
-            self.url,
-            {'passage': 'John three', 'fileset_id': 'LVSGLU8'},
-        )
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(
-            resp.json()['error'], 'Chapter must be a valid number'
-        )
