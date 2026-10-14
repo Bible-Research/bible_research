@@ -17,6 +17,7 @@ from django.db.models import Count, Q, F, Min, Prefetch
 from django.shortcuts import get_object_or_404
 
 from bible.models import Verse
+from bible_research.permissions import GuestReadOnly
 
 from .models import (
     Tag,
@@ -85,6 +86,26 @@ def _park_notes_for_renumber(notes, tag_id, extra_floor=None):
         base = min(base, extra_floor)
     for idx, note in enumerate(notes):
         note.tag_position = base - idx - 1
+
+
+def _is_tag_position_conflict(exc):
+    """
+    Return True if *exc* is an IntegrityError raised by the
+    unique_tag_position_per_tag constraint.
+
+    Postgres reports the constraint by name; SQLite instead
+    lists the constrained columns
+    ("UNIQUE constraint failed: annotations_note.tag_id,
+    annotations_note.tag_position"), so match both forms.
+    """
+    error_msg = str(exc).lower()
+    if 'unique_tag_position_per_tag' in error_msg:
+        return True
+    return (
+        'unique constraint failed' in error_msg
+        and 'tag_id' in error_msg
+        and 'tag_position' in error_msg
+    )
 
 
 class TagViewSet(viewsets.ModelViewSet):
@@ -181,6 +202,83 @@ class TagViewSet(viewsets.ModelViewSet):
         )
         serializer.save()
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='delete_notes',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                description=(
+                    'Pass delete_notes=true to delete the tag '
+                    'together with every note under it and its '
+                    'descendant tags. Without it, deleting a tag '
+                    'that still has notes fails with 409 '
+                    'Conflict.'
+                ),
+                required=False,
+            ),
+        ],
+    )
+    def destroy(self, request, *args, **kwargs):
+        """
+        DELETE /api/v1/tags/<pk>/[?delete_notes=true]
+
+        Deleting a tag cascades to its notes — and to any
+        descendant tags and their notes. To prevent silent data
+        loss the delete is rejected with 409 Conflict while the
+        tag subtree still has notes, unless the caller
+        explicitly opts in with ?delete_notes=true.
+        """
+        instance = self.get_object()
+        delete_notes = (
+            request.query_params.get('delete_notes', '').lower()
+            == 'true'
+        )
+        note_count = Note.objects.filter(
+            tag_id__in=self._subtree_tag_ids(instance)
+        ).count()
+        if note_count and not delete_notes:
+            logger.warning(
+                f"Refusing to delete tag '{instance.name}' "
+                f"(ID: {instance.id}): {note_count} note(s) "
+                f"still attached"
+            )
+            return Response(
+                {
+                    'error': 'tag_has_notes',
+                    'message': (
+                        f'This tag still has {note_count} '
+                        f'note(s). Delete or move the notes '
+                        f'first, or retry with '
+                        f'?delete_notes=true to delete the tag '
+                        f'together with its notes.'
+                    ),
+                    'note_count': note_count,
+                },
+                status=drf_status.HTTP_409_CONFLICT,
+            )
+        self.perform_destroy(instance)
+        return Response(status=drf_status.HTTP_204_NO_CONTENT)
+
+    @staticmethod
+    def _subtree_tag_ids(tag):
+        """
+        Return the ids of *tag* plus all of its descendant tags
+        via parent_tag chains, so the blast radius of a cascade
+        delete can be measured before it happens.
+        """
+        tag_ids = {tag.id}
+        frontier = [tag.id]
+        while frontier:
+            children = set(
+                Tag.objects.filter(
+                    parent_tag_id__in=frontier
+                ).values_list('id', flat=True)
+            )
+            frontier = list(children - tag_ids)
+            tag_ids |= children
+        return tag_ids
+
     def perform_destroy(self, instance):
         """
         Ensures that a user can only delete their own tags.
@@ -217,7 +315,16 @@ class NoteViewSet(viewsets.ModelViewSet):
     """
     serializer_class = NoteSerializer
     pagination_class = NotesPagination
-    # permission_classes = [permissions.IsAuthenticated]
+
+    def get_permissions(self):
+        # Reads are open: get_queryset scopes anonymous
+        # requests to public notes only. Writes and the
+        # other actions always require authentication —
+        # explicitly, not just via DeviceAndCountryMiddleware
+        # auto-provisioning (issue #47).
+        if self.action in ('list', 'retrieve', 'order_index'):
+            return [AllowAny()]
+        return [IsAuthenticated()]
 
     def get_serializer_context(self):
         """Add fileset_id from query params to serializer context."""
@@ -248,6 +355,9 @@ class NoteViewSet(viewsets.ModelViewSet):
                 "Unauthenticated user attempted "
                 "to create a note"
             )
+            raise PermissionDenied(
+                "Authentication required to create a note."
+            )
 
     def perform_update(self, serializer):
         """
@@ -264,7 +374,9 @@ class NoteViewSet(viewsets.ModelViewSet):
             f"{user.username if user.is_authenticated else 'Anonymous'}"
         )
 
-        if user.is_authenticated and instance.user != user:
+        if not user.is_authenticated:
+            raise PermissionDenied("Authentication required.")
+        if instance.user != user:
             logger.warning(
                 f"Permission denied: User {user.username} "
                 f"attempted to update note ID: {instance.id} "
@@ -294,8 +406,9 @@ class NoteViewSet(viewsets.ModelViewSet):
             f"{user.username if user.is_authenticated else 'Anonymous'}"
         )
 
-        if (user.is_authenticated and
-                instance.user != user):
+        if not user.is_authenticated:
+            raise PermissionDenied("Authentication required.")
+        if instance.user != user:
             logger.warning(
                 f"Permission denied: User {user.username} "
                 f"attempted to delete note ID: {instance.id} "
@@ -460,7 +573,10 @@ class NoteViewSet(viewsets.ModelViewSet):
                         f"Fetching only own notes"
                     )
             else:
-                queryset = Note.objects.filter(public=public)
+                # Anonymous callers always see public notes
+                # only; the ?public= flag must not widen the
+                # scope to private notes (issue #47).
+                queryset = get_accessible_notes_qs(user)
                 logger.debug(
                     "Unauthenticated user: "
                     "Fetching public notes only"
@@ -491,6 +607,8 @@ class NoteViewSet(viewsets.ModelViewSet):
         Bulk-create notes under a single tag.
         POST /api/v1/notes/bulk/
         """
+        if not request.user.is_authenticated:
+            raise PermissionDenied('Authentication required.')
         serializer = BulkNoteCreateSerializer(
             data=request.data,
             context=self.get_serializer_context(),
@@ -560,10 +678,10 @@ class NoteViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         user = request.user
-        # Defense-in-depth: under production settings a truly
-        # anonymous request is rejected earlier by the default
-        # IsAuthenticated permission (and the device middleware
-        # auto-provisions a user for almost every request).
+        # Defense-in-depth: anonymous requests are rejected
+        # earlier by this viewset's IsAuthenticated permission
+        # (and the device middleware auto-provisions a user for
+        # almost every request).
         if not user.is_authenticated:
             return Response({'count': 0, 'results': []})
 
@@ -757,6 +875,10 @@ class NoteViewSet(viewsets.ModelViewSet):
             )
 
         user = request.user
+        # Defense-in-depth (mirrors move/): filtering on an
+        # AnonymousUser would raise TypeError -> 500.
+        if not user.is_authenticated:
+            raise PermissionDenied('Authentication required.')
 
         try:
             with transaction.atomic():
@@ -809,9 +931,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         except IntegrityError as e:
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
-            error_msg = str(e).lower()
-
-            if 'unique_tag_position_per_tag' in error_msg:
+            if _is_tag_position_conflict(e):
                 return Response(
                     {
                         'error': 'position_conflict',
@@ -1126,9 +1246,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         except IntegrityError as e:
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
-            error_msg = str(e).lower()
-
-            if 'unique_tag_position_per_tag' in error_msg:
+            if _is_tag_position_conflict(e):
                 return Response(
                     {
                         'error': 'position_conflict',
@@ -1174,14 +1292,25 @@ class CommentViewSet(viewsets.ModelViewSet):
           Pass 'parent_comment' PK to create a reply.
 
       GET    /api/v1/notes/{note_pk}/comments/{pk}/
-          Retrieve a single comment (flat).
+          Retrieve a single comment (flat). Deleted
+          comments are redacted the same way as in the
+          tree ('[deleted]', images []).
 
       PATCH  /api/v1/notes/{note_pk}/comments/{pk}/
-          Update a comment's content.
+          Update a comment's content. 'is_deleted' is
+          read-only and 'parent_comment' is create-only,
+          so PATCH can neither un-delete nor re-parent.
 
       DELETE /api/v1/notes/{note_pk}/comments/{pk}/
           Soft-delete: sets is_deleted=True and clears
           content. Thread structure is preserved.
+
+    Access: the parent note must be visible to the requester
+    (own notes or public notes — the same scope as
+    get_accessible_notes_qs). Comments on inaccessible notes
+    return 404 so the note's existence is not leaked.
+    Any authenticated user may comment on a public note;
+    edits and deletes remain author-only.
 
     N+1 prevention:
       get_queryset() issues one DB query with
@@ -1195,22 +1324,42 @@ class CommentViewSet(viewsets.ModelViewSet):
         'get', 'post', 'patch', 'delete', 'head', 'options',
     ]
 
+    def get_permissions(self):
+        # Reads are open: visibility is enforced by
+        # get_accessible_notes_qs (anon may see public notes).
+        # Writes always require authentication.
+        if self.action in ('list', 'retrieve'):
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
     def _get_note(self):
-        """Return the parent Note or raise 404."""
+        """
+        Return the parent Note when the requester may see it,
+        else raise 404 — inaccessible notes are indistinguishable
+        from nonexistent ones.
+        """
         return get_object_or_404(
-            Note, pk=self.kwargs['note_pk']
+            get_accessible_notes_qs(self.request.user),
+            pk=self.kwargs['note_pk'],
         )
 
     def get_queryset(self):
         """
         Return all comments for the note in one query.
         select_related('user') prevents per-comment author
-        lookups during serialization.
+        lookups during serialization. Comments are also
+        restricted to notes the requester may access, so
+        detail routes 404 on other users' private notes.
         """
         note_pk = self.kwargs['note_pk']
         return (
             Comment.objects
-            .filter(note_id=note_pk)
+            .filter(
+                note_id=note_pk,
+                note__in=get_accessible_notes_qs(
+                    self.request.user
+                ),
+            )
             .select_related('user')
             .prefetch_related('images')
             .order_by('timestamp')
@@ -1218,6 +1367,9 @@ class CommentViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         """Return comments as a nested tree (no N+1)."""
+        # 404 when the note does not exist or is a private
+        # note owned by someone else — never leak existence.
+        self._get_note()
         queryset = self.get_queryset()
         tree = build_comment_tree(queryset)
         logger.info(
@@ -1413,10 +1565,11 @@ class NoteImageViewSet(viewsets.GenericViewSet):
     def get_permissions(self):
         # Reads are open: visibility is enforced by
         # get_accessible_notes_qs (anon may see public notes).
-        # Writes always require authentication.
+        # Writes always require authentication and are denied
+        # for the shared read-only 'guest' account.
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
-        return [IsAuthenticated()]
+        return [IsAuthenticated(), GuestReadOnly()]
 
     def _get_note(self):
         return get_object_or_404(
@@ -1517,7 +1670,7 @@ class CommentImageViewSet(viewsets.GenericViewSet):
     def get_permissions(self):
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
-        return [IsAuthenticated()]
+        return [IsAuthenticated(), GuestReadOnly()]
 
     def _get_comment(self):
         return get_object_or_404(
@@ -1610,21 +1763,29 @@ class ImageDestroyView(APIView):
     """
     DELETE /api/v1/images/{image_pk}/
 
-    Only the uploader or the parent owner may delete.
+    Only the uploader, the comment author, or the owner of the
+    parent note may delete. For comment-attached images the
+    parent note is reached through image.comment.note.
     Hard-delete: DB row removed and GCS object deleted
     (best-effort).
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, GuestReadOnly]
 
     def delete(self, request, image_pk):
         image = get_object_or_404(Image, pk=image_pk)
         user = request.user
 
+        # Comment-attached images have note=NULL (XOR FK), so
+        # resolve the parent note through the comment.
+        parent_note = image.note
+        if parent_note is None and image.comment is not None:
+            parent_note = image.comment.note
+
         is_uploader = image.uploaded_by == user
         is_note_owner = (
-            image.note is not None
-            and image.note.user == user
+            parent_note is not None
+            and parent_note.user == user
         )
         is_comment_author = (
             image.comment is not None
@@ -1658,7 +1819,7 @@ class ReadingPositionViewSet(viewsets.ModelViewSet):
     POST /api/v1/reading-positions/bulk/
     """
     serializer_class = ReadingPositionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, GuestReadOnly]
 
     def get_queryset(self):
         """Filter positions to current user only."""

@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 from django.contrib.auth import get_user_model
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.test import APIRequestFactory, APIClient
 from rest_framework.request import Request
+from rest_framework.views import APIView
 from annotations.serializers import (
     TagSerializer,
     NoteSerializer,
@@ -13,12 +15,14 @@ from annotations.serializers import (
 )
 from annotations.models import (
     Comment,
+    Image,
     Note,
     NoteVerse,
     Tag,
     generate_note_id,
 )
 from bible.models import Verse
+from bible_research.permissions import GuestReadOnly
 
 
 class FakeProviderError(Exception):
@@ -416,8 +420,10 @@ class CommentViewSetTest(TestCase):
             ).exists()
         )
 
-    def test_non_owner_cannot_delete(self):
-        """DELETE by a different user returns 403."""
+    def test_non_author_cannot_delete(self):
+        """DELETE by a different user on a public note -> 403."""
+        self.note.public = True
+        self.note.save()
         comment = Comment.objects.create(
             user=self.user,
             note=self.note,
@@ -431,8 +437,10 @@ class CommentViewSetTest(TestCase):
         )
         self.assertEqual(resp.status_code, 403)
 
-    def test_non_owner_cannot_update(self):
-        """PATCH by a different user returns 403."""
+    def test_non_author_cannot_update(self):
+        """PATCH by a different user on a public note -> 403."""
+        self.note.public = True
+        self.note.save()
         comment = Comment.objects.create(
             user=self.user,
             note=self.note,
@@ -468,6 +476,282 @@ class CommentViewSetTest(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, 400)
+
+    def test_update_comment_content(self):
+        """PATCH updates a comment's content."""
+        comment = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Before edit',
+        )
+        resp = self.client.patch(
+            f'{self.base_url}{comment.id}/',
+            {'content': 'After edit'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['content'], 'After edit')
+        comment.refresh_from_db()
+        self.assertEqual(comment.content, 'After edit')
+
+    def test_retrieve_deleted_comment_redacts_content(self):
+        """GET detail masks content/images on a deleted comment."""
+        comment = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Must not be served',
+            is_deleted=True,
+        )
+        Image.objects.create(
+            comment=comment,
+            uploaded_by=self.user,
+            storage_url='gs://b/originals/x/source.png',
+        )
+        resp = self.client.get(f'{self.base_url}{comment.id}/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data['is_deleted'])
+        self.assertEqual(data['content'], '[deleted]')
+        self.assertEqual(data['images'], [])
+
+    def test_patch_cannot_undelete_comment(self):
+        """PATCH cannot clear is_deleted; delete stays final."""
+        comment = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='',
+            is_deleted=True,
+        )
+        resp = self.client.patch(
+            f'{self.base_url}{comment.id}/',
+            {'is_deleted': False},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()['is_deleted'])
+        comment.refresh_from_db()
+        self.assertTrue(comment.is_deleted)
+
+    def test_patch_cannot_reparent_comment(self):
+        """PATCH cannot re-point parent_comment (400)."""
+        root_a = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Root A',
+        )
+        root_b = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Root B',
+        )
+        reply = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            parent_comment=root_a,
+            content='Reply',
+        )
+        resp = self.client.patch(
+            f'{self.base_url}{reply.id}/',
+            {'parent_comment': root_b.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        reply.refresh_from_db()
+        self.assertEqual(reply.parent_comment_id, root_a.id)
+
+
+class CommentNoteAccessTest(TestCase):
+    """
+    CommentViewSet must enforce the same note-accessibility
+    scope as notes themselves (issue #48): comments on a
+    private note owned by someone else are invisible (404),
+    while comments on public notes remain readable and
+    writable by any authenticated user.
+    """
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(
+            username='cmnt_note_owner',
+            email='owner@example.com',
+            password='pass',
+        )
+        self.other = User.objects.create_user(
+            username='cmnt_note_other',
+            email='cmnt_other@example.com',
+            password='pass',
+        )
+        self.private_note = Note.objects.create(
+            user=self.owner,
+            note_text='Private note',
+            public=False,
+        )
+        self.public_note = Note.objects.create(
+            user=self.owner,
+            note_text='Public note',
+            public=True,
+        )
+        self.private_comment = Comment.objects.create(
+            user=self.owner,
+            note=self.private_note,
+            content='Private comment',
+        )
+        self.public_comment = Comment.objects.create(
+            user=self.owner,
+            note=self.public_note,
+            content='Public comment',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.other)
+        self.priv_url = (
+            f'/api/v1/notes/{self.private_note.id}/comments/'
+        )
+        self.pub_url = (
+            f'/api/v1/notes/{self.public_note.id}/comments/'
+        )
+
+    def test_private_note_comment_list_404(self):
+        """GET list on another user's private note -> 404."""
+        resp = self.client.get(self.priv_url)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_private_note_comment_retrieve_404(self):
+        """GET detail on a private note's comment -> 404."""
+        resp = self.client.get(
+            f'{self.priv_url}{self.private_comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_private_note_comment_create_404(self):
+        """POST on another user's private note -> 404."""
+        resp = self.client.post(
+            self.priv_url,
+            {'content': 'Sneaky comment'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(
+            Comment.objects.filter(
+                note=self.private_note,
+                content='Sneaky comment',
+            ).exists()
+        )
+
+    def test_private_note_comment_update_404(self):
+        """PATCH a comment on a private note -> 404."""
+        resp = self.client.patch(
+            f'{self.priv_url}{self.private_comment.id}/',
+            {'content': 'Hijacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.private_comment.refresh_from_db()
+        self.assertEqual(
+            self.private_comment.content, 'Private comment'
+        )
+
+    def test_private_note_comment_delete_404(self):
+        """DELETE a comment on a private note -> 404."""
+        resp = self.client.delete(
+            f'{self.priv_url}{self.private_comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.private_comment.refresh_from_db()
+        self.assertFalse(self.private_comment.is_deleted)
+
+    def test_nonexistent_note_404(self):
+        """A bogus note id returns the same 404 (no leak)."""
+        resp = self.client.get(
+            '/api/v1/notes/NOT_DOES_NOT_EXIST/comments/'
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_public_note_comment_list_allowed(self):
+        """Non-owner can read a public note's comment tree."""
+        resp = self.client.get(self.pub_url)
+        self.assertEqual(resp.status_code, 200)
+        tree = resp.json()
+        self.assertEqual(len(tree), 1)
+        self.assertEqual(tree[0]['content'], 'Public comment')
+
+    def test_public_note_comment_retrieve_allowed(self):
+        """Non-owner can retrieve a comment on a public note."""
+        resp = self.client.get(
+            f'{self.pub_url}{self.public_comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.json()['content'], 'Public comment'
+        )
+
+    def test_public_note_comment_create_allowed(self):
+        """Non-owner can comment on a public note."""
+        resp = self.client.post(
+            self.pub_url,
+            {
+                'content': 'Reply from another user',
+                'parent_comment': self.public_comment.id,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertEqual(data['note_id'], self.public_note.id)
+        self.assertEqual(
+            data['author']['username'], 'cmnt_note_other'
+        )
+
+    def test_public_note_non_author_update_403(self):
+        """Non-author PATCH on a public note comment -> 403."""
+        resp = self.client.patch(
+            f'{self.pub_url}{self.public_comment.id}/',
+            {'content': 'Hijacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_public_note_non_author_delete_403(self):
+        """Non-author DELETE on a public note comment -> 403."""
+        resp = self.client.delete(
+            f'{self.pub_url}{self.public_comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_owner_accesses_own_private_note(self):
+        """The owner still reads/writes their private note."""
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.get(self.priv_url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 1)
+        resp = self.client.post(
+            self.priv_url,
+            {'content': 'Owner reply'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+
+    def test_anonymous_private_note_list_404(self):
+        """Anonymous list on a private note -> 404."""
+        client = APIClient()
+        resp = client.get(self.priv_url)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_anonymous_public_note_list_200(self):
+        """Anonymous can read a public note's comments."""
+        client = APIClient()
+        resp = client.get(self.pub_url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 1)
+
+    def test_anonymous_public_note_create_403(self):
+        """Anonymous cannot write comments (auth required)."""
+        client = APIClient()
+        resp = client.post(
+            self.pub_url,
+            {'content': 'Anon comment'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
 
 
 class CommentCountViewTest(TestCase):
@@ -818,6 +1102,185 @@ class BulkNoteCreateTest(TestCase):
         )
 
 
+class NoteCreateViewTest(TestCase):
+    """Tests for POST /api/v1/notes/ (single note create)."""
+
+    URL = '/api/v1/notes/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='note_create_user',
+            email='note_create@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='NoteCreateTag',
+        )
+        self.verse, _ = Verse.objects.get_or_create(
+            book='John',
+            chapter=3,
+            verse=16,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        # NoteSerializer enriches verses via the DBT client on the
+        # 201 response; keep tests offline by making it fail fast
+        # into the serializer's fallback (empty verse text).
+        patcher = patch(
+            'annotations.serializers.get_default_dbt_client',
+            side_effect=ValueError('DBT disabled in tests'),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_create_note_with_verse_happy_path(self):
+        """POST creates the note and links the verse."""
+        payload = {
+            'note_text': 'A note on John 3:16',
+            'tag': self.tag.id,
+            'verse_references': [
+                {'book': 'John', 'chapter': 3, 'verse': 16},
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        note = Note.objects.get(user=self.user)
+        self.assertEqual(note.note_text, 'A note on John 3:16')
+        self.assertEqual(note.verses.count(), 1)
+        self.assertEqual(note.verses.first().verse, 16)
+
+    def test_failed_verse_resolution_leaves_no_orphan(self):
+        """A non-existent verse reference returns 400 and leaves
+        no orphan Note or NoteVerse rows behind."""
+        payload = {
+            'note_text': 'Orphan candidate',
+            'tag': self.tag.id,
+            'verse_references': [
+                {'book': 'John', 'chapter': 99, 'verse': 99},
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Verse not found', str(resp.content))
+        self.assertEqual(
+            Note.objects.filter(user=self.user).count(), 0
+        )
+        self.assertEqual(NoteVerse.objects.count(), 0)
+
+    def test_partial_verse_failure_rolls_back_links(self):
+        """When one of several verse references is bad, the whole
+        create rolls back — no note and no links for the good
+        verse either."""
+        payload = {
+            'note_text': 'Partial failure note',
+            'tag': self.tag.id,
+            'verse_references': [
+                {'book': 'John', 'chapter': 3, 'verse': 16},
+                {'book': 'John', 'chapter': 99, 'verse': 99},
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            Note.objects.filter(user=self.user).count(), 0
+        )
+        self.assertEqual(NoteVerse.objects.count(), 0)
+
+
+class NoteUpdateVerseReferencesTest(TestCase):
+    """Tests for PATCH /api/v1/notes/<id>/ with verse_references."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='upd_user',
+            email='upd@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='UpdateTag',
+        )
+        self.v316, _ = Verse.objects.get_or_create(
+            book='John',
+            chapter=3,
+            verse=16,
+        )
+        self.v317, _ = Verse.objects.get_or_create(
+            book='John',
+            chapter=3,
+            verse=17,
+        )
+        self.note = Note.objects.create(
+            user=self.user,
+            tag=self.tag,
+            note_text='Original text',
+        )
+        NoteVerse.objects.create(note=self.note, verse=self.v316)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        # Keep tests offline: force the serializer's verse
+        # enrichment into its fallback (empty verse text).
+        patcher = patch(
+            'annotations.serializers.get_default_dbt_client',
+            side_effect=ValueError('DBT disabled in tests'),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.url = f'/api/v1/notes/{self.note.id}/'
+
+    def test_patch_replaces_verse_links(self):
+        resp = self.client.patch(
+            self.url,
+            {
+                'verse_references': [
+                    {'book': 'John', 'chapter': 3, 'verse': 17},
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        verses = list(self.note.verses.order_by('verse'))
+        self.assertEqual(len(verses), 1)
+        self.assertEqual(verses[0].verse, 17)
+
+    def test_patch_without_references_keeps_links(self):
+        resp = self.client.patch(
+            self.url,
+            {'note_text': 'Edited text'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.note.verses.count(), 1)
+        self.note.refresh_from_db()
+        self.assertEqual(self.note.note_text, 'Edited text')
+
+    def test_patch_empty_references_clears_links(self):
+        resp = self.client.patch(
+            self.url,
+            {'verse_references': []},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.note.verses.count(), 0)
+
+    def test_patch_missing_verse_returns_400(self):
+        resp = self.client.patch(
+            self.url,
+            {
+                'verse_references': [
+                    {'book': 'John', 'chapter': 99, 'verse': 99},
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        # Existing links are preserved when validation fails.
+        self.assertEqual(self.note.verses.count(), 1)
+
+
 class LinkedNotesTest(TestCase):
     """Tests for POST /api/v1/notes/linked/."""
 
@@ -933,7 +1396,8 @@ class LinkedNotesTest(TestCase):
         resp = self._post([])
         self.assertEqual(resp.status_code, 400)
 
-    def test_unauthenticated_returns_empty(self):
+    def test_unauthenticated_requires_auth(self):
+        """Anonymous linked/ requests are rejected (401/403)."""
         self._note(self.user, 'On John 3:16', [self.v316])
         client = APIClient()
         resp = client.post(
@@ -943,8 +1407,7 @@ class LinkedNotesTest(TestCase):
             ]},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()['count'], 0)
+        self.assertIn(resp.status_code, (401, 403))
 
     def test_no_upstream_calls_and_no_n_plus_1(self):
         """linked/ makes no per-note provider calls and issues a
@@ -977,6 +1440,174 @@ class LinkedNotesTest(TestCase):
         self.assertEqual(data['results'][0]['headings'], [])
         tag = data['results'][0]['tag']
         self.assertEqual(tag['name'], 'LinkedTag')
+
+
+class NoteAnonymousAccessTest(TestCase):
+    """
+    Anonymous /notes/ requests (issue #47): reads must expose
+    only public notes and writes must be rejected with
+    401/403 rather than 500ing or silently succeeding. The
+    test environment omits DeviceAndCountryMiddleware, so
+    request.user is a real AnonymousUser here.
+    """
+
+    LIST_URL = '/api/v1/notes/'
+    REORDER_URL = '/api/v1/notes/reorder/'
+    BULK_URL = '/api/v1/notes/bulk/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='anon_notes_owner',
+            email='anon_notes@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='AnonTag',
+        )
+        self.public_note = Note.objects.create(
+            user=self.user,
+            tag=self.tag,
+            note_text='public note',
+            public=True,
+            tag_position=1,
+        )
+        self.private_note = Note.objects.create(
+            user=self.user,
+            tag=self.tag,
+            note_text='private note',
+            public=False,
+            tag_position=2,
+        )
+        # Unauthenticated client on purpose — do NOT
+        # force_authenticate.
+        self.client = APIClient()
+
+    def _list_ids(self, params=''):
+        resp = self.client.get(f'{self.LIST_URL}{params}')
+        self.assertEqual(resp.status_code, 200)
+        return [n['id'] for n in resp.json()['results']]
+
+    def test_anonymous_list_sees_public_only(self):
+        """GET /notes/ anonymous must not leak private notes."""
+        ids = self._list_ids()
+        self.assertIn(self.public_note.id, ids)
+        self.assertNotIn(self.private_note.id, ids)
+
+    def test_anonymous_list_public_param_still_public_only(self):
+        """?public=true must not widen anonymous scope."""
+        ids = self._list_ids('?public=true')
+        self.assertIn(self.public_note.id, ids)
+        self.assertNotIn(self.private_note.id, ids)
+
+    def test_anonymous_retrieve_public_note_200(self):
+        """GET /notes/{id}/ on a public note works for anon."""
+        resp = self.client.get(
+            f'{self.LIST_URL}{self.public_note.id}/'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['id'], self.public_note.id)
+
+    def test_anonymous_retrieve_private_note_404(self):
+        """Private notes are invisible to anon (no leak)."""
+        resp = self.client.get(
+            f'{self.LIST_URL}{self.private_note.id}/'
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_anonymous_create_rejected(self):
+        """POST /notes/ anonymous -> 401/403, nothing saved."""
+        resp = self.client.post(
+            self.LIST_URL,
+            {'tag': self.tag.id, 'note_text': 'anon note'},
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertEqual(
+            Note.objects.filter(note_text='anon note').count(),
+            0,
+        )
+
+    def test_anonymous_update_public_note_rejected(self):
+        """PATCH on a public note anonymous -> 401/403."""
+        resp = self.client.patch(
+            f'{self.LIST_URL}{self.public_note.id}/',
+            {'note_text': 'hijacked'},
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.public_note.refresh_from_db()
+        self.assertEqual(self.public_note.note_text, 'public note')
+        self.assertEqual(self.public_note.user, self.user)
+
+    def test_anonymous_delete_public_note_rejected(self):
+        """DELETE on a public note anonymous -> 401/403."""
+        resp = self.client.delete(
+            f'{self.LIST_URL}{self.public_note.id}/'
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertTrue(
+            Note.objects.filter(
+                id=self.public_note.id
+            ).exists()
+        )
+
+    def test_anonymous_reorder_rejected(self):
+        """POST /notes/reorder/ anonymous -> 401/403, no 500."""
+        resp = self.client.post(
+            self.REORDER_URL,
+            {
+                'tag_id': self.tag.id,
+                'updates': [
+                    {
+                        'note_id': self.public_note.id,
+                        'position': 99.0,
+                    }
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_anonymous_bulk_create_rejected(self):
+        """POST /notes/bulk/ anonymous -> 401/403, no 500."""
+        resp = self.client.post(
+            self.BULK_URL,
+            {
+                'tag_id': self.tag.id,
+                'notes': [{'note_text': 'anon bulk'}],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertEqual(
+            Note.objects.filter(
+                note_text='anon bulk'
+            ).count(),
+            0,
+        )
+
+    def test_anonymous_move_rejected(self):
+        """POST /notes/move/ anonymous -> 401/403, no 500."""
+        resp = self.client.post(
+            '/api/v1/notes/move/',
+            {
+                'tag_id': self.tag.id,
+                'note_id': self.public_note.id,
+                'target_note_id': self.private_note.id,
+                'placement': 'after',
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_authenticated_owner_still_sees_private(self):
+        """Regression guard: the owner still lists own notes."""
+        self.client.force_authenticate(user=self.user)
+        ids = self._list_ids()
+        self.assertIn(self.public_note.id, ids)
+        self.assertIn(self.private_note.id, ids)
 
 
 class TestPartialReordering(TestCase):
@@ -1048,23 +1679,25 @@ class TestPartialReordering(TestCase):
         # Should reject in validation before DB
         self.assertEqual(response.status_code, 400)
 
-    @expectedFailure
     def test_position_already_occupied(self):
         """DB rejects when position occupied by other note"""
         # Note at position 1 already exists
         updates = [
             {'note_id': self.notes[5].id, 'position': 1.0},
         ]
-        
+
         response = self.client.post(
             '/api/v1/notes/reorder/',
             {'tag_id': self.tag.id, 'updates': updates},
             format='json'
         )
-        
+
         self.assertEqual(response.status_code, 409)
         data = response.json()
-        self.assertEqual(data['error'], 'conflict')
+        self.assertEqual(data['error'], 'position_conflict')
+        self.assertEqual(
+            data['constraint'], 'unique_tag_position_per_tag'
+        )
 
     def test_reorder_notes_from_different_tags(self):
         """Cannot reorder notes from different tags"""
@@ -1394,6 +2027,151 @@ class NoteProviderErrorTest(TestCase):
 
         self.assertEqual(data['error_code'], 'not_found')
         self.assertEqual(data['verses'][0]['text'], '')
+
+
+class NoteFilesetRoutingTest(TestCase):
+    """Note verse enrichment routes through the same provider
+    dispatch as the passage endpoint: the request's fileset_id
+    selects ESV, SWORD, or DBT (issue #55 — previously every
+    non-ESV fileset silently fetched DBT ENGESV)."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='note_fs_user',
+            email='note_fs@example.com',
+            password='pass',
+        )
+        self.verse = Verse.objects.create(
+            book='John', chapter=1, verse=1, dbt_book_id='JHN'
+        )
+        self.note = Note.objects.create(
+            user=self.user, note_text='test note'
+        )
+        self.note.verses.add(self.verse)
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_dbt_fileset_id_is_forwarded(self, mock_get):
+        """fileset_id=ENGKJV must reach the DBT client's
+        bible_id instead of falling back to ENGESV."""
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {
+            'data': [
+                {'verse_start': 1, 'verse_text': 'KJV text'}
+            ]
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGKJV'}
+        ).data
+
+        mock_client.get_verses.assert_called_once_with(
+            'JHN', 1,
+            bible_id='ENGKJV',
+            verse_start=1, verse_end=1,
+        )
+        self.assertNotIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], 'KJV text')
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    def test_missing_fileset_id_defaults_to_engesv(self, mock_get):
+        """No fileset_id in context keeps the ENGESV default."""
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {
+            'data': [
+                {'verse_start': 1, 'verse_text': 'ESV text'}
+            ]
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(self.note).data
+
+        mock_client.get_verses.assert_called_once_with(
+            'JHN', 1,
+            bible_id='ENGESV',
+            verse_start=1, verse_end=1,
+        )
+        self.assertNotIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], 'ESV text')
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('annotations.serializers.get_default_sword_client')
+    def test_sword_fileset_uses_sword_client(
+        self, mock_sword_get, mock_dbt_get
+    ):
+        """fileset_id=LVSGLU8 routes to the local SWORD module
+        and never touches the DBT client."""
+        mock_sword = MagicMock()
+        mock_sword.get_chapter_verses.return_value = [
+            {'verse_start': 1, 'verse_text': 'Latviesu teksts'}
+        ]
+        mock_sword_get.return_value = mock_sword
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'LVSGLU8'}
+        ).data
+
+        mock_sword.get_chapter_verses.assert_called_once_with(
+            'LVSGLU8', 'JHN', 1
+        )
+        mock_dbt_get.return_value.get_verses.assert_not_called()
+        self.assertNotIn('error', data)
+        self.assertEqual(
+            data['verses'][0]['text'], 'Latviesu teksts'
+        )
+        self.assertEqual(data['headings'], [])
+
+    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('annotations.serializers.get_default_sword_client')
+    def test_sword_audio_fileset_uses_sword_client(
+        self, mock_sword_get, mock_dbt_get
+    ):
+        """A SWORD audio fileset id (LVSGLU8C1DA) canonicalizes
+        to the same local module for text enrichment."""
+        mock_sword = MagicMock()
+        mock_sword.get_chapter_verses.return_value = [
+            {'verse_start': 1, 'verse_text': 'Latviesu teksts'}
+        ]
+        mock_sword_get.return_value = mock_sword
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'LVSGLU8C1DA'}
+        ).data
+
+        mock_sword.get_chapter_verses.assert_called_once_with(
+            'LVSGLU8C1DA', 'JHN', 1
+        )
+        mock_dbt_get.return_value.get_verses.assert_not_called()
+        self.assertNotIn('error', data)
+
+    @patch('annotations.serializers.get_default_esv_client')
+    def test_esv_fileset_returns_verse_text(self, mock_get):
+        """fileset_id=ENGESV_API still routes to the ESV API
+        and returns verse text plus filtered headings."""
+        mock_client = MagicMock()
+        mock_client.get_chapter_with_headings.return_value = {
+            'verses': [
+                {'verse_start': 1, 'verse_text': 'ESV text'}
+            ],
+            'headings': [
+                {'before_verse': 1, 'text': 'The Beginning'}
+            ],
+        }
+        mock_get.return_value = mock_client
+
+        data = NoteSerializer(
+            self.note, context={'fileset_id': 'ENGESV_API'}
+        ).data
+
+        esv_method = mock_client.get_chapter_with_headings
+        esv_method.assert_called_once_with('JHN', 1)
+        self.assertNotIn('error', data)
+        self.assertEqual(data['verses'][0]['text'], 'ESV text')
+        self.assertEqual(
+            data['headings'],
+            [{'before_verse': 1, 'text': 'The Beginning'}]
+        )
 
 
 class TestNoteOrderIndex(TestCase):
@@ -1893,3 +2671,283 @@ class TestNoteMove(TestCase):
         resp = self.client.post(self.URL, [1, 2], format='json')
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()['error'], 'validation_error')
+
+
+class TestGuestReadOnly(TestCase):
+    """
+    Regression tests for the shared 'guest' account being
+    read-only (GitHub issue #58).
+
+    DeviceAndCountryMiddleware falls back to authenticating
+    requests as the single shared 'guest' user, and anyone can
+    end up acting as that account. Guest may read its own data
+    but every write must be rejected with 403.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # pytest's conftest does not define REST_FRAMEWORK, so
+        # DRF binds APIView.permission_classes to its AllowAny
+        # default at import time — a class attribute that
+        # override_settings cannot change afterwards. Patch the
+        # attribute to mirror what production
+        # DEFAULT_PERMISSION_CLASSES yields (IsAuthenticated +
+        # GuestReadOnly) for the viewsets relying on it.
+        cls._permission_classes_patch = patch.object(
+            APIView,
+            'permission_classes',
+            [IsAuthenticated, GuestReadOnly],
+        )
+        cls._permission_classes_patch.start()
+        cls.addClassCleanup(cls._permission_classes_patch.stop)
+
+    def setUp(self):
+        User = get_user_model()
+        self.guest = User.objects.create_user(
+            username='guest',
+            email='guest@example.com',
+            password=None,
+        )
+        self.user = User.objects.create_user(
+            username='regular_user',
+            email='regular@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.guest, name='Guest tag'
+        )
+        self.note = Note.objects.create(
+            user=self.guest,
+            tag=self.tag,
+            note_text='Guest note',
+        )
+        self.comment = Comment.objects.create(
+            user=self.guest,
+            note=self.note,
+            content='Guest comment',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.guest)
+
+    def test_guest_can_read_own_tags(self):
+        """GET /api/v1/tags/ still works for guest."""
+        resp = self.client.get('/api/v1/tags/')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_guest_can_read_own_notes(self):
+        """GET /api/v1/notes/ still works for guest."""
+        resp = self.client.get('/api/v1/notes/')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_guest_can_read_comments(self):
+        """GET note comments still works for guest."""
+        resp = self.client.get(
+            f'/api/v1/notes/{self.note.id}/comments/'
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    def test_guest_cannot_create_tag(self):
+        resp = self.client.post(
+            '/api/v1/tags/', {'name': 'Hijack'}, format='json'
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(
+            Tag.objects.filter(name='Hijack').exists()
+        )
+
+    def test_guest_cannot_update_tag(self):
+        resp = self.client.patch(
+            f'/api/v1/tags/{self.tag.id}/',
+            {'name': 'Renamed'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_delete_tag(self):
+        """The tag-delete cascade can't be triggered by guest."""
+        resp = self.client.delete(
+            f'/api/v1/tags/{self.tag.id}/'
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(
+            Tag.objects.filter(pk=self.tag.pk).exists()
+        )
+        self.assertTrue(
+            Note.objects.filter(pk=self.note.pk).exists()
+        )
+
+    def test_guest_cannot_create_note(self):
+        resp = self.client.post(
+            '/api/v1/notes/',
+            {'note_text': 'Hijack note'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_update_note(self):
+        resp = self.client.patch(
+            f'/api/v1/notes/{self.note.id}/',
+            {'note_text': 'Hijacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_delete_note(self):
+        resp = self.client.delete(
+            f'/api/v1/notes/{self.note.id}/'
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(
+            Note.objects.filter(pk=self.note.pk).exists()
+        )
+
+    def test_guest_cannot_create_comment(self):
+        resp = self.client.post(
+            f'/api/v1/notes/{self.note.id}/comments/',
+            {'content': 'Hijack comment'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_update_comment(self):
+        resp = self.client.patch(
+            f'/api/v1/notes/{self.note.id}'
+            f'/comments/{self.comment.id}/',
+            {'content': 'Hijacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_delete_comment(self):
+        resp = self.client.delete(
+            f'/api/v1/notes/{self.note.id}'
+            f'/comments/{self.comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_reorder_notes(self):
+        """Custom POST actions are covered too."""
+        resp = self.client.post(
+            '/api/v1/notes/reorder/',
+            {
+                'tag_id': self.tag.id,
+                'updates': [
+                    {'note_id': self.note.id, 'position': 1.0}
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_write_reading_position(self):
+        resp = self.client.post(
+            '/api/v1/reading-positions/',
+            {'book': 'John', 'chapter': 1, 'verse': 1},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_cannot_upload_note_image(self):
+        resp = self.client.post(
+            f'/api/v1/notes/{self.note.id}/images/'
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_regular_user_can_still_write(self):
+        """Non-guest authenticated users are unaffected."""
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.post(
+            '/api/v1/tags/', {'name': 'My tag'}, format='json'
+        )
+        self.assertEqual(resp.status_code, 201)
+
+
+class TagDeleteViewTest(TestCase):
+    """
+    Regression tests for issue #50: DELETE /api/v1/tags/<pk>/
+    must not silently cascade-delete every note under the tag.
+    """
+
+    BASE_URL = '/api/v1/tags/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='tagdel_user',
+            email='tagdel@example.com',
+            password='pass',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='TagWithNotes',
+        )
+
+    def _make_note(self, tag, user=None):
+        return Note.objects.create(
+            user=user or self.user,
+            note_text='note',
+            tag=tag,
+        )
+
+    def test_delete_empty_tag_succeeds(self):
+        """A tag with no notes deletes normally with 204."""
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Tag.objects.filter(id=self.tag.id).exists())
+
+    def test_delete_tag_with_notes_returns_409(self):
+        """A tag that still has notes is not deleted; the
+        response names the problem and the note count."""
+        self._make_note(self.tag)
+        self._make_note(self.tag)
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 409)
+        body = resp.json()
+        self.assertEqual(body['error'], 'tag_has_notes')
+        self.assertEqual(body['note_count'], 2)
+        self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
+        self.assertEqual(
+            Note.objects.filter(tag_id=self.tag.id).count(), 2
+        )
+
+    def test_delete_notes_false_still_blocks(self):
+        """An explicit delete_notes=false does not opt in."""
+        self._make_note(self.tag)
+        resp = self.client.delete(
+            f'{self.BASE_URL}{self.tag.id}/?delete_notes=false'
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
+
+    def test_delete_notes_true_cascades(self):
+        """?delete_notes=true restores the explicit cascade:
+        tag and its notes are all removed."""
+        self._make_note(self.tag)
+        self._make_note(self.tag)
+        resp = self.client.delete(
+            f'{self.BASE_URL}{self.tag.id}/?delete_notes=true'
+        )
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Tag.objects.filter(id=self.tag.id).exists())
+        self.assertEqual(
+            Note.objects.filter(tag_id=self.tag.id).count(), 0
+        )
+
+    def test_descendant_tag_notes_counted(self):
+        """Notes on child tags count too: deleting a parent tag
+        cascades to children, so their notes must trigger the
+        same 409 guard."""
+        child = Tag.objects.create(
+            user=self.user,
+            name='ChildTag',
+            parent_tag=self.tag,
+        )
+        self._make_note(child)
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()['note_count'], 1)
+        self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
+        self.assertTrue(Tag.objects.filter(id=child.id).exists())

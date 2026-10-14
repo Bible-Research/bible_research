@@ -146,6 +146,8 @@ The project uses two special accounts:
    - Username: `guest`
    - Email: `guest@example.com`
    - Purpose: Default user for unauthenticated requests
+   - Read-only: API writes (POST/PUT/PATCH/DELETE)
+     authenticated as `guest` return 403
 
 2. **Test User** (for development)
    - Username: `testuser`
@@ -210,6 +212,9 @@ The project uses two special accounts:
 **Access Control**:
 - **Authenticated users**: See their own tags and notes
 - **Unauthenticated users**: See guest user's tags and public notes
+- **Shared `guest` account**: Read-only — reads allowed, writes
+  rejected with 403 (`GuestReadOnly` in
+  `bible_research/permissions.py`)
 - **Note visibility**: Controlled by `public` boolean field
 
 ---
@@ -250,6 +255,14 @@ POST /api/token/
   "token": "9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b"
 }
 ```
+**Notes**:
+- Username matching is case-insensitive
+- Accounts with `is_active=False` are rejected with HTTP 400
+- If two usernames differ only by case (e.g. `Alice`/`alice`),
+  the exact-case match is preferred; otherwise the first match
+  is used
+- Invalid credentials return HTTP 400 with a `non_field_errors`
+  list
 
 ### User Management
 
@@ -346,6 +359,15 @@ The other provider-backed endpoints — `/api/v1/bible/timestamps/`,
 same `error`/`error_code` fields and the same HTTP status mapping
 (`429`/`404`/`502`). Raw exception text is never embedded in
 `error` because it can contain request URLs with credentials.
+
+**Client error response** (invalid input): returns `400` with an
+`error` message. `passage` accepts a book name and chapter number
+only (`John 3`) — verse selectors like `John 3:16` are rejected.
+Messages: `Passage parameter is required. Example:
+?passage=John+3`, `Invalid passage format. Use 'Book Chapter'
+(e.g., 'John 3')`, `Unknown book: <name>`, `Chapter must be a
+valid number` (non-numeric), `Chapter must be a positive number`
+(zero or negative).
 
 #### Get Bible Passage (Audio)
 ```
@@ -542,6 +564,27 @@ DELETE /api/v1/tags/{tag_id}/
 Authorization: Token <your-token>
 ```
 
+Deleting a tag cascades to every note under it — and to any
+descendant tags and their notes. To prevent silent data loss,
+the delete is rejected with `409 Conflict` while the tag
+subtree still has notes:
+
+```json
+{
+  "error": "tag_has_notes",
+  "message": "This tag still has 2 note(s). ...",
+  "note_count": 2
+}
+```
+
+To intentionally delete a tag together with all of its notes,
+pass the explicit opt-in flag:
+
+```
+DELETE /api/v1/tags/{tag_id}/?delete_notes=true
+Authorization: Token <your-token>
+```
+
 ### Notes
 
 #### List Notes
@@ -561,8 +604,21 @@ GET /api/v1/notes/?tag_id=TAG123456789ABCDE
 Authorization: Token <your-token>
 ```
 
+Anonymous callers (no `Authorization` header) may read
+public notes; all other note operations require
+authentication (401/403 otherwise). In production the
+`DeviceAndCountryMiddleware` usually auto-provisions a
+device (or `guest`) user, so truly anonymous requests are
+rare — the viewset still enforces the contract explicitly.
+
 **Query Parameters**:
 - `tag_id` (required): Tag ID to filter notes
+- `fileset_id` (optional): Bible translation used to enrich
+  each note's `verses[].text` — same provider routing as the
+  passage endpoint (`ENGESV_API` → ESV API, SWORD ids like
+  `LVSGLU8` → local module, anything else → DBT).
+  Defaults to `ENGESV` (DBT). SWORD translations return no
+  `headings`.
 - `ordering` (optional): Sort order
   - `custom` (default): Custom order ascending
   - `-custom`: Custom order descending
@@ -660,6 +716,10 @@ Content-Type: application/json
 }
 ```
 
+Note creation is atomic: if any `verse_references` entry fails to
+resolve, the request returns `400` and no note or verse links are
+persisted.
+
 #### Get Note by ID
 ```
 GET /api/v1/notes/{note_id}/
@@ -669,14 +729,27 @@ Authorization: Token <your-token>
 #### Update Note
 ```
 PUT /api/v1/notes/{note_id}/
+PATCH /api/v1/notes/{note_id}/
 Authorization: Token <your-token>
 Content-Type: application/json
 
 {
   "note_text": "Updated note text...",
-  "public": true
+  "public": true,
+  "verse_references": [
+    {
+      "book": "John",
+      "chapter": 3,
+      "verse": 17
+    }
+  ]
 }
 ```
+
+`verse_references` is optional: when present it replaces all of the
+note's verse links (send `[]` to clear them); when omitted the
+existing links are left untouched. Unknown verses return 400 and
+leave the note unchanged.
 
 #### Delete Note
 ```
@@ -824,11 +897,71 @@ surface as a `409 position_conflict`.
 - `409 {"error": "position_conflict", "constraint":
   "unique_tag_position_per_tag", ...}` — position collision,
   same contract as `notes/reorder/`.
-- `403` only as a defense-in-depth fallback: anonymous
-  requests are auto-authenticated by
-  `DeviceAndCountryMiddleware` as the shared device (or
-  `guest`) user, so they act as that user and can move notes
-  it owns.
+- `403` when the requester is authenticated as the shared
+  `guest` account — `guest` is read-only, so all writes
+  (including `notes/move/`) are rejected. Device-provisioned
+  users can still move the notes they own.
+
+### Comments
+
+Comments are threaded under a note (`parent_comment` enables
+replies; `is_deleted` soft-deletes while keeping the thread
+intact).
+
+```
+GET    /api/v1/notes/{note_pk}/comments/
+POST   /api/v1/notes/{note_pk}/comments/
+GET    /api/v1/notes/{note_pk}/comments/{comment_pk}/
+PATCH  /api/v1/notes/{note_pk}/comments/{comment_pk}/
+DELETE /api/v1/notes/{note_pk}/comments/{comment_pk}/
+GET    /api/v1/comments/counts/?tag_id= | note_ids=
+```
+
+`GET` list returns the comment tree (root comments with nested
+`replies`) rather than a flat list. `POST` accepts `content`
+and optional `parent_comment` to create a reply; the parent
+must belong to the same note (`400` otherwise). `DELETE`
+soft-deletes and returns `204`.
+
+**Access**: a note's comments follow the same visibility
+scope as the note itself (`get_accessible_notes_qs`) — a
+requester sees comments only on their own notes or on public
+notes. Any operation against a note outside that scope
+returns `404`, identical to a nonexistent note, so private
+note existence is not leaked. Any authenticated user may
+comment on a public note; updating or deleting a comment
+remains restricted to its author (`403` otherwise). Reads
+require no token (anonymous callers see public-note
+comments); writes require authentication.
+
+Soft-delete contract: `DELETE` sets `is_deleted=True` and
+clears `content`, but the row is retained so reply threads
+stay intact. On every read path (tree **and** detail GET) a
+deleted comment is serialized as a tombstone — `content` is
+`"[deleted]"` and `images` is `[]`. Clients should render an
+`[deleted]` placeholder when `is_deleted` is true; the API
+never returns `404` for a deleted comment.
+
+PATCH may only change `content`: `is_deleted` is read-only
+(deletion happens exclusively via `DELETE` and cannot be
+undone), and `parent_comment` is create-only — sending it on
+update returns `400`.
+
+### Note & Comment Images
+```
+GET  /api/v1/notes/{note_id}/images/
+POST /api/v1/notes/{note_id}/images/
+GET  /api/v1/notes/{note_id}/comments/{comment_id}/images/
+POST /api/v1/notes/{note_id}/comments/{comment_id}/images/
+DELETE /api/v1/images/{image_id}/
+```
+
+Multipart upload with a single `file` field. Note images:
+only the note's owner may upload; reads follow the note's
+accessibility scope. Comment images: only the comment's
+author may upload. `DELETE /images/{id}/` is allowed for the
+uploader, the parent note's owner, or the parent comment's
+author.
 
 ---
 
@@ -946,14 +1079,22 @@ curl http://localhost:8000/api/v1/notes/ \
    - Can view guest user's tags
    - Cannot create/modify content
 
-2. **Authenticated Users**:
+2. **Shared Guest User** (`guest`):
+   - Fallback account the device middleware authenticates
+     requests as when it cannot provision a per-device user
+   - Can read guest-owned tags/notes/comments and public
+     content
+   - Cannot write — every POST/PUT/PATCH/DELETE returns 403
+     (`GuestReadOnly` permission)
+
+3. **Authenticated Users**:
    - Full access to Bible passages
    - Can create/read/update/delete their own tags
    - Can create/read/update/delete their own notes
    - Can view public notes from other users
    - Cannot modify other users' content
 
-3. **Staff Users**:
+4. **Staff Users**:
    - Access to Django admin panel
    - Same API permissions as regular users
 
@@ -961,8 +1102,15 @@ curl http://localhost:8000/api/v1/notes/ \
 
 When no authenticated user is available:
 - Tags: Guest user's tags are shown
-- Notes: Only public notes are visible
-- Creation: New content is assigned to guest user
+- Notes: Only public notes are visible. Note reads (`GET
+  /api/v1/notes/`, `GET /api/v1/notes/{id}/`,
+  `GET /api/v1/notes/order-index/`) are open to anonymous
+  callers and scoped to public notes. All note writes
+  (`POST`/`PUT`/`PATCH`/`DELETE`, `reorder/`, `move/`,
+  `bulk/`, `linked/`) require authentication and return
+  401/403 for anonymous callers.
+- Creation: Rejected — requests authenticated as the shared
+  `guest` account are read-only (writes return 403)
 
 ---
 
@@ -1089,13 +1237,48 @@ python manage.py collectstatic --noinput
 
 ### Database Backups
 
-```bash
-# Backup
-pg_dump bibledb > db_backups/backup_$(date +%Y%m%d).sql
+Backups are automated by `db_backups/local_db_backup.sh`, which
+reads the connection details from `config.yaml`
+(`DATABASES.default`) and runs `pg_dump` over TCP. No local
+PostgreSQL server or role is needed — only the client tools.
 
-# Restore
-psql bibledb < db_backups/backup_20251228.sql
+**Ubuntu/Debian setup** (first time only):
+
+```bash
+sudo apt update
+sudo apt install postgresql-client
 ```
+
+**Run a backup** (from the repo root — the script uses relative
+paths):
+
+```bash
+bash db_backups/local_db_backup.sh
+```
+
+This writes a timestamped custom-format dump to
+`db_backups/backup_<YYYYMMDD_HHMMSS>.dump`.
+
+**Restore**: the dumps are custom format, so use `pg_restore`
+(not `psql`). The configured DB user is read-only, so restores
+target a local PostgreSQL instance:
+
+```bash
+# Install and start a local server (first time only)
+sudo apt install postgresql
+sudo systemctl enable --now postgresql
+
+# Create a role matching your OS user and a target database
+sudo -u postgres createuser "$USER"
+sudo -u postgres createdb -O "$USER" bibledb
+
+# Restore a dump into it
+pg_restore -d bibledb --clean --if-exists \
+  db_backups/backup_20251228_055249.dump
+```
+
+To run the app against the restored copy, repoint `config.yaml`'s
+`DATABASES.default` at the local database.
 
 ### Vercel Deployment
 

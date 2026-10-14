@@ -44,9 +44,24 @@ class CaseInsensitiveAuthBackend(ModelBackend):
             # nonexistent user
             User().set_password(password)
             return None
+        except User.MultipleObjectsReturned:
+            # Usernames that differ only by case (e.g. 'Alice'
+            # and 'alice') all match iexact. Prefer the
+            # exact-case match; otherwise use the first one.
+            matches = User.objects.filter(
+                username__iexact=username
+            )
+            user = next(
+                (u for u in matches if u.username == username),
+                matches.first()
+            )
 
-        # Check password
-        if user.check_password(password):
+        # Check password and reject users that may not log in
+        # (e.g. is_active=False), matching ModelBackend.
+        if (
+            user.check_password(password)
+            and self.user_can_authenticate(user)
+        ):
             return user
 
         return None
