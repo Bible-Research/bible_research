@@ -841,6 +841,10 @@ surface as a `409 position_conflict`.
 
 ### Comments
 
+Comments are threaded under a note (`parent_comment` enables
+replies; `is_deleted` soft-deletes while keeping the thread
+intact).
+
 ```
 GET    /api/v1/notes/{note_pk}/comments/
 POST   /api/v1/notes/{note_pk}/comments/
@@ -850,9 +854,22 @@ DELETE /api/v1/notes/{note_pk}/comments/{comment_pk}/
 GET    /api/v1/comments/counts/?tag_id= | note_ids=
 ```
 
-Threaded comments on notes. `GET` list returns a nested tree
-(each node has a `replies` list); `POST` accepts `content` and
-optional `parent_comment` to create a reply.
+`GET` list returns the comment tree (root comments with nested
+`replies`) rather than a flat list. `POST` accepts `content`
+and optional `parent_comment` to create a reply; the parent
+must belong to the same note (`400` otherwise). `DELETE`
+soft-deletes and returns `204`.
+
+**Access**: a note's comments follow the same visibility
+scope as the note itself (`get_accessible_notes_qs`) — a
+requester sees comments only on their own notes or on public
+notes. Any operation against a note outside that scope
+returns `404`, identical to a nonexistent note, so private
+note existence is not leaked. Any authenticated user may
+comment on a public note; updating or deleting a comment
+remains restricted to its author (`403` otherwise). Reads
+require no token (anonymous callers see public-note
+comments); writes require authentication.
 
 Soft-delete contract: `DELETE` sets `is_deleted=True` and
 clears `content`, but the row is retained so reply threads
@@ -866,6 +883,22 @@ PATCH may only change `content`: `is_deleted` is read-only
 (deletion happens exclusively via `DELETE` and cannot be
 undone), and `parent_comment` is create-only — sending it on
 update returns `400`.
+
+### Note & Comment Images
+```
+GET  /api/v1/notes/{note_id}/images/
+POST /api/v1/notes/{note_id}/images/
+GET  /api/v1/notes/{note_id}/comments/{comment_id}/images/
+POST /api/v1/notes/{note_id}/comments/{comment_id}/images/
+DELETE /api/v1/images/{image_id}/
+```
+
+Multipart upload with a single `file` field. Note images:
+only the note's owner may upload; reads follow the note's
+accessibility scope. Comment images: only the comment's
+author may upload. `DELETE /images/{id}/` is allowed for the
+uploader, the parent note's owner, or the parent comment's
+author.
 
 ---
 

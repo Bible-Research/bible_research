@@ -1203,6 +1203,13 @@ class CommentViewSet(viewsets.ModelViewSet):
           Soft-delete: sets is_deleted=True and clears
           content. Thread structure is preserved.
 
+    Access: the parent note must be visible to the requester
+    (own notes or public notes — the same scope as
+    get_accessible_notes_qs). Comments on inaccessible notes
+    return 404 so the note's existence is not leaked.
+    Any authenticated user may comment on a public note;
+    edits and deletes remain author-only.
+
     N+1 prevention:
       get_queryset() issues one DB query with
       select_related('user') for all list and tree
@@ -1215,22 +1222,42 @@ class CommentViewSet(viewsets.ModelViewSet):
         'get', 'post', 'patch', 'delete', 'head', 'options',
     ]
 
+    def get_permissions(self):
+        # Reads are open: visibility is enforced by
+        # get_accessible_notes_qs (anon may see public notes).
+        # Writes always require authentication.
+        if self.action in ('list', 'retrieve'):
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
     def _get_note(self):
-        """Return the parent Note or raise 404."""
+        """
+        Return the parent Note when the requester may see it,
+        else raise 404 — inaccessible notes are indistinguishable
+        from nonexistent ones.
+        """
         return get_object_or_404(
-            Note, pk=self.kwargs['note_pk']
+            get_accessible_notes_qs(self.request.user),
+            pk=self.kwargs['note_pk'],
         )
 
     def get_queryset(self):
         """
         Return all comments for the note in one query.
         select_related('user') prevents per-comment author
-        lookups during serialization.
+        lookups during serialization. Comments are also
+        restricted to notes the requester may access, so
+        detail routes 404 on other users' private notes.
         """
         note_pk = self.kwargs['note_pk']
         return (
             Comment.objects
-            .filter(note_id=note_pk)
+            .filter(
+                note_id=note_pk,
+                note__in=get_accessible_notes_qs(
+                    self.request.user
+                ),
+            )
             .select_related('user')
             .prefetch_related('images')
             .order_by('timestamp')
@@ -1238,6 +1265,9 @@ class CommentViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         """Return comments as a nested tree (no N+1)."""
+        # 404 when the note does not exist or is a private
+        # note owned by someone else — never leak existence.
+        self._get_note()
         queryset = self.get_queryset()
         tree = build_comment_tree(queryset)
         logger.info(
