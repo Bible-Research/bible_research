@@ -1626,7 +1626,9 @@ class ImageDestroyView(APIView):
     """
     DELETE /api/v1/images/{image_pk}/
 
-    Only the uploader or the parent owner may delete.
+    Only the uploader, the comment author, or the owner of the
+    parent note may delete. For comment-attached images the
+    parent note is reached through image.comment.note.
     Hard-delete: DB row removed and GCS object deleted
     (best-effort).
     """
@@ -1637,10 +1639,16 @@ class ImageDestroyView(APIView):
         image = get_object_or_404(Image, pk=image_pk)
         user = request.user
 
+        # Comment-attached images have note=NULL (XOR FK), so
+        # resolve the parent note through the comment.
+        parent_note = image.note
+        if parent_note is None and image.comment is not None:
+            parent_note = image.comment.note
+
         is_uploader = image.uploaded_by == user
         is_note_owner = (
-            image.note is not None
-            and image.note.user == user
+            parent_note is not None
+            and parent_note.user == user
         )
         is_comment_author = (
             image.comment is not None
