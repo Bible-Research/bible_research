@@ -1,6 +1,7 @@
 import logging
 
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import serializers
 from bible.models import Verse
@@ -201,40 +202,46 @@ class NoteSerializer(serializers.ModelSerializer):
             except User.DoesNotExist:
                 # If guest user doesn't exist, remove user field
                 validated_data.pop('user')
-        # Create the Note instance using the remaining validated data
-        note = Note.objects.create(**validated_data)
+        # Create the Note row and its NoteVerse links in one
+        # transaction so a failed verse resolution rolls the Note
+        # back instead of leaving an orphan row behind.
+        with transaction.atomic():
+            # Create the Note instance with the remaining validated data
+            note = Note.objects.create(**validated_data)
 
-        # Handle the many-to-many relationship with verses via NoteVerse
-        if verse_references_data:
-            note_verse_instances = []
-            for verse_ref_data in verse_references_data:
-                try:
-                    # Attempt to retrieve the Verse instance using
-                    # case-insensitive book match
-                    verse_instance = Verse.objects.get(
-                        book__iexact=verse_ref_data['book'],
-                        chapter=verse_ref_data['chapter'],
-                        verse=verse_ref_data['verse']
-                    )
-                    # Create a NoteVerse instance to link the note and verse
-                    note_verse_instances.append(
-                        NoteVerse(note=note, verse=verse_instance)
-                    )
-                except Verse.DoesNotExist:
-                    error_msg = (
-                        f"Verse not found for '{verse_ref_data['book']} "
-                        f"{verse_ref_data['chapter']}:"
-                        f"{verse_ref_data['verse']}'. "
-                        f"Please ensure the verse exists in your database."
-                    )
-                    raise serializers.ValidationError(error_msg)
-                except Exception as e:
-                    raise serializers.ValidationError(
-                        f"Error processing verse reference: {e}"
-                    )
+            # Handle the many-to-many relationship via NoteVerse
+            if verse_references_data:
+                note_verse_instances = []
+                for verse_ref_data in verse_references_data:
+                    try:
+                        # Attempt to retrieve the Verse instance using
+                        # case-insensitive book match
+                        verse_instance = Verse.objects.get(
+                            book__iexact=verse_ref_data['book'],
+                            chapter=verse_ref_data['chapter'],
+                            verse=verse_ref_data['verse']
+                        )
+                        # Create a NoteVerse link between note and verse
+                        note_verse_instances.append(
+                            NoteVerse(note=note, verse=verse_instance)
+                        )
+                    except Verse.DoesNotExist:
+                        error_msg = (
+                            f"Verse not found for "
+                            f"'{verse_ref_data['book']} "
+                            f"{verse_ref_data['chapter']}:"
+                            f"{verse_ref_data['verse']}'. "
+                            f"Please ensure the verse exists in "
+                            f"your database."
+                        )
+                        raise serializers.ValidationError(error_msg)
+                    except Exception as e:
+                        raise serializers.ValidationError(
+                            f"Error processing verse reference: {e}"
+                        )
 
-            # Bulk create the intermediary NoteVerse instances for efficiency
-            NoteVerse.objects.bulk_create(note_verse_instances)
+                # Bulk-create the NoteVerse link rows for efficiency
+                NoteVerse.objects.bulk_create(note_verse_instances)
 
         return note
 

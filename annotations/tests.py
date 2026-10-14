@@ -818,6 +818,93 @@ class BulkNoteCreateTest(TestCase):
         )
 
 
+class NoteCreateViewTest(TestCase):
+    """Tests for POST /api/v1/notes/ (single note create)."""
+
+    URL = '/api/v1/notes/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='note_create_user',
+            email='note_create@example.com',
+            password='pass',
+        )
+        self.tag = Tag.objects.create(
+            user=self.user,
+            name='NoteCreateTag',
+        )
+        self.verse, _ = Verse.objects.get_or_create(
+            book='John',
+            chapter=3,
+            verse=16,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        # NoteSerializer enriches verses via the DBT client on the
+        # 201 response; keep tests offline by making it fail fast
+        # into the serializer's fallback (empty verse text).
+        patcher = patch(
+            'annotations.serializers.get_default_dbt_client',
+            side_effect=ValueError('DBT disabled in tests'),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_create_note_with_verse_happy_path(self):
+        """POST creates the note and links the verse."""
+        payload = {
+            'note_text': 'A note on John 3:16',
+            'tag': self.tag.id,
+            'verse_references': [
+                {'book': 'John', 'chapter': 3, 'verse': 16},
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        note = Note.objects.get(user=self.user)
+        self.assertEqual(note.note_text, 'A note on John 3:16')
+        self.assertEqual(note.verses.count(), 1)
+        self.assertEqual(note.verses.first().verse, 16)
+
+    def test_failed_verse_resolution_leaves_no_orphan(self):
+        """A non-existent verse reference returns 400 and leaves
+        no orphan Note or NoteVerse rows behind."""
+        payload = {
+            'note_text': 'Orphan candidate',
+            'tag': self.tag.id,
+            'verse_references': [
+                {'book': 'John', 'chapter': 99, 'verse': 99},
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Verse not found', str(resp.content))
+        self.assertEqual(
+            Note.objects.filter(user=self.user).count(), 0
+        )
+        self.assertEqual(NoteVerse.objects.count(), 0)
+
+    def test_partial_verse_failure_rolls_back_links(self):
+        """When one of several verse references is bad, the whole
+        create rolls back — no note and no links for the good
+        verse either."""
+        payload = {
+            'note_text': 'Partial failure note',
+            'tag': self.tag.id,
+            'verse_references': [
+                {'book': 'John', 'chapter': 3, 'verse': 16},
+                {'book': 'John', 'chapter': 99, 'verse': 99},
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            Note.objects.filter(user=self.user).count(), 0
+        )
+        self.assertEqual(NoteVerse.objects.count(), 0)
+
+
 class LinkedNotesTest(TestCase):
     """Tests for POST /api/v1/notes/linked/."""
 
