@@ -821,6 +821,34 @@ surface as a `409 position_conflict`.
   `guest`) user, so they act as that user and can move notes
   it owns.
 
+### Comments
+
+```
+GET    /api/v1/notes/{note_pk}/comments/
+POST   /api/v1/notes/{note_pk}/comments/
+GET    /api/v1/notes/{note_pk}/comments/{comment_pk}/
+PATCH  /api/v1/notes/{note_pk}/comments/{comment_pk}/
+DELETE /api/v1/notes/{note_pk}/comments/{comment_pk}/
+GET    /api/v1/comments/counts/?tag_id= | note_ids=
+```
+
+Threaded comments on notes. `GET` list returns a nested tree
+(each node has a `replies` list); `POST` accepts `content` and
+optional `parent_comment` to create a reply.
+
+Soft-delete contract: `DELETE` sets `is_deleted=True` and
+clears `content`, but the row is retained so reply threads
+stay intact. On every read path (tree **and** detail GET) a
+deleted comment is serialized as a tombstone — `content` is
+`"[deleted]"` and `images` is `[]`. Clients should render an
+`[deleted]` placeholder when `is_deleted` is true; the API
+never returns `404` for a deleted comment.
+
+PATCH may only change `content`: `is_deleted` is read-only
+(deletion happens exclusively via `DELETE` and cannot be
+undone), and `parent_comment` is create-only — sending it on
+update returns `400`.
+
 ---
 
 ## Database Schema

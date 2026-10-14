@@ -13,6 +13,7 @@ from annotations.serializers import (
 )
 from annotations.models import (
     Comment,
+    Image,
     Note,
     NoteVerse,
     Tag,
@@ -468,6 +469,88 @@ class CommentViewSetTest(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, 400)
+
+    def test_update_comment_content(self):
+        """PATCH updates a comment's content."""
+        comment = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Before edit',
+        )
+        resp = self.client.patch(
+            f'{self.base_url}{comment.id}/',
+            {'content': 'After edit'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['content'], 'After edit')
+        comment.refresh_from_db()
+        self.assertEqual(comment.content, 'After edit')
+
+    def test_retrieve_deleted_comment_redacts_content(self):
+        """GET detail masks content/images on a deleted comment."""
+        comment = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Must not be served',
+            is_deleted=True,
+        )
+        Image.objects.create(
+            comment=comment,
+            uploaded_by=self.user,
+            storage_url='gs://b/originals/x/source.png',
+        )
+        resp = self.client.get(f'{self.base_url}{comment.id}/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data['is_deleted'])
+        self.assertEqual(data['content'], '[deleted]')
+        self.assertEqual(data['images'], [])
+
+    def test_patch_cannot_undelete_comment(self):
+        """PATCH cannot clear is_deleted; delete stays final."""
+        comment = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='',
+            is_deleted=True,
+        )
+        resp = self.client.patch(
+            f'{self.base_url}{comment.id}/',
+            {'is_deleted': False},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()['is_deleted'])
+        comment.refresh_from_db()
+        self.assertTrue(comment.is_deleted)
+
+    def test_patch_cannot_reparent_comment(self):
+        """PATCH cannot re-point parent_comment (400)."""
+        root_a = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Root A',
+        )
+        root_b = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='Root B',
+        )
+        reply = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            parent_comment=root_a,
+            content='Reply',
+        )
+        resp = self.client.patch(
+            f'{self.base_url}{reply.id}/',
+            {'parent_comment': root_b.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        reply.refresh_from_db()
+        self.assertEqual(reply.parent_comment_id, root_a.id)
 
 
 class CommentCountViewTest(TestCase):

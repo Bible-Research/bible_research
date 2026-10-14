@@ -1174,10 +1174,14 @@ class CommentViewSet(viewsets.ModelViewSet):
           Pass 'parent_comment' PK to create a reply.
 
       GET    /api/v1/notes/{note_pk}/comments/{pk}/
-          Retrieve a single comment (flat).
+          Retrieve a single comment (flat). Deleted
+          comments are redacted the same way as in the
+          tree ('[deleted]', images []).
 
       PATCH  /api/v1/notes/{note_pk}/comments/{pk}/
-          Update a comment's content.
+          Update a comment's content. 'is_deleted' is
+          read-only and 'parent_comment' is create-only,
+          so PATCH can neither un-delete nor re-parent.
 
       DELETE /api/v1/notes/{note_pk}/comments/{pk}/
           Soft-delete: sets is_deleted=True and clears
