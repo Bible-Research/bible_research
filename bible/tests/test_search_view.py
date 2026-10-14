@@ -644,8 +644,8 @@ def test_non_grouped_search_still_paginated(
 def test_grouped_search_provider_error(
     mock_get_client, mock_is_sword, factory
 ):
-    """Provider client raising in grouped mode → provider error
-    fields; raw exception text never reaches the body."""
+    """Provider client raising in grouped mode → 502 with
+    provider error fields, not a 400 carrying str(exc)."""
     mock_get_client.return_value.search.side_effect = (
         Exception("DBT exploded")
     )

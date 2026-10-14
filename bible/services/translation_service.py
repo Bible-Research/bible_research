@@ -4,6 +4,7 @@ import logging
 
 from .dbt.client import get_default_dbt_client
 from .esv.registry import get_esv_translation_listing
+from .fileset_groups import group_filesets
 from .sword.client import get_default_sword_client
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,17 @@ class TranslationService:
                 e for e in esv_entries
                 if e['iso'].lower() == needle
             ]
-        return processed + sword_entries + esv_entries
+
+        merged = processed + sword_entries + esv_entries
+        # Attach normalized option groups so clients can offer
+        # version-level text/audio choices without parsing raw
+        # fileset ids. ``filesets`` stays untouched for backwards
+        # compatibility.
+        for entry in merged:
+            options = group_filesets(entry)
+            entry['text_options'] = options['text_options']
+            entry['audio_options'] = options['audio_options']
+        return merged
 
     @classmethod
     def _process_translations(cls, translations):
@@ -116,14 +127,21 @@ class TranslationService:
                 )
                 continue
 
-            processed_filesets = [
-                {
+            processed_filesets = []
+            for fs in all_filesets:
+                entry = {
                     'id': fs.get('id'),
                     'type': fs.get('type'),
                     'size': fs.get('size'),
                 }
-                for fs in all_filesets
-            ]
+                # Pass codec/bitrate through when DBT provides
+                # them; the ``-opus16`` id suffix remains the
+                # authoritative codec marker for grouping.
+                if fs.get('codec'):
+                    entry['codec'] = fs['codec']
+                if fs.get('bitrate'):
+                    entry['bitrate'] = fs['bitrate']
+                processed_filesets.append(entry)
 
             trans['filesets'] = processed_filesets
             processed.append(trans)

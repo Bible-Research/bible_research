@@ -2,7 +2,9 @@
 
 When an upstream Bible provider call fails, the API must return
 ``error``/``error_code`` fields (and omit ``verses``) instead of
-silently returning an empty chapter.
+silently returning an empty chapter. Coverage misses surface as
+``book_not_in_fileset``; other failures keep the
+``rate_limited``/``not_found``/``provider_error`` contract.
 """
 from unittest.mock import MagicMock, patch
 
@@ -11,7 +13,6 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from bible.serializers import BiblePassageSerializer
-from bible.utils.provider_errors import PassageNotFoundError
 
 
 class FakeProviderError(Exception):
@@ -123,7 +124,11 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertNotIn('url:', result['error'])
 
     @patch('bible.serializers.get_default_dbt_client')
-    def test_404_returns_not_found_fields(self, mock_get):
+    def test_404_returns_book_not_in_fileset_fields(
+        self, mock_get
+    ):
+        """A DBT 404 means the fileset does not carry the book —
+        it surfaces as ``book_not_in_fileset``, not ``not_found``."""
         mock_client = MagicMock()
         mock_client.get_verses.side_effect = FakeProviderError(404)
         mock_get.return_value = mock_client
@@ -134,13 +139,16 @@ class ProviderErrorSerializerTests(TestCase):
         )
 
         self.assertNotIn('verses', result)
-        self.assertEqual(result['error_code'], 'not_found')
-        self.assertIn('404', result['error'])
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
 
     @patch('bible.serializers.get_default_dbt_client')
-    def test_empty_dbt_data_returns_not_found(self, mock_get):
+    def test_empty_dbt_data_returns_book_not_in_fileset(
+        self, mock_get
+    ):
         """A successful upstream response with empty ``data`` is
-        missing content, not a provider failure."""
+        missing content — the fileset does not cover it."""
         mock_client = MagicMock()
         mock_client.get_verses.return_value = {'data': []}
         mock_get.return_value = mock_client
@@ -151,7 +159,9 @@ class ProviderErrorSerializerTests(TestCase):
         )
 
         self.assertNotIn('verses', result)
-        self.assertEqual(result['error_code'], 'not_found')
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
 
     @patch('bible.serializers.get_default_esv_client')
     def test_esv_empty_verses_returns_not_found(self, mock_get):
@@ -173,12 +183,14 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertEqual(result['error_code'], 'not_found')
 
     @patch('bible.serializers.get_default_sword_client')
-    def test_sword_missing_chapter_returns_not_found(
+    def test_sword_missing_chapter_returns_book_not_in_fileset(
         self, mock_get
     ):
+        """The SWORD client raises ``ValueError`` for a book or
+        chapter outside the module — a coverage miss."""
         mock_client = MagicMock()
         mock_client.get_chapter_verses.side_effect = (
-            PassageNotFoundError(
+            ValueError(
                 'No verses found for JHN 99 in fileset_id=LVSGLU8'
             )
         )
@@ -190,7 +202,9 @@ class ProviderErrorSerializerTests(TestCase):
         )
 
         self.assertNotIn('verses', result)
-        self.assertEqual(result['error_code'], 'not_found')
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
 
 
 class ProviderErrorViewTests(TestCase):
@@ -240,5 +254,31 @@ class ProviderErrorViewTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(
-            response.data['error_code'], 'not_found'
+            response.data['error_code'], 'book_not_in_fileset'
         )
+
+    @patch('bible.serializers.get_default_dbt_client')
+    def test_view_does_not_leak_credentials_in_error(
+        self, mock_get
+    ):
+        """A network failure carrying the request URL — including
+        DBT's ``?key=`` credential — must not reach the response
+        body, and must not be a silent 200."""
+        mock_client = MagicMock()
+        mock_client.get_verses.side_effect = ConnectionError(
+            'Max retries exceeded with url: '
+            'https://dbt/api/filesets/ENGESV/JHN/3?key=SECRET'
+        )
+        mock_get.return_value = mock_client
+
+        response = APIClient().get(
+            '/api/v1/bible/',
+            {'passage': 'John 3', 'fileset_id': 'ENGESV'},
+        )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.data['error_code'], 'provider_error'
+        )
+        self.assertNotIn('SECRET', response.data['error'])
+        self.assertNotIn('key=', response.data['error'])
