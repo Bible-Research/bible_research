@@ -100,6 +100,6 @@ def test_get_copyright_dbt_exception(
     view = CopyrightView.as_view()
     response = view(request)
 
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert 'error' in response.data
-    assert response.data['error'] == "DBT Error"
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
+    assert 'DBT Error' not in response.data['error']

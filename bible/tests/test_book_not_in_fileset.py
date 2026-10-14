@@ -175,8 +175,9 @@ def test_sword_text_missing_chapter_404(mock_sword, factory):
 
 @pytest.mark.django_db
 @patch('bible.serializers.get_default_sword_client')
-def test_sword_infra_error_keeps_200_message(mock_sword, factory):
-    """A missing module zip (OSError) stays on the legacy path."""
+def test_sword_infra_error_returns_502(mock_sword, factory):
+    """A missing module zip (OSError) is a provider failure —
+    it surfaces as 502 ``provider_error``, not a silent 200."""
     mock_sword.return_value.get_chapter_verses.side_effect = (
         FileNotFoundError('SWORD module zip not found')
     )
@@ -185,9 +186,9 @@ def test_sword_infra_error_keeps_200_message(mock_sword, factory):
         'passage': 'Genesis 1',
         'fileset_id': 'LVSGLU8',
     })
-    assert response.status_code == status.HTTP_200_OK
-    assert response.data['verses'] == []
-    assert 'book_not_in_fileset' != response.data.get('error_code')
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
+    assert 'verses' not in response.data
 
 
 @pytest.mark.django_db
@@ -223,8 +224,8 @@ def test_esv_text_404_returns_not_in_fileset(mock_esv, factory):
 
 @pytest.mark.django_db
 @patch('bible.serializers.get_default_esv_client')
-def test_esv_other_error_keeps_200_message(mock_esv, factory):
-    """Non-404 ESV failures keep the legacy 200 + message."""
+def test_esv_other_error_returns_502(mock_esv, factory):
+    """Non-404 ESV failures surface as 502 ``provider_error``."""
     mock_esv.return_value.get_chapter_audio_url.side_effect = (
         _http_error(500)
     )
@@ -234,14 +235,15 @@ def test_esv_other_error_keeps_200_message(mock_esv, factory):
         'fileset_id': 'ENGESV_API',
         'response_format': 'audio',
     })
-    assert response.status_code == status.HTTP_200_OK
-    assert 'book_not_in_fileset' != response.data.get('error_code')
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
 
 
 @pytest.mark.django_db
 @patch('bible.serializers.get_default_dbt_client')
-def test_dbt_other_error_keeps_200_message(mock_get_client, factory):
-    """Non-404 failures keep the legacy 200 + message contract."""
+def test_dbt_other_error_returns_502(mock_get_client, factory):
+    """Non-404 failures surface as 502 ``provider_error`` — never
+    a silent 200 with an empty ``verses`` list."""
     mock_get_client.return_value.get_verses.side_effect = Exception(
         'boom'
     )
@@ -250,9 +252,9 @@ def test_dbt_other_error_keeps_200_message(mock_get_client, factory):
         'passage': 'Genesis 1',
         'fileset_id': 'ENGNASN_ET',
     })
-    assert response.status_code == status.HTTP_200_OK
-    assert response.data['verses'] == []
-    assert 'book_not_in_fileset' != response.data.get('error_code')
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
+    assert 'verses' not in response.data
 
 
 @pytest.mark.django_db

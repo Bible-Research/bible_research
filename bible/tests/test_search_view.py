@@ -641,10 +641,11 @@ def test_non_grouped_search_still_paginated(
 @pytest.mark.django_db
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
-def test_grouped_search_provider_error_returns_400(
+def test_grouped_search_provider_error(
     mock_get_client, mock_is_sword, factory
 ):
-    """Provider client raising in grouped mode → 400 error."""
+    """Provider client raising in grouped mode → 502 with
+    provider error fields, not a 400 carrying str(exc)."""
     mock_get_client.return_value.search.side_effect = (
         Exception("DBT exploded")
     )
@@ -656,8 +657,9 @@ def test_grouped_search_provider_error_returns_400(
     })
     response = BibleSearchView.as_view()(request)
 
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert 'DBT exploded' in response.data['error']
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.data['error_code'] == 'provider_error'
+    assert 'DBT exploded' not in response.data['error']
 
 
 @pytest.mark.django_db

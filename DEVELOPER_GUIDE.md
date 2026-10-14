@@ -365,8 +365,17 @@ can fall back to another fileset:
 This covers a DBT 404 (or empty `data`) from
 `v4_bible_filesets_show_chapter`, SWORD misses (a book/chapter
 outside the module, or generated audio not yet uploaded), and
-ESV API 404s for both text and audio requests. Other failures
-keep the legacy `{"verses": [], "message": "..."}` 200 body.
+ESV API 404s for both text and audio requests.
+
+Other provider failures surface as `error` + `error_code` with a
+real HTTP status (built by `bible/utils/provider_errors.py`):
+`rate_limited` → 429, `not_found` (missing passage content, e.g.
+an empty ESV body) → 404, anything else → `provider_error` →
+502. Raw exception text is never embedded in `error` — upstream
+exception messages can contain request URLs with credentials
+(DBT's `?key=` query param); only the exception class name is
+surfaced. The React app branches on `error_code`, so these
+fields stay stable.
 
 #### List Available Translations
 ```
