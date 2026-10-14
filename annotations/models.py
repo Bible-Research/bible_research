@@ -60,7 +60,8 @@ class Tag(models.Model):
         verbose_name = "Tag"
         verbose_name_plural = "Tags"
 
-        # Ensures that a user cannot have two tags with the same name and parent.
+        # Ensures that a user cannot have two tags with the same
+        # name and parent.
         unique_together = ('user', 'name', 'parent_tag')
         ordering = ['name']
 
@@ -160,7 +161,11 @@ class Note(models.Model):
         # Display the first 50 characters of the note text
         truncated_text = self.note_text[:50]
         ellipsis = '...' if len(self.note_text) > 50 else ''
-        id_display = self.id[:8] if isinstance(self.id, str) else self.id.hex[:8]
+        id_display = (
+            self.id[:8]
+            if isinstance(self.id, str)
+            else self.id.hex[:8]
+        )
         return f"Note (ID: {id_display}): {truncated_text}{ellipsis}"
 
 
@@ -338,7 +343,7 @@ class Image(models.Model):
         constraints = [
             models.CheckConstraint(
                 name="image_exactly_one_parent",
-                check=(
+                condition=(
                     Q(comment__isnull=False, note__isnull=True)
                     | Q(comment__isnull=True, note__isnull=False)
                 ),

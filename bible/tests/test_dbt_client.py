@@ -11,6 +11,33 @@ def dbt_client():
     return client
 
 
+def test_ssl_verification_enabled(dbt_client):
+    """
+    Regression test: TLS verification must stay enabled on the
+    generated OpenAPI client (see issue #54).
+    """
+    assert dbt_client.api_client.configuration.verify_ssl is True
+
+
+def test_session_requests_verify_tls(dbt_client):
+    """
+    Raw requests calls must not disable TLS verification.
+    """
+    mock_response = Mock()
+    mock_response.json.return_value = {"data": []}
+    mock_response.raise_for_status = Mock()
+    dbt_client.session.get.return_value = mock_response
+
+    dbt_client.get_timestamps("fileset", "book", "chapter")
+    dbt_client.get_copyright("ENGESV")
+    dbt_client.search("ENGESV", "query")
+
+    assert dbt_client.session.get.call_count == 3
+    for call in dbt_client.session.get.call_args_list:
+        _, call_kwargs = call
+        assert call_kwargs.get('verify') is not False
+
+
 def test_get_timestamps_calls_api(dbt_client):
     """
     Test that get_timestamps calls session.get with the

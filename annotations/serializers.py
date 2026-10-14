@@ -1,3 +1,5 @@
+import logging
+
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Q
@@ -6,7 +8,13 @@ from bible.models import Verse
 from bible.services.dbt.client import get_default_dbt_client
 from bible.services.esv.client import get_default_esv_client
 from bible.services.esv.registry import is_esv_fileset
+from bible.services.sword.client import get_default_sword_client
+from bible.services.sword.registry import is_sword_fileset
 from bible.utils.bible_books import get_dbt_book_id
+from bible.utils.provider_errors import (
+    PassageNotFoundError,
+    provider_error_fields,
+)
 from .models import (
     Note,
     NoteVerse,
@@ -16,6 +24,8 @@ from .models import (
     ReadingPosition
 )
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
 
 
 class CurrentAuthenticatedUserDefault:
@@ -115,6 +125,19 @@ class NoteVerseReferenceSerializer(serializers.Serializer):
     )
 
 
+class LinkedNotesRequestSerializer(serializers.Serializer):
+    """Validates POST /api/v1/notes/linked/ request bodies."""
+    verse_references = serializers.ListField(
+        child=NoteVerseReferenceSerializer(),
+        min_length=1,
+        max_length=500,
+        help_text=(
+            "Verses to match against; a note is linked when "
+            "it references at least one of them."
+        ),
+    )
+
+
 class NoteSerializer(serializers.ModelSerializer):
     """Serializes Note model data.
     - For POST/PUT: Accepts tag UUID and a list of verse
@@ -181,40 +204,46 @@ class NoteSerializer(serializers.ModelSerializer):
             except User.DoesNotExist:
                 # If guest user doesn't exist, remove user field
                 validated_data.pop('user')
-        # Create the Note instance using the remaining validated data
-        note = Note.objects.create(**validated_data)
+        # Create the Note row and its NoteVerse links in one
+        # transaction so a failed verse resolution rolls the Note
+        # back instead of leaving an orphan row behind.
+        with transaction.atomic():
+            # Create the Note instance with the remaining validated data
+            note = Note.objects.create(**validated_data)
 
-        # Handle the many-to-many relationship with verses via NoteVerse
-        if verse_references_data:
-            note_verse_instances = []
-            for verse_ref_data in verse_references_data:
-                try:
-                    # Attempt to retrieve the Verse instance using
-                    # case-insensitive book match
-                    verse_instance = Verse.objects.get(
-                        book__iexact=verse_ref_data['book'],
-                        chapter=verse_ref_data['chapter'],
-                        verse=verse_ref_data['verse']
-                    )
-                    # Create a NoteVerse instance to link the note and verse
-                    note_verse_instances.append(
-                        NoteVerse(note=note, verse=verse_instance)
-                    )
-                except Verse.DoesNotExist:
-                    error_msg = (
-                        f"Verse not found for '{verse_ref_data['book']} "
-                        f"{verse_ref_data['chapter']}:"
-                        f"{verse_ref_data['verse']}'. "
-                        f"Please ensure the verse exists in your database."
-                    )
-                    raise serializers.ValidationError(error_msg)
-                except Exception as e:
-                    raise serializers.ValidationError(
-                        f"Error processing verse reference: {e}"
-                    )
+            # Handle the many-to-many relationship via NoteVerse
+            if verse_references_data:
+                note_verse_instances = []
+                for verse_ref_data in verse_references_data:
+                    try:
+                        # Attempt to retrieve the Verse instance using
+                        # case-insensitive book match
+                        verse_instance = Verse.objects.get(
+                            book__iexact=verse_ref_data['book'],
+                            chapter=verse_ref_data['chapter'],
+                            verse=verse_ref_data['verse']
+                        )
+                        # Create a NoteVerse link between note and verse
+                        note_verse_instances.append(
+                            NoteVerse(note=note, verse=verse_instance)
+                        )
+                    except Verse.DoesNotExist:
+                        error_msg = (
+                            f"Verse not found for "
+                            f"'{verse_ref_data['book']} "
+                            f"{verse_ref_data['chapter']}:"
+                            f"{verse_ref_data['verse']}'. "
+                            f"Please ensure the verse exists in "
+                            f"your database."
+                        )
+                        raise serializers.ValidationError(error_msg)
+                    except Exception as e:
+                        raise serializers.ValidationError(
+                            f"Error processing verse reference: {e}"
+                        )
 
-            # Bulk create the intermediary NoteVerse instances for efficiency
-            NoteVerse.objects.bulk_create(note_verse_instances)
+                # Bulk-create the NoteVerse link rows for efficiency
+                NoteVerse.objects.bulk_create(note_verse_instances)
 
         return note
 
@@ -274,9 +303,19 @@ class NoteSerializer(serializers.ModelSerializer):
         Overrides the default representation for GET requests to
         include nested tag and verse data with content from
         Bible provider, plus section headings.
+
+        Set 'include_verse_text' to False in the serializer
+        context to skip the blocking upstream provider call;
+        verses then carry only book/chapter/verse coordinates
+        (empty 'text') and 'headings' is empty.
         """
         representation = super().to_representation(instance)
-        verses = list(instance.verses.all().order_by('verse'))
+        # Sort in Python so a prefetch_related('verses') cache is
+        # reused; .order_by() on the related manager would issue
+        # a fresh query per note.
+        verses = sorted(
+            instance.verses.all(), key=lambda v: v.verse
+        )
         if not verses:
             return representation
 
@@ -294,13 +333,36 @@ class NoteSerializer(serializers.ModelSerializer):
         verses_with_text = []
         headings = []
 
+        include_verse_text = self.context.get(
+            'include_verse_text', True
+        )
+
         try:
+            if not include_verse_text:
+                # Coordinates only — e.g. POST
+                # /api/v1/notes/linked/ does not display
+                # verse text, so skip the provider call.
+                for verse in verses:
+                    verses_with_text.append({
+                        'book': book_name,
+                        'chapter': chapter,
+                        'verse': verse.verse,
+                        'text': ''
+                    })
             # Use ESV client if fileset is ENGESV_API
-            if is_esv_fileset(fileset_id):
+            elif is_esv_fileset(fileset_id):
                 esv_client = get_default_esv_client()
                 parsed = esv_client.get_chapter_with_headings(
                     dbt_book_id, chapter
                 )
+                # A successful-but-empty ESV body is missing
+                # content, not a usable chapter — surface
+                # not_found instead of silent empty text.
+                if not parsed.get('verses'):
+                    raise PassageNotFoundError(
+                        f"No verses found for {dbt_book_id} "
+                        f"{chapter} in fileset_id={fileset_id}"
+                    )
 
                 # Extract verses in range
                 for verse in verses:
@@ -333,6 +395,31 @@ class NoteSerializer(serializers.ModelSerializer):
                     for h in parsed.get('headings', [])
                     if h.get('before_verse') in verse_numbers
                 ]
+            elif is_sword_fileset(fileset_id):
+                # Local SWORD module (e.g. LVSGLU8) — same
+                # provider dispatch as the passage endpoint.
+                # SWORD modules carry no headings metadata.
+                sword_client = get_default_sword_client()
+                sword_verses = sword_client.get_chapter_verses(
+                    fileset_id, dbt_book_id, chapter
+                )
+                for verse in verses:
+                    matching_verse = next(
+                        (
+                            v for v in sword_verses
+                            if v['verse_start'] == verse.verse
+                        ),
+                        None
+                    )
+                    verses_with_text.append({
+                        'book': book_name,
+                        'chapter': chapter,
+                        'verse': verse.verse,
+                        'text': (
+                            matching_verse['verse_text']
+                            if matching_verse else ''
+                        )
+                    })
             else:
                 # Use DBT client for other filesets
                 kwargs = {
@@ -341,13 +428,23 @@ class NoteSerializer(serializers.ModelSerializer):
                 }
                 dbt_client = get_default_dbt_client()
                 verse_text = dbt_client.get_verses(
-                    dbt_book_id, chapter, **kwargs
+                    dbt_book_id, chapter,
+                    bible_id=fileset_id, **kwargs
                 )
+                # A successful-but-empty DBT body (or rows that
+                # all lack ``verse_text``) is missing content —
+                # surface not_found instead of silent empty text.
+                data_rows = (verse_text or {}).get('data') or []
+                if not any('verse_text' in v for v in data_rows):
+                    raise PassageNotFoundError(
+                        f"No verses found for {dbt_book_id} "
+                        f"{chapter} in fileset_id={fileset_id}"
+                    )
 
                 for verse in verses:
                     matching_verse = next(
                         (
-                            v for v in verse_text['data']
+                            v for v in data_rows
                             if v['verse_start'] == verse.verse
                         ),
                         None
@@ -375,8 +472,12 @@ class NoteSerializer(serializers.ModelSerializer):
                         if h.get('before_verse') in verse_numbers
                     ]
         except Exception as e:
-            print(f"Error fetching verses/headings: {e}")
-            # Fallback: return verses without text
+            # Catch-all also covers response-shaping bugs; they
+            # surface as provider_error rather than crashing GETs.
+            logger.exception(f"Error fetching verses/headings: {e}")
+            # Surface the provider failure to clients while
+            # keeping the verse references for display.
+            representation.update(provider_error_fields(e))
             for verse in verses:
                 verses_with_text.append({
                     'book': book_name,
@@ -608,13 +709,19 @@ class CommentSerializer(serializers.ModelSerializer):
     """
     Serializes a single Comment for both read and write operations.
 
-    - On write (POST/PATCH): accepts 'content' and optionally
-      'parent_comment' (its PK). 'user' and 'note' are injected
-      by the view.
+    - On write (POST/PATCH): accepts 'content' and, on create only,
+      optionally 'parent_comment' (its PK). 'user' and 'note' are
+      injected by the view. 'is_deleted' is read-only — deletion
+      happens exclusively via DELETE, so PATCH cannot un-delete.
     - On read (GET): exposes author info via 'author' and omits
       internal 'user' FK so clients receive a clean response.
       The 'replies' field is populated by build_comment_tree and
       is not part of the model schema.
+    - Soft-deleted comments are redacted on every read path
+      (to_representation): 'content' becomes '[deleted]' and
+      'images' becomes []. Clients must render a tombstone for
+      is_deleted=True; the row is never removed so reply threads
+      stay intact.
 
     N+1 prevention: this serializer is intentionally flat.
     The view fetches all comments in one query and delegates
@@ -646,11 +753,29 @@ class CommentSerializer(serializers.ModelSerializer):
             'images',
         ]
         read_only_fields = [
-            'id', 'author', 'note_id', 'timestamp', 'images',
+            'id', 'author', 'note_id', 'timestamp', 'is_deleted',
+            'images',
         ]
 
+    def to_representation(self, instance):
+        """Serialize; redact content/images of deleted comments."""
+        data = super().to_representation(instance)
+        if instance.is_deleted:
+            data['content'] = '[deleted]'
+            data['images'] = []
+        return data
+
     def validate_parent_comment(self, value):
-        """Ensure a reply targets a comment on the same note."""
+        """
+        Ensure a reply targets a comment on the same note.
+
+        parent_comment is create-only: once a comment exists its
+        position in the thread is immutable (no re-parenting).
+        """
+        if self.instance is not None:
+            raise serializers.ValidationError(
+                "parent_comment cannot be changed."
+            )
         if value is None:
             return value
         request = self.context.get('request')
@@ -675,8 +800,9 @@ def build_comment_tree(queryset):
     This function performs O(n) work in Python to build the tree,
     avoiding any additional database round-trips.
 
-    Deleted comments are represented with redacted content so that
-    reply threads remain structurally intact in the response.
+    Deleted comments are represented with redacted content
+    (handled by CommentSerializer.to_representation) so that reply
+    threads remain structurally intact in the response.
 
     Returns a list of root-level comment dicts, each containing a
     'replies' list that may itself contain further nested comment
@@ -686,9 +812,6 @@ def build_comment_tree(queryset):
 
     for comment in queryset:
         data = CommentSerializer(comment).data
-        if comment.is_deleted:
-            data['content'] = '[deleted]'
-            data['images'] = []
         data['replies'] = []
         comment_map[comment.id] = data
 
