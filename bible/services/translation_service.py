@@ -2,6 +2,7 @@
 
 import logging
 
+from .apibible.registry import get_apibible_translation_listing
 from .dbt.client import get_default_dbt_client
 from .esv.registry import get_esv_translation_listing
 from .fileset_groups import group_filesets
@@ -69,7 +70,17 @@ class TranslationService:
                 if e['iso'].lower() == needle
             ]
 
-        merged = processed + sword_entries + esv_entries
+        apibible_entries = get_apibible_translation_listing()
+        if language_iso:
+            needle = language_iso.lower()
+            apibible_entries = [
+                e for e in apibible_entries
+                if e['iso'].lower() == needle
+            ]
+        merged = (
+            processed + sword_entries + esv_entries
+            + apibible_entries
+        )
         # Attach normalized option groups so clients can offer
         # version-level text/audio choices without parsing raw
         # fileset ids. ``filesets`` stays untouched for backwards

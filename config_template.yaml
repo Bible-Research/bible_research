@@ -5,7 +5,7 @@
 DATABASES:
   default:
     # --- Option 1: PostgreSQL (for development or production) ---
-    # Replace these values with your actual local or cloud database credentials.
+    # Replace these values with your local or cloud DB credentials.
     ENGINE: django.db.backends.postgresql
     NAME: bibledb
     USER: db_user
@@ -20,7 +20,8 @@ DATABASES:
     #   sslrootcert: "/path/to/your/ca.pem"
 
     # --- Option 2: SQLite (for simple, local-only development) ---
-    # To use this, comment out the PostgreSQL settings above and uncomment these.
+    # To use this, comment out the PostgreSQL settings above and
+    # uncomment these.
     # ENGINE: django.db.backends.sqlite3
     # NAME: 'db.sqlite3'
 
@@ -30,6 +31,11 @@ DEBUG: true
 
 # Your API key for the ESV Bible API.
 ESV_KEY: 'your_esv_api_key_goes_here'
+
+# Your API key for API.Bible (api.scripture.api.bible), used for
+# the NIV provider. Optional until an API.Bible key is issued —
+# ENGNIV_API requests return a provider error while unset.
+API_BIBLE_KEY: 'your_api_bible_key_goes_here'
 
 # Google Cloud TTS + audio bucket (public config, not secrets)
 GOOGLE_TTS_LANGUAGE_CODE: "lv-LV"
