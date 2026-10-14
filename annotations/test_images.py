@@ -514,6 +514,88 @@ class ImageDeleteAPITest(TestCase):
         )
         mock_blob.delete.assert_called_once()
 
+    def _make_comment_image(self):
+        """Image attached to a comment by another user.
+
+        Comment-attached images have note=NULL (XOR FK), so the
+        parent note is only reachable via image.comment.note.
+        """
+        comment = Comment.objects.create(
+            user=self.other,
+            note=self.note,
+            content="Comment with attached image",
+        )
+        return Image.objects.create(
+            comment=comment,
+            uploaded_by=self.other,
+            storage_url=(
+                "gs://test-bucket/originals"
+                "/IMG_CMNTDEL00001/source.png"
+            ),
+        )
+
+    def test_note_owner_can_delete_comment_image(self):
+        """Note owner may delete an image another user attached
+        via a comment on the owner's note (issue #56)."""
+        image = self._make_comment_image()
+        self.client.force_authenticate(user=self.owner)
+        mock_blob = MagicMock()
+        mock_gcs_client = MagicMock()
+        mock_gcs_client.bucket.return_value.blob.return_value = (
+            mock_blob
+        )
+        with patch(
+            "annotations.services.image_storage._get_client",
+            return_value=mock_gcs_client,
+        ):
+            resp = self.client.delete(
+                f"/api/v1/images/{image.id}/"
+            )
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(
+            Image.objects.filter(pk=image.id).exists()
+        )
+        mock_blob.delete.assert_called_once()
+
+    def test_comment_author_can_delete_comment_image(self):
+        """The comment author (uploader) may delete their image."""
+        image = self._make_comment_image()
+        self.client.force_authenticate(user=self.other)
+        mock_blob = MagicMock()
+        mock_gcs_client = MagicMock()
+        mock_gcs_client.bucket.return_value.blob.return_value = (
+            mock_blob
+        )
+        with patch(
+            "annotations.services.image_storage._get_client",
+            return_value=mock_gcs_client,
+        ):
+            resp = self.client.delete(
+                f"/api/v1/images/{image.id}/"
+            )
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(
+            Image.objects.filter(pk=image.id).exists()
+        )
+
+    def test_unrelated_user_cannot_delete_comment_image(self):
+        """A user unrelated to note and comment gets 403."""
+        image = self._make_comment_image()
+        third = User.objects.create_user(
+            username="img_del_third",
+            email="img_del_third@example.com",
+            password="pass",
+        )
+        self.client.force_authenticate(user=third)
+        resp = self.client.delete(f"/api/v1/images/{image.id}/")
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(
+            Image.objects.filter(pk=image.id).exists()
+        )
+
 
 class CommentInlineImagesTest(TestCase):
     """Tests for images inlined in the comment tree response."""
