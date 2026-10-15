@@ -189,9 +189,7 @@ class ProdAuthStackTest(TestCase):
             if 'DeviceAndCountryMiddleware' not in mw
         ]
     )
-    def test_default_permission_denies_when_unauthenticated(
-        self,
-    ):
+    def test_default_permission_denies_when_unauthenticated(self):
         """With the device middleware removed, an anonymous
         request stays unauthenticated and the patched prod
         DEFAULT_PERMISSION_CLASSES (IsAuthenticated +

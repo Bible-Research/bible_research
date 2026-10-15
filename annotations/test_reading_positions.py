@@ -115,6 +115,9 @@ class ReadingPositionApiTest(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
+        self.assertEqual(
+            set(data), {'John', 'Genesis', 'Nonexistent'}
+        )
         self.assertEqual(data['John'], {'chapter': 3, 'verse': 16})
         self.assertEqual(
             data['Genesis'], {'chapter': 1, 'verse': 1}
