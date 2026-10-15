@@ -10,6 +10,15 @@ class DeviceAndCountryMiddleware:
     and country information from Cloudflare headers or IP address.
     """
 
+    # Safe-method reads on these prefixes must stay truly anonymous:
+    # the viewsets expose public content to unauthenticated callers,
+    # so no device user is provisioned for them (issue #9).
+    PUBLIC_READ_PREFIXES = (
+        '/api/v1/bible',
+        '/api/v1/notes',
+        '/api/v1/tags',
+    )
+
     def __init__(self, get_response):
         self.get_response = get_response
 
@@ -19,11 +28,17 @@ class DeviceAndCountryMiddleware:
         self.primary_language(request)
 
         path = request.path
-        auto_authentication = not request.user.is_authenticated \
-            or not (path.startswith('/admin')
-                    or path.startswith('/api/v1/bible'))
+        is_public_read = (
+            request.method in ('GET', 'HEAD', 'OPTIONS')
+            and path.startswith(self.PUBLIC_READ_PREFIXES)
+        )
+        should_auto_authenticate = (
+            not request.user.is_authenticated
+            and not path.startswith('/admin')
+            and not is_public_read
+        )
 
-        if auto_authentication:
+        if should_auto_authenticate:
             self.auto_authenticate(request)
 
         print(f"User: {request.user}")
@@ -63,11 +78,13 @@ class DeviceAndCountryMiddleware:
             # The header format is typically like: en-US,en;q=0.9,fr;q=0.8
             # Split by comma to get each language preference
             for lang_pref in accept_language_header.split(','):
-                # Split by semicolon to separate language code from quality value
+                # Split by semicolon to separate the language
+                # code from the quality value
                 parts = lang_pref.strip().split(';')
                 lang_code = parts[0].strip()
 
-                # Get quality factor if present (defaults to 1.0 if not specified)
+                # Get quality factor if present
+                # (defaults to 1.0 if not specified)
                 quality = 1.0
                 if len(parts) > 1 and parts[1].startswith('q='):
                     try:

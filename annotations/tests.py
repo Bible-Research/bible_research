@@ -2,7 +2,7 @@ import datetime
 from unittest import expectedFailure
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.test import APIRequestFactory, APIClient
@@ -1610,6 +1610,142 @@ class NoteAnonymousAccessTest(TestCase):
         self.assertIn(self.public_note.id, ids)
         self.assertIn(self.private_note.id, ids)
 
+    def test_anonymous_is_owner_false(self):
+        """is_owner is false in anonymous retrieve and list
+        payloads (issue #9)."""
+        resp = self.client.get(
+            f'{self.LIST_URL}{self.public_note.id}/'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(resp.json()['is_owner'], False)
+        results = self.client.get(self.LIST_URL).json()['results']
+        self.assertTrue(results)
+        for note in results:
+            self.assertIs(note['is_owner'], False)
+
+    def test_is_owner_false_for_authenticated_non_owner(self):
+        """A logged-in user viewing someone else's shared
+        public note gets is_owner false."""
+        User = get_user_model()
+        other = User.objects.create_user(
+            username='not_the_owner',
+            email='not_the_owner@example.com',
+            password='pass',
+        )
+        self.client.force_authenticate(user=other)
+        resp = self.client.get(
+            f'{self.LIST_URL}{self.public_note.id}/'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(resp.json()['is_owner'], False)
+
+    def test_is_owner_true_for_owner(self):
+        """The owner sees is_owner true on their own note."""
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get(
+            f'{self.LIST_URL}{self.public_note.id}/'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(resp.json()['is_owner'], True)
+
+
+class TagAnonymousAccessTest(TestCase):
+    """
+    Anonymous /tags/ requests (issue #9): retrieve exposes a
+    tag only when it carries at least one public note, list
+    returns an empty array, and writes are rejected with
+    401/403.
+    """
+
+    BASE_URL = '/api/v1/tags/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='anon_tags_owner',
+            email='anon_tags@example.com',
+            password='pass',
+        )
+        self.public_tag = Tag.objects.create(
+            user=self.user,
+            name='SharedTag',
+        )
+        self.private_tag = Tag.objects.create(
+            user=self.user,
+            name='PrivateTag',
+        )
+        Note.objects.create(
+            user=self.user,
+            tag=self.public_tag,
+            note_text='public note',
+            public=True,
+            tag_position=1,
+        )
+        Note.objects.create(
+            user=self.user,
+            tag=self.private_tag,
+            note_text='private note',
+            public=False,
+            tag_position=1,
+        )
+        # Unauthenticated client on purpose — do NOT
+        # force_authenticate.
+        self.client = APIClient()
+
+    def test_anonymous_retrieve_tag_with_public_notes(self):
+        """GET /tags/{id}/ -> 200 when the tag has public notes."""
+        resp = self.client.get(
+            f'{self.BASE_URL}{self.public_tag.id}/'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['id'], self.public_tag.id)
+
+    def test_anonymous_retrieve_private_only_tag_404(self):
+        """Tags whose notes are all private stay invisible."""
+        resp = self.client.get(
+            f'{self.BASE_URL}{self.private_tag.id}/'
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_anonymous_list_returns_empty(self):
+        """GET /tags/ anonymous -> 200 with an empty array."""
+        resp = self.client.get(self.BASE_URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), [])
+
+    def test_anonymous_create_rejected(self):
+        """POST /tags/ anonymous -> 401/403, nothing saved."""
+        resp = self.client.post(
+            self.BASE_URL,
+            {'name': 'AnonTag'},
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertFalse(
+            Tag.objects.filter(name='AnonTag').exists()
+        )
+
+    def test_anonymous_update_rejected(self):
+        """PATCH on a shared tag anonymous -> 401/403."""
+        resp = self.client.patch(
+            f'{self.BASE_URL}{self.public_tag.id}/',
+            {'name': 'hijacked'},
+            format='json',
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.public_tag.refresh_from_db()
+        self.assertEqual(self.public_tag.name, 'SharedTag')
+
+    def test_anonymous_delete_rejected(self):
+        """DELETE on a shared tag anonymous -> 401/403."""
+        resp = self.client.delete(
+            f'{self.BASE_URL}{self.public_tag.id}/'
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertTrue(
+            Tag.objects.filter(id=self.public_tag.id).exists()
+        )
+
 
 class TestPartialReordering(TestCase):
     """Tests for partial note reordering with DB-level uniqueness."""
@@ -3027,3 +3163,84 @@ class TagDeleteViewTest(TestCase):
         self.assertEqual(resp.json()['note_count'], 1)
         self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
         self.assertTrue(Tag.objects.filter(id=child.id).exists())
+
+
+# conftest.py's MIDDLEWARE plus DeviceAndCountryMiddleware, which
+# the pytest settings strip so anonymous tests see a real
+# AnonymousUser.
+DEVICE_AUTH_MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'bible_research.middleware.DeviceAndCountryMiddleware',
+]
+
+
+@override_settings(MIDDLEWARE=DEVICE_AUTH_MIDDLEWARE)
+class DeviceAndCountryMiddlewareTest(TestCase):
+    """
+    Covers the auto-authentication scoping fixed for issue #9:
+    safe reads on public prefixes stay anonymous, non-safe
+    methods still auto-provision a device user, and an already
+    session-authenticated request is never re-logged-in as a
+    phantom device user (the old `or`-bug).
+    """
+
+    def setUp(self):
+        self.User = get_user_model()
+        self.user = self.User.objects.create_user(
+            username='real_user',
+            email='real@example.com',
+            password='pass',
+        )
+        self.client = APIClient()
+
+    def test_anonymous_get_notes_creates_no_user(self):
+        """GET /api/v1/notes/ anonymous must stay anonymous."""
+        resp = self.client.get('/api/v1/notes/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.User.objects.count(), 1)
+
+    def test_anonymous_get_tags_creates_no_user(self):
+        """GET /api/v1/tags/ anonymous must stay anonymous."""
+        resp = self.client.get('/api/v1/tags/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.User.objects.count(), 1)
+
+    def test_anonymous_post_notes_still_autoprovisions(self):
+        """Non-safe methods keep device auto-provisioning so
+        existing clients can write notes without a login."""
+        resp = self.client.post(
+            '/api/v1/notes/',
+            {'note_text': 'device note', 'tag': None},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(self.User.objects.count(), 2)
+        note = Note.objects.get(note_text='device note')
+        self.assertNotEqual(note.user, self.user)
+        self.assertTrue(note.user.username.endswith('Device'))
+
+    def test_session_user_not_swapped_for_device_user(self):
+        """Regression for the `or`-bug: a session-authenticated
+        request used to be re-logged-in as a phantom device
+        user. The private note must remain visible, proving
+        the real identity survived."""
+        Note.objects.create(
+            user=self.user,
+            note_text='private note',
+            public=False,
+            tag_position=1,
+        )
+        self.client.login(username='real_user', password='pass')
+        resp = self.client.get('/api/v1/notes/')
+        self.assertEqual(resp.status_code, 200)
+        texts = [
+            n['note_text'] for n in resp.json()['results']
+        ]
+        self.assertIn('private note', texts)
+        self.assertEqual(self.User.objects.count(), 1)

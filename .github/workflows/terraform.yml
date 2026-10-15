@@ -19,6 +19,9 @@ permissions:
 env:
   GCP_PROJECT_ID: bible-research-489314
   TF_VAR_region: europe-west3
+  # Repo variable ALERT_EMAIL_ADDRESS (Settings > Variables) feeds the
+  # monitoring alert channel; unset means those resources are skipped.
+  TF_VAR_alert_email_address: ${{ vars.ALERT_EMAIL_ADDRESS }}
   WIF_PROVIDER: projects/670506724494/locations/global/workloadIdentityPools/github-actions/providers/github
   DEPLOY_SA: github-deployer@bible-research-489314.iam.gserviceaccount.com
 
