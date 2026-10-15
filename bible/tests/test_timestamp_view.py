@@ -1,9 +1,18 @@
 import pytest
 from unittest.mock import patch
-from rest_framework import status
-from rest_framework.test import APIRequestFactory
 
+from django.contrib.auth import get_user_model
+from django.urls import reverse
+from google.api_core import exceptions as gcs_exceptions
+from rest_framework import status
+from rest_framework.test import APIClient, APIRequestFactory
+
+from bible.services.apibible.registry import APIBIBLE_TRANSLATIONS
 from bible.views import AudioTimestampView
+
+AUDIO_BIBLE_ID = (
+    APIBIBLE_TRANSLATIONS['ENGNIV_API']['audio_bible_id']
+)
 
 
 class FakeProviderError(Exception):
@@ -190,3 +199,225 @@ def test_get_timestamps_unknown_book(factory):
 
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert 'Unknown book' in response.data['error']
+
+
+# ------------------------------------------------------------------
+# Real-URL tests: APIClient + reverse('audio-timestamps')
+# ------------------------------------------------------------------
+
+
+@pytest.fixture
+def auth_client(db):
+    user, _ = get_user_model().objects.get_or_create(
+        username='tsview'
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_tts_config')
+@patch('bible.views.gcs.read_timestamps_json')
+def test_gcs_not_found_returns_404(
+    mock_read_ts, mock_tts_config, auth_client
+):
+    """A missing GCS timestamps object is a 404 — the most likely
+    real failure mode for freshly generated audio.
+
+    FIXME: this branch returns a bare ``error`` body with no
+    ``error_code``, breaking the error contract the React app
+    branches on (prod bug in ``AudioTimestampView``).
+    """
+    mock_tts_config.return_value = {
+        'voice_name': 'lv-LV-Chirp3-HD-Sadachbia',
+    }
+    mock_read_ts.side_effect = gcs_exceptions.NotFound('missing')
+
+    response = auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'LVSGLU8C1DA',
+            'book': 'John',
+            'chapter': '3',
+        },
+    )
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    body = response.json()
+    assert set(body) == {'error'}
+    assert body['error'] == (
+        'Timestamps not yet generated for this chapter.'
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    'audio_payload',
+    [
+        {'audio_url': 'https://x/JHN.3.mp3', 'timecodes': []},
+        {'audio_url': 'https://x/JHN.3.mp3'},
+    ],
+    ids=['empty-timecodes', 'missing-timecodes'],
+)
+@patch('bible.views.get_default_apibible_client')
+def test_apibible_empty_timecodes_returns_404(
+    mock_get_client, auth_client, audio_payload
+):
+    """An API.Bible audio chapter with no usable timecodes gets the
+    same 'not yet generated' 404 as a missing GCS artifact.
+
+    FIXME: bare ``error`` body — no ``error_code`` for clients
+    (same contract deviation as the GCS branch).
+    """
+    mock_client = mock_get_client.return_value
+    mock_client.get_chapter_audio.return_value = audio_payload
+
+    response = auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'ENGNIVC1DA',
+            'book': 'John',
+            'chapter': '3',
+        },
+    )
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    body = response.json()
+    assert set(body) == {'error'}
+    assert body['error'] == (
+        'Timestamps not yet generated for this chapter.'
+    )
+    mock_client.get_chapter_audio.assert_called_once_with(
+        AUDIO_BIBLE_ID, 'JHN', 3
+    )
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_apibible_client')
+def test_apibible_timecodes_normalized(
+    mock_get_client, auth_client
+):
+    """API.Bible timecodes are reshaped by ``_apibible_timecode``
+    into ``{verse_start, timestamp}`` with real int/float
+    values — covering both the ``verseId`` and ``verse_start``
+    source fields."""
+    mock_client = mock_get_client.return_value
+    mock_client.get_chapter_audio.return_value = {
+        'audio_url': 'https://x/JHN.3.mp3',
+        'timecodes': [
+            {'verseId': 'JHN.3.16', 'timestamp': '5.5'},
+            {'verse_start': '17', 'timestamp': '9'},
+        ],
+    }
+
+    response = auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'ENGNIVC1DA',
+            'book': 'John',
+            'chapter': '3',
+        },
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    body = response.json()
+    assert body['data'] == [
+        {'verse_start': 16, 'timestamp': 5.5},
+        {'verse_start': 17, 'timestamp': 9.0},
+    ]
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+def test_upstream_404_maps_to_not_found(
+    mock_get_client, auth_client
+):
+    """An upstream HTTP 404 from the DBT timestamps call reaches
+    the outer ``provider_error_response`` → 404 ``not_found``
+    (the full error contract, unlike the bare-error branches)."""
+    mock_get_client.return_value.get_timestamps.side_effect = (
+        FakeProviderError(404)
+    )
+
+    response = auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'ENGESVN2DA',
+            'book': 'John',
+            'chapter': '1',
+        },
+    )
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    body = response.json()
+    assert body['error_code'] == 'not_found'
+    assert body['error'] == 'Passage not found (HTTP 404)'
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_tts_config')
+@patch('bible.views.gcs.read_timestamps_json')
+def test_read_timestamps_json_positional_args(
+    mock_read_ts, mock_tts_config, auth_client
+):
+    """The abbr ``GLU8`` must canonicalize to ``LVSGLU8`` before
+    the GCS lookup — passing ``GLU8`` through would read a
+    nonexistent artifact prefix. ``mode`` stays ``'verse'`` for
+    non-chapter fileset ids."""
+    mock_tts_config.return_value = {
+        'voice_name': 'lv-LV-Chirp3-HD-Sadachbia',
+    }
+    mock_read_ts.return_value = {'data': []}
+
+    response = auth_client.get(
+        reverse('audio-timestamps'),
+        {'fileset_id': 'GLU8', 'book': 'John', 'chapter': '3'},
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    mock_tts_config.assert_called_once_with('LVSGLU8')
+    mock_read_ts.assert_called_once_with(
+        'LVSGLU8', 'JHN', 3,
+        'lv-LV-Chirp3-HD-Sadachbia',
+        mode='verse',
+    )
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_tts_config')
+@patch('bible.views.gcs.read_timestamps_json')
+def test_gcs_payload_strips_size_fields(
+    mock_read_ts, mock_tts_config, auth_client
+):
+    """Only the payload's ``data`` list is relayed — generator
+    bookkeeping fields (``duration_seconds``,
+    ``file_size_bytes``) must not leak into the response body."""
+    mock_tts_config.return_value = {
+        'voice_name': 'lv-LV-Chirp3-HD-Sadachbia',
+    }
+    mock_read_ts.return_value = {
+        'duration_seconds': 60.0,
+        'file_size_bytes': 1234567,
+        'data': [
+            {'verse_start': 1, 'timestamp': 0.0},
+            {'verse_start': 2, 'timestamp': 5.34},
+        ],
+    }
+
+    response = auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'LVSGLU8C1DA',
+            'book': 'John',
+            'chapter': '3',
+        },
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    body = response.json()
+    assert set(body) == {'data'}
+    assert body['data'] == [
+        {'verse_start': 1, 'timestamp': 0.0},
+        {'verse_start': 2, 'timestamp': 5.34},
+    ]

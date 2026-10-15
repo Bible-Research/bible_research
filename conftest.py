@@ -71,3 +71,128 @@ def pytest_configure():
             # Suppress warning about default secret key
             SECRET_KEY='a-test-secret-for-pytest',
         )
+
+
+# Exact copy of the production stack in
+# bible_research/settings.py:45-54 — includes CorsMiddleware and
+# DeviceAndCountryMiddleware, and (unlike the pytest settings
+# above) excludes CsrfViewMiddleware. Used only by tests that
+# opt in via the ``prod_auth_stack`` class decorator below.
+PROD_MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'bible_research.middleware.DeviceAndCountryMiddleware',
+]
+
+# Exact copy of the production stack in
+# bible_research/settings.py:357-371.
+PROD_REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
+        'bible_research.authentication.BearerTokenAuthentication',
+        (
+            'bible_research.authentication.'
+            'CSRFExemptSessionAuthentication'
+        ),
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+        'bible_research.permissions.GuestReadOnly',
+    ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+
+def prod_auth_stack(cls):
+    """
+    Class decorator: run a Django ``TestCase`` under the
+    production request/auth stack — prod ``MIDDLEWARE``
+    (including ``DeviceAndCountryMiddleware``) and prod
+    ``REST_FRAMEWORK`` authentication/permission defaults.
+
+    Usage notes:
+
+    - Instantiate ``APIClient()`` INSIDE the decorated test or
+      ``setUp``: ``BaseHandler.load_middleware`` reads
+      ``settings.MIDDLEWARE`` lazily per client, so the
+      override must already be active when the client is
+      created.
+    - The middleware auto-provisions and session-logs a
+      ``'<lang> <device>'`` user for every anonymous request
+      (derived from the User-Agent and Accept-Language
+      headers) — anonymous requests are NOT unauthenticated
+      under this stack; they fall back to the shared
+      read-only ``guest`` user only when provisioning fails.
+    - ``APIView.authentication_classes`` and
+      ``APIView.permission_classes`` were bound to concrete
+      lists at DRF import time (no ``REST_FRAMEWORK`` in the
+      pytest settings above), so ``override_settings`` alone
+      cannot rebind them — this decorator patches both class
+      attributes with the real prod classes, mirroring the
+      ``TestGuestReadOnly`` patch pattern in
+      ``annotations/tests.py``.
+    - Function views wrapped by ``@api_view`` (e.g.
+      ``users.views.current_user``) copied
+      ``APIView.authentication_classes`` onto their generated
+      ``WrappedAPIView`` at import time; to exercise prod auth
+      on such a view also patch
+      ``<view>.cls.authentication_classes`` locally (see
+      ``users/test_auth_stack.py``).
+    - ``DeviceAndCountryMiddleware`` prints on every request;
+      the decorator patches ``bible_research.middleware.print``
+      to keep test output quiet.
+
+    All imports are deferred to call time: ``conftest`` itself
+    is imported before ``pytest_configure`` configures Django
+    settings, so importing DRF at module level would raise
+    ``ImproperlyConfigured``.
+    """
+    from unittest.mock import patch
+
+    from django.test import override_settings
+    from rest_framework.authentication import TokenAuthentication
+    from rest_framework.permissions import IsAuthenticated
+    from rest_framework.views import APIView
+
+    from bible_research.authentication import (
+        BearerTokenAuthentication,
+        CSRFExemptSessionAuthentication,
+    )
+    from bible_research.permissions import GuestReadOnly
+
+    # Keep DeviceAndCountryMiddleware's per-request print()
+    # noise out of the captured test output. An explicit `new`
+    # is required: omitting it would make patch inject a mock
+    # into every decorated test method as an extra argument.
+    cls = patch(
+        'bible_research.middleware.print',
+        new=lambda *args, **kwargs: None,
+        create=True,
+    )(cls)
+    # override_settings(REST_FRAMEWORK=...) does NOT rebind
+    # APIView class attributes bound at import time — patch
+    # them with the real prod classes.
+    cls = patch.object(
+        APIView,
+        'authentication_classes',
+        [
+            TokenAuthentication,
+            BearerTokenAuthentication,
+            CSRFExemptSessionAuthentication,
+        ],
+    )(cls)
+    cls = patch.object(
+        APIView,
+        'permission_classes',
+        [IsAuthenticated, GuestReadOnly],
+    )(cls)
+    cls = override_settings(
+        MIDDLEWARE=PROD_MIDDLEWARE,
+        REST_FRAMEWORK=PROD_REST_FRAMEWORK,
+    )(cls)
+    return cls

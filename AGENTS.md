@@ -93,7 +93,10 @@ can contain request URLs with credentials.
   (`Authorization: Bearer …`) and a CSRF-exempt session auth.
 - `DeviceAndCountryMiddleware` auto-provisions/authenticates users
   from device + language headers and falls back to a `guest` user —
-  anonymous requests are not necessarily unauthenticated.
+  anonymous requests are not necessarily unauthenticated. Exception:
+  safe-method reads (`GET`/`HEAD`/`OPTIONS`) on `/api/v1/bible`,
+  `/api/v1/notes`, `/api/v1/tags` stay truly anonymous (public
+  content, issue #9).
 - The shared `guest` account is read-only:
   `bible_research/permissions.py` `GuestReadOnly` (wired into
   `DEFAULT_PERMISSION_CLASSES` plus the image/reading-position
@@ -173,8 +176,47 @@ Test user accounts: `testuser`, `guest` — create via
 (pytest's in-memory DB creates what it needs per test).
 
 Known pre-existing failures on `main` (not regressions):
-`test_note_serializer`, `test_single_query_assertion`,
-`test_position_already_occupied`.
+`test_note_serializer`, `test_single_query_assertion` — both
+`@expectedFailure`.
+
+Known pinned prod bugs (FIXME-marked tests). Each pins current
+buggy behavior pending a product decision — these are latent
+code bugs, not test failures:
+
+- `annotations/test_reading_positions.py:179`
+  (`test_case_variant_books_create_separate_rows`) —
+  case-variant book names (`John` vs `john`) create duplicate
+  `ReadingPosition` rows (serializers.py:907 + case-sensitive
+  `unique_together`, models.py:460).
+- `annotations/test_tag_isolation.py:131`
+  (`test_duplicate_name_same_user`) — duplicate tag name with
+  NULL `parent_tag` silently creates a second row with 201
+  (`unique_together` at models.py:65 doesn't cover NULL
+  parent; no clean 400).
+- `annotations/test_note_isolation.py:231`
+  (`test_untagged_order_index`) — order-index endpoint filters
+  `tag_id` literally and never resolves the `untagged`
+  sentinel, returning an empty list for untagged notes
+  (views.py:1019 vs :590-592).
+- `annotations/test_images.py:947`
+  (`test_note_images_list_private_foreign_403`) —
+  `NoteImageViewSet._get_note` is unscoped: GET images on a
+  foreign PRIVATE note returns 403, revealing that the note
+  exists (vs comments' deliberate 404 at views.py:1344-1353).
+- `annotations/test_images.py:1033`
+  (`test_cascade_delete_orphans_gcs_blob`) — row-level CASCADE
+  delete of a note/comment leaves orphaned GCS blobs; no
+  `post_delete` receiver calls `delete_original`
+  (models.py:303-318).
+- `bible/tests/test_timestamp_view.py:228`
+  (`test_gcs_not_found_returns_404`) —
+  `gcs_exceptions.NotFound` → 404 returns a bare `{"error"}`
+  body with no `error_code` (views.py:398-407), breaking the
+  error/error_code contract.
+- `bible/tests/test_timestamp_view.py:270`
+  (`test_apibible_empty_timecodes_returns_404`) — API.Bible
+  empty timecodes → 404 likewise returns bare `{"error"}`
+  without `error_code` (views.py:430-439).
 
 ## Housekeeping
 
