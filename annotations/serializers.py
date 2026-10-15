@@ -169,6 +169,13 @@ class NoteSerializer(serializers.ModelSerializer):
             "to link to the note."
         )
     )
+    is_owner = serializers.SerializerMethodField(
+        read_only=True,
+        help_text=(
+            "True only when the request user is authenticated and "
+            "owns this note. Always false for anonymous readers."
+        ),
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -195,8 +202,18 @@ class NoteSerializer(serializers.ModelSerializer):
         model = Note
         fields = [
             'id', 'user', 'note_text', 'public', 'created_at',
-            'updated_at', 'tag', 'tag_position', 'verse_references'
+            'updated_at', 'tag', 'tag_position', 'verse_references',
+            'is_owner'
         ]
+
+    def get_is_owner(self, obj):
+        """True only when the request user owns this note."""
+        request = self.context.get('request')
+        return bool(
+            request
+            and request.user.is_authenticated
+            and obj.user_id == request.user.id
+        )
 
     def create(self, validated_data):
         """
