@@ -93,7 +93,10 @@ can contain request URLs with credentials.
   (`Authorization: Bearer …`) and a CSRF-exempt session auth.
 - `DeviceAndCountryMiddleware` auto-provisions/authenticates users
   from device + language headers and falls back to a `guest` user —
-  anonymous requests are not necessarily unauthenticated.
+  anonymous requests are not necessarily unauthenticated. Exception:
+  safe-method reads (`GET`/`HEAD`/`OPTIONS`) on `/api/v1/bible`,
+  `/api/v1/notes`, `/api/v1/tags` stay truly anonymous (public
+  content, issue #9).
 - The shared `guest` account is read-only:
   `bible_research/permissions.py` `GuestReadOnly` (wired into
   `DEFAULT_PERMISSION_CLASSES` plus the image/reading-position
@@ -180,11 +183,6 @@ Known pinned prod bugs (FIXME-marked tests). Each pins current
 buggy behavior pending a product decision — these are latent
 code bugs, not test failures:
 
-- `users/test_auth_stack.py:172`
-  (`test_session_user_replaced_by_device_user`) —
-  `DeviceAndCountryMiddleware` silently re-authenticates a
-  session user as the device user on non-`/admin`,
-  non-`/api/v1/bible` paths (middleware.py:22-27,135-140).
 - `annotations/test_reading_positions.py:179`
   (`test_case_variant_books_create_separate_rows`) —
   case-variant book names (`John` vs `john`) create duplicate

@@ -157,10 +157,11 @@ class ProdAuthStackTest(TestCase):
         # The denied write really stored nothing.
         self.assertFalse(ReadingPosition.objects.exists())
 
-    def test_session_user_replaced_by_device_user(self):
-        """Pin current behavior: a session-authenticated user
-        is silently re-authenticated as the device-derived
-        user by the middleware."""
+    def test_session_user_not_replaced_by_device_user(self):
+        """A session-authenticated user keeps their identity —
+        the middleware must not re-authenticate them as the
+        device-derived user (regression guard for #85, which
+        fixed the silent session-user replacement)."""
         real_user = self.User.objects.create_user(
             username='sessionuser', password='pass'
         )
@@ -169,18 +170,7 @@ class ProdAuthStackTest(TestCase):
         resp = self.client.get(ME_URL, **ANDROID_HEADERS)
 
         self.assertEqual(resp.status_code, 200)
-        # FIXME: DeviceAndCountryMiddleware (middleware.py:22-27)
-        # re-authenticates an already session-authenticated user
-        # as the device-derived '<lang> <device>' user on every
-        # path outside /admin and /api/v1/bible — the logged-in
-        # user is silently replaced. Suspected prod bug, flagged
-        # for a product decision; pinned here, not fixed.
-        self.assertNotEqual(
-            resp.json()['username'], 'sessionuser'
-        )
-        self.assertEqual(
-            resp.json()['username'], DEVICE_USERNAME
-        )
+        self.assertEqual(resp.json()['username'], 'sessionuser')
 
     @override_settings(
         MIDDLEWARE=[
