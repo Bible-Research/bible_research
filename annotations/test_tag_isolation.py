@@ -160,16 +160,14 @@ class TagIsolationTest(TestCase):
         resp = self.client.get(f'{self.BASE_URL}NOPE/')
         self.assertEqual(resp.status_code, 404)
 
-    def test_unauthenticated_list_uses_guest_scope(self):
-        """An anonymous request lists only the guest user's tags
-        (get_queryset's guest fallback, views.py:147-163).
-
-        Note: this is only reachable under the TEST stack —
-        prod's DeviceAndCountryMiddleware auto-authenticates
-        anonymous requests instead of leaving them anonymous.
-        """
+    def test_unauthenticated_list_returns_empty(self):
+        """An anonymous request gets 200 with an empty list —
+        get_queryset returns no tags for anonymous `list`
+        (views.py:169); anonymous `retrieve` is open only for
+        tags carrying a public note (:165-168). In prod the
+        middleware keeps safe reads on /api/v1/tags truly
+        anonymous rather than provisioning a device user."""
         client = APIClient()
         resp = client.get(self.BASE_URL)
         self.assertEqual(resp.status_code, 200)
-        names = {item['name'] for item in resp.json()}
-        self.assertEqual(names, {'Guest tag'})
+        self.assertEqual(resp.json(), [])
