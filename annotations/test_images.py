@@ -728,3 +728,329 @@ class CommentInlineImagesTest(TestCase):
         )
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.json()["images"], [])
+
+
+class CommentImageNestedScopingTest(TestCase):
+    """Nested-route scoping for CommentImageViewSet.
+
+    ``_get_comment`` filters Comment by BOTH ``comment_pk`` and
+    the URL's ``note_pk`` (views.py:1688-1693), so a comment
+    addressed under the wrong note must 404 even when that note
+    is accessible to the requester.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username="cimg_scope_owner",
+            email="cimg_scope_owner@example.com",
+            password="pass",
+        )
+        self.note_a = Note.objects.create(
+            user=self.owner,
+            note_text="Note A (holds no comments)",
+        )
+        self.note_b = Note.objects.create(
+            user=self.owner,
+            note_text="Note B (holds the comment)",
+        )
+        self.comment = Comment.objects.create(
+            user=self.owner,
+            note=self.note_b,
+            content="Comment living under note B",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.owner)
+
+    def _images_url(self, note_pk, comment_pk):
+        return (
+            f"/api/v1/notes/{note_pk}"
+            f"/comments/{comment_pk}/images/"
+        )
+
+    def test_comment_image_routes_wrong_note_404(self):
+        """Comment C lives under note B; addressing it via the
+        accessible note A must 404 on both GET and POST — the
+        note_pk in the URL does not match comment.note."""
+        url = self._images_url(self.note_a.id, self.comment.id)
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 404)
+        with _mock_bucket():
+            resp = self.client.post(
+                url,
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_comment_images_nonexistent_comment_404(self):
+        """A comment pk that does not exist under the note
+        404s on the nested images route."""
+        url = self._images_url(
+            self.note_a.id, "CMNT_DOESNOTEXIST0"
+        )
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 404)
+
+    @patch(
+        "annotations.services.image_storage.signed_image_url",
+        return_value="https://signed.example.com/img",
+    )
+    def test_comment_image_list(self, _mock_sign):
+        """GET nested images for a comment with 2 images → 200
+        with 2 items carrying the ImageSerializer keys."""
+        for i in (1, 2):
+            Image.objects.create(
+                comment=self.comment,
+                uploaded_by=self.owner,
+                storage_url=(
+                    f"gs://b/originals/x{i}/source.png"
+                ),
+                content_type="image/png",
+                size_bytes=100 + i,
+            )
+        resp = self.client.get(
+            self._images_url(self.note_b.id, self.comment.id)
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data), 2)
+        for item in data:
+            for key in (
+                "id", "storage_url", "signed_url",
+                "content_type", "size_bytes", "created_at",
+            ):
+                self.assertIn(key, item)
+            self.assertTrue(item["id"].startswith("IMG_"))
+            self.assertEqual(
+                item["signed_url"],
+                "https://signed.example.com/img",
+            )
+
+
+class GuestImageWriteTest(TestCase):
+    """The shared 'guest' account is read-only: writes → 403."""
+
+    def setUp(self):
+        self.guest = User.objects.create_user(
+            username="guest",
+            email="guest@example.com",
+            password="pass",
+        )
+        self.owner = User.objects.create_user(
+            username="guest_img_owner",
+            email="guest_img_owner@example.com",
+            password="pass",
+        )
+        self.note = Note.objects.create(
+            user=self.owner,
+            note_text="Note for guest image tests",
+        )
+        self.comment = Comment.objects.create(
+            user=self.owner,
+            note=self.note,
+            content="Comment for guest image tests",
+        )
+        self.image = Image.objects.create(
+            note=self.note,
+            uploaded_by=self.owner,
+            storage_url="gs://b/originals/x/source.png",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.guest)
+
+    def test_guest_comment_image_upload_403(self):
+        url = (
+            f"/api/v1/notes/{self.note.id}"
+            f"/comments/{self.comment.id}/images/"
+        )
+        with _mock_bucket():
+            resp = self.client.post(
+                url,
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(
+            Image.objects.filter(
+                comment=self.comment
+            ).exists()
+        )
+
+    def test_guest_image_destroy_403(self):
+        resp = self.client.delete(
+            f"/api/v1/images/{self.image.id}/"
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(
+            Image.objects.filter(pk=self.image.id).exists()
+        )
+
+
+class NoteImageEdgeCasesTest(TestCase):
+    """404/403 oracles, upload cap, response shape, GCS orphan."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username="nimg_edge_owner",
+            email="nimg_edge_owner@example.com",
+            password="pass",
+        )
+        self.other = User.objects.create_user(
+            username="nimg_edge_other",
+            email="nimg_edge_other@example.com",
+            password="pass",
+        )
+        self.note = Note.objects.create(
+            user=self.owner,
+            note_text="Private note for edge tests",
+        )
+        self.client = APIClient()
+
+    def _images_url(self, note_pk):
+        return f"/api/v1/notes/{note_pk}/images/"
+
+    def test_note_images_nonexistent_note_404(self):
+        """GET /notes/<missing>/images/ → 404 (_get_note)."""
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.get(
+            self._images_url("NOTDOESNOTEXIST01")
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_image_destroy_nonexistent_404(self):
+        """DELETE /images/<missing>/ → 404."""
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.delete(
+            "/api/v1/images/IMG_DOESNOTEXIST/"
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_upload_to_foreign_public_note_403(self):
+        """Public notes are readable by everyone, but only the
+        owner may upload: create checks note.user != user
+        (views.py:1608-1611)."""
+        self.note.public = True
+        self.note.save(update_fields=["public"])
+        self.client.force_authenticate(user=self.other)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._images_url(self.note.id),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(Image.objects.count(), 0)
+
+    def test_note_images_list_private_foreign_403(self):
+        """PIN: GET images on another user's PRIVATE note → 403.
+
+        FIXME: existence oracle — NoteImageViewSet._get_note is
+        unscoped (views.py:1587-1590), so list() reaches the
+        accessibility check and raises PermissionDenied (403),
+        revealing the note exists. CommentViewSet._get_note
+        scopes to get_accessible_notes_qs and 404s instead
+        (views.py:1344-1353). Flagged for product decision.
+        """
+        self.client.force_authenticate(user=self.other)
+        resp = self.client.get(self._images_url(self.note.id))
+        self.assertEqual(resp.status_code, 403)
+        # A truly nonexistent note 404s — the 403 above leaks
+        # that THIS note exists.
+        resp = self.client.get(
+            self._images_url("NOTDOESNOTEXIST01")
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    @override_settings(IMAGE_MAX_PER_NOTE=2)
+    def test_note_image_cap_and_locked_recheck(self):
+        """At IMAGE_MAX_PER_NOTE images the next POST → 400 with
+        a 'file' error (cap lookup views.py:1615-1617). The
+        locked re-check inside the transaction (:1640-1647)
+        shares this assertion — bypassing it needs real
+        concurrency and is not testable here."""
+        for i in (1, 2):
+            Image.objects.create(
+                note=self.note,
+                uploaded_by=self.owner,
+                storage_url=(
+                    f"gs://b/originals/c{i}/source.png"
+                ),
+            )
+        self.client.force_authenticate(user=self.owner)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._images_url(self.note.id),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("file", resp.data)
+        self.assertEqual(Image.objects.count(), 2)
+
+    @patch(
+        "annotations.services.image_storage.signed_image_url",
+        return_value="https://signed.example.com/img",
+    )
+    def test_create_response_shape(self, _mock_sign):
+        """201 body pins the ImageSerializer contract."""
+        self.client.force_authenticate(user=self.owner)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._images_url(self.note.id),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        data = resp.data
+        self.assertEqual(
+            set(data),
+            {
+                "id", "storage_url", "signed_url",
+                "content_type", "size_bytes",
+                "comment", "note", "uploaded_by",
+                "created_at",
+            },
+        )
+        self.assertTrue(data["id"].startswith("IMG_"))
+        self.assertTrue(
+            data["storage_url"].startswith("gs://")
+        )
+        self.assertEqual(
+            data["signed_url"],
+            "https://signed.example.com/img",
+        )
+        self.assertEqual(data["content_type"], "image/png")
+        self.assertEqual(data["size_bytes"], len(_SMALL_PNG))
+        self.assertEqual(data["note"], self.note.id)
+        self.assertIsNone(data["comment"])
+        self.assertIsNotNone(data["created_at"])
+
+    def test_cascade_delete_orphans_gcs_blob(self):
+        """PIN: deleting a note removes its Image rows via
+        row-level CASCADE but never calls delete_original —
+        the GCS blob is orphaned.
+
+        FIXME: CODE bug — no post_delete receiver exists for
+        Image (models.py:303-318 CASCADE FKs); the only
+        delete_original callers are the view rollback and
+        destroy paths (views.py:1657, 1763, 1817). Flagged for
+        product decision; do not fix here.
+        """
+        self.client.force_authenticate(user=self.owner)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._images_url(self.note.id),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        image_id = resp.data["id"]
+
+        with patch(
+            "annotations.views.delete_original"
+        ) as mock_delete:
+            self.note.delete()
+        mock_delete.assert_not_called()
+        self.assertFalse(
+            Image.objects.filter(pk=image_id).exists()
+        )
