@@ -210,12 +210,22 @@ The project uses two special accounts:
 ### 4. Permission System
 
 **Access Control**:
-- **Authenticated users**: See their own tags and notes
-- **Unauthenticated users**: See guest user's tags and public notes
+- **Authenticated users**: See their own tags and notes, plus
+  every public note
+- **Unauthenticated users**: See public notes only; `list` on
+  tags returns `[]`, and a tag can be retrieved only when it
+  carries at least one public note
 - **Shared `guest` account**: Read-only — reads allowed, writes
   rejected with 403 (`GuestReadOnly` in
   `bible_research/permissions.py`)
 - **Note visibility**: Controlled by `public` boolean field
+- **Device auto-provisioning**: `DeviceAndCountryMiddleware`
+  auto-authenticates anonymous requests as a per-device user —
+  except for `/admin` and safe-method reads (`GET`/`HEAD`/
+  `OPTIONS`) on `/api/v1/bible`, `/api/v1/notes` and
+  `/api/v1/tags`, which stay truly anonymous. Non-safe methods
+  (e.g. `POST /api/v1/notes/`) still auto-provision so existing
+  clients can write without an explicit login.
 
 ---
 
@@ -611,6 +621,18 @@ GET /api/v1/tags/
 Authorization: Token <your-token>
 ```
 
+Anonymous callers get `200` with an empty array (`[]`).
+
+#### Get Tag by ID
+```
+GET /api/v1/tags/{tag_id}/
+```
+
+Works without authentication only for tags that carry at least
+one public note (share pages need the tag name); every other tag
+returns `404` to anonymous callers. Authenticated users can only
+retrieve their own tags.
+
 #### Create Tag
 ```
 POST /api/v1/tags/
@@ -694,10 +716,15 @@ Authorization: Token <your-token>
 
 Anonymous callers (no `Authorization` header) may read
 public notes; all other note operations require
-authentication (401/403 otherwise). In production the
-`DeviceAndCountryMiddleware` usually auto-provisions a
-device (or `guest`) user, so truly anonymous requests are
-rare — the viewset still enforces the contract explicitly.
+authentication (401/403 otherwise). Safe-method reads on
+`/api/v1/notes` are exempt from `DeviceAndCountryMiddleware`
+auto-provisioning, so these requests arrive as a real
+`AnonymousUser` — while `POST`/`PUT`/`PATCH`/`DELETE` still
+auto-provision a per-device user that retains write access.
+Note payloads include a read-only `is_owner` boolean: `true`
+only when the request user is authenticated and owns the
+note, always `false` for anonymous readers — the frontend
+uses it to decide whether a shared note is editable.
 
 **Query Parameters**:
 - `tag_id` (required): Tag ID to filter notes. The sentinel
@@ -800,6 +827,7 @@ Content-Type: application/json
       "text": "For God so loved the world..."
     }
   ],
+  "is_owner": true,
   "created_at": "2025-12-28T03:51:55Z",
   "updated_at": "2025-12-28T03:51:55Z"
 }

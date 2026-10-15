@@ -116,16 +116,31 @@ class TagViewSet(viewsets.ModelViewSet):
     """
     API endpoint that allows tags to be created, viewed, updated, or deleted.
 
-    Users can only see and manage their own tags.
+    Authenticated users see and manage their own tags. Anonymous
+    users can retrieve a tag only when it carries at least one
+    public note (share pages, issue #9).
     """
     serializer_class = TagSerializer
+
+    def get_permissions(self):
+        # Reads are open: get_queryset scopes anonymous
+        # requests to tags carrying at least one public note.
+        # Writes always require authentication — explicitly,
+        # not just via DeviceAndCountryMiddleware
+        # auto-provisioning — and are denied for the shared
+        # read-only 'guest' account.
+        if self.action in ('list', 'retrieve'):
+            return [AllowAny()]
+        return [IsAuthenticated(), GuestReadOnly()]
 
     def get_queryset(self):
         """
         Returns the queryset of tags that the current user
         has access to.
         Authenticated users see their own tags.
-        Unauthenticated users see the guest user's tags.
+        Anonymous users may retrieve only tags that have at
+        least one public note; every other anonymous action
+        sees an empty queryset.
         """
         user = self.request.user
         logger.info(
@@ -144,23 +159,14 @@ class TagViewSet(viewsets.ModelViewSet):
             )
             return queryset
 
-        # For unauthenticated users, return guest user's tags
-        try:
-            guest_user = User.objects.get(username='guest')
-            queryset = Tag.objects.filter(
-                user=guest_user
-            ).order_by('name')
-            logger.debug(
-                f"Returning {queryset.count()} tags "
-                f"for guest user"
-            )
-            return queryset
-        except User.DoesNotExist:
-            logger.warning(
-                "Guest user does not exist, "
-                "returning empty queryset"
-            )
-            return Tag.objects.none()
+        # Anonymous retrieve exposes a tag only when at least
+        # one of its notes is public, so share pages can render
+        # the tag name without leaking private-only tags.
+        if self.action == 'retrieve':
+            return Tag.objects.filter(
+                notes__public=True
+            ).distinct()
+        return Tag.objects.none()
 
     def perform_create(self, serializer):
         """
