@@ -31,10 +31,11 @@ resource "google_monitoring_alert_policy" "bible_audio_bucket_size" {
     condition_threshold {
       filter = join(" AND ", [
         "resource.type = \"gcs_bucket\"",
-        "resource.labels.bucket_name = " +
+        join(" = ", [
+          "resource.labels.bucket_name",
           "\"${google_storage_bucket.bible_audio.name}\"",
-        "metric.type = " +
-          "\"storage.googleapis.com/storage/total_bytes\"",
+        ]),
+        "metric.type = \"storage.googleapis.com/storage/total_bytes\"",
       ])
       comparison      = "COMPARISON_GT"
       threshold_value = var.audio_bucket_size_alert_bytes
@@ -49,8 +50,7 @@ resource "google_monitoring_alert_policy" "bible_audio_bucket_size" {
     }
   }
 
-  notification_channels =
-    google_monitoring_notification_channel.email[*].id
+  notification_channels = google_monitoring_notification_channel.email[*].id
 
   alert_strategy {
     auto_close = "604800s"
