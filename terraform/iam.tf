@@ -203,6 +203,32 @@ resource "google_project_iam_member" "github_deployer_project_iam_admin" {
   ]
 }
 
+# ``alertPolicyEditor`` + ``notificationChannelEditor`` together cover
+# the google_monitoring_* resources in monitoring.tf. The broader
+# ``monitoring.editor`` would also let CI manage dashboards and uptime
+# checks, which Terraform does not touch.
+resource "google_project_iam_member" "github_deployer_monitoring_alerts" {
+  project = var.project_id
+  role    = "roles/monitoring.alertPolicyEditor"
+  member  = "serviceAccount:${google_service_account.github_deployer.email}"
+
+  depends_on = [
+    google_project_service.enabled,
+    google_service_account.github_deployer,
+  ]
+}
+
+resource "google_project_iam_member" "github_deployer_monitoring_channels" {
+  project = var.project_id
+  role    = "roles/monitoring.notificationChannelEditor"
+  member  = "serviceAccount:${google_service_account.github_deployer.email}"
+
+  depends_on = [
+    google_project_service.enabled,
+    google_service_account.github_deployer,
+  ]
+}
+
 resource "google_project_iam_member" "appspot_secret_accessor" {
   project = var.project_id
   role    = "roles/secretmanager.secretAccessor"
