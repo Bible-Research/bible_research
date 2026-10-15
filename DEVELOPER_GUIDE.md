@@ -225,7 +225,10 @@ The project uses two special accounts:
   `OPTIONS`) on `/api/v1/bible`, `/api/v1/notes` and
   `/api/v1/tags`, which stay truly anonymous. Non-safe methods
   (e.g. `POST /api/v1/notes/`) still auto-provision so existing
-  clients can write without an explicit login.
+  clients can write without an explicit login. Because anonymous
+  callers never get a user on these paths, every read view under
+  them must opt out of the `IsAuthenticated` default — the
+  `bible` views do so via `permission_classes = [AllowAny]`.
 
 ---
 

@@ -5,6 +5,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from google.api_core import exceptions as gcs_exceptions
 from rest_framework import status
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -171,6 +172,8 @@ class BiblePassageView(APIView):
         # LV audio:
         /api/v1/bible/?passage=Luke+20&fileset_id=GLU8&response_format=audio
     """
+
+    permission_classes = [AllowAny]
 
     def get(self, request, format=None):
         passage = request.query_params.get('passage')
@@ -345,6 +348,8 @@ class BiblePassageView(APIView):
 class AudioTimestampView(APIView):
     """Return audio timestamps for a chapter."""
 
+    permission_classes = [AllowAny]
+
     def get(self, request, format=None):
         fileset_id = request.query_params.get('fileset_id')
         book = request.query_params.get('book')
@@ -469,6 +474,8 @@ class AudioTimestampView(APIView):
 
 class CopyrightView(APIView):
     """Return copyright info for a Bible translation."""
+
+    permission_classes = [AllowAny]
 
     def get(self, request, format=None):
         bible_id = request.query_params.get('bible_id')
@@ -628,6 +635,8 @@ class BibleSearchView(APIView):
         - DBT search: ?query=Jesus&fileset_id=ENGESV
         - SWORD search: ?query=faith&fileset_id=LVSGLU8
     """
+
+    permission_classes = [AllowAny]
 
     def get(self, request, format=None):
         query = request.query_params.get('query')
@@ -902,6 +911,8 @@ class TranslationListView(APIView):
         /api/v1/translations/
         /api/v1/translations/?language_iso=eng
     """
+
+    permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
         language_iso = request.query_params.get('language_iso')
