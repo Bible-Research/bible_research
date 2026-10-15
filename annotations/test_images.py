@@ -774,12 +774,13 @@ class CommentImageNestedScopingTest(TestCase):
         url = self._images_url(self.note_a.id, self.comment.id)
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 404)
-        with _mock_bucket():
-            resp = self.client.post(
-                url,
-                {"file": _make_file()},
-                format="multipart",
-            )
+        # _get_comment 404s before any GCS call (views.py:1688-
+        # 1693 vs :1735), so no bucket mock is needed here.
+        resp = self.client.post(
+            url,
+            {"file": _make_file()},
+            format="multipart",
+        )
         self.assertEqual(resp.status_code, 404)
 
     def test_comment_images_nonexistent_comment_404(self):
@@ -1034,7 +1035,10 @@ class NoteImageEdgeCasesTest(TestCase):
         Image (models.py:303-318 CASCADE FKs); the only
         delete_original callers are the view rollback and
         destroy paths (views.py:1657, 1763, 1817). Flagged for
-        product decision; do not fix here.
+        product decision; do not fix here. The pin patches
+        delete_original at both seams — the views alias and
+        its image_storage origin — so a signal-based fix
+        trips it too.
         """
         self.client.force_authenticate(user=self.owner)
         with _mock_bucket():
@@ -1048,9 +1052,12 @@ class NoteImageEdgeCasesTest(TestCase):
 
         with patch(
             "annotations.views.delete_original"
-        ) as mock_delete:
+        ) as mock_view_delete, patch(
+            "annotations.services.image_storage.delete_original"
+        ) as mock_svc_delete:
             self.note.delete()
-        mock_delete.assert_not_called()
+        mock_view_delete.assert_not_called()
+        mock_svc_delete.assert_not_called()
         self.assertFalse(
             Image.objects.filter(pk=image_id).exists()
         )

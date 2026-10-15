@@ -234,6 +234,7 @@ class NoteIsolationTest(TestCase):
         # sentinel, so the index silently returns empty even
         # though the user has untagged notes. Pinned as-is;
         # product decision needed on intended behaviour.
+        self.assertEqual(resp.json(), [])
         self.assertNotIn(tagged.id, ids)
         self.assertNotIn(untagged.id, ids)
 

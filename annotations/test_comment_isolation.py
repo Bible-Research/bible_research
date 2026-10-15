@@ -11,8 +11,8 @@
   ``note_ids`` while authenticated, replies included in the
   count, and the 200-id boundary.
 """
-from django.test import TestCase
 from django.contrib.auth import get_user_model
+from django.test import TestCase
 from rest_framework.test import APIClient
 
 from annotations.models import Comment, Note
@@ -78,6 +78,13 @@ class CommentCrossNoteTest(TestCase):
         """GET /notes/<A>/comments/<C_B>/ -> 404."""
         resp = self.client.get(self._wrong_url())
         self.assertEqual(resp.status_code, 404)
+        # Control: note A itself is accessible — its comments
+        # list returns 200, so the 404 above is not a
+        # note-level access denial.
+        resp = self.client.get(
+            f'/api/v1/notes/{self.note_a.id}/comments/'
+        )
+        self.assertEqual(resp.status_code, 200)
         # Control: the same comment resolves under its own note.
         resp = self.client.get(self._right_url())
         self.assertEqual(resp.status_code, 200)
