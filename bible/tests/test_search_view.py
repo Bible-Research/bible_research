@@ -1,44 +1,107 @@
 import pytest
 from unittest.mock import patch
+from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APIRequestFactory
+from rest_framework.test import APIClient
 
+from bible.services.apibible.registry import get_apibible_meta
 from bible.services.search_grouping import group_verses_by_book
-from bible.views import BibleSearchView
+
+
+SEARCH_URL = reverse('bible-search')
+APINIV_BIBLE_ID = get_apibible_meta('ENGNIV_API')['bible_id']
 
 
 @pytest.fixture
-def factory():
-    return APIRequestFactory()
+def client():
+    return APIClient()
 
 
 @pytest.mark.django_db
-def test_missing_query_param(factory):
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_search_hits_real_route(
+    mock_get_client, mock_is_sword, client
+):
+    """Smoke: ``reverse('bible-search')`` + a mocked provider →
+    200, proving URL wiring reaches ``BibleSearchView``."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {'data': []},
+        'meta': {'pagination': {'total': 0}},
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+def test_missing_query_param(client):
     """Missing query → 400 with descriptive error."""
-    request = factory.get(
-        '/fake-url/', {'fileset_id': 'ENGESV'}
-    )
-    response = BibleSearchView.as_view()(request)
+    response = client.get(SEARCH_URL, {'fileset_id': 'ENGESV'})
     assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert 'query' in response.data['error']
+    assert 'query' in response.json()['error']
 
 
 @pytest.mark.django_db
-def test_missing_fileset_id_param(factory):
+def test_missing_fileset_id_param(client):
     """Missing fileset_id → 400 with descriptive error."""
-    request = factory.get(
-        '/fake-url/', {'query': 'love'}
-    )
-    response = BibleSearchView.as_view()(request)
+    response = client.get(SEARCH_URL, {'query': 'love'})
     assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert 'fileset_id' in response.data['error']
+    assert 'fileset_id' in response.json()['error']
+
+
+@pytest.mark.django_db
+def test_non_integer_limit_400(client):
+    """``limit=abc`` → 400 before any provider call."""
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'limit': 'abc',
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()['error'] == (
+        'limit must be an integer.'
+    )
+
+
+@pytest.mark.django_db
+def test_non_integer_page_400(client):
+    """``page=abc`` → 400 before any provider call."""
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'page': 'abc',
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()['error'] == (
+        'page must be an integer.'
+    )
+
+
+@pytest.mark.django_db
+def test_nonpositive_page_400(client):
+    """``page=0`` → 400 (a negative offset must never reach
+    API.Bible)."""
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'page': '0',
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()['error'] == (
+        'limit and page must be positive integers.'
+    )
 
 
 @pytest.mark.django_db
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_dbt_search_proxies_with_params(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """DBT fileset → search() called with limit and books."""
     mock_get_client.return_value.search.return_value = {
@@ -55,16 +118,15 @@ def test_dbt_search_proxies_with_params(
         'meta': {'pagination': {'total': 1}},
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'loved',
         'fileset_id': 'ENGESV',
         'limit': '5',
         'books': 'JHN',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    verses = response.data['data']['verses']
+    verses = response.json()['data']['verses']
     assert len(verses) == 1
     assert verses[0]['book_id'] == 'JHN'
     assert verses[0]['verse_start'] == 16
@@ -80,7 +142,7 @@ def test_dbt_search_proxies_with_params(
 @patch('bible.views.is_sword_fileset', return_value=True)
 @patch('bible.views.get_default_sword_client')
 def test_sword_search_filters_by_query(
-    mock_get_sword, mock_is_sword, factory
+    mock_get_sword, mock_is_sword, client
 ):
     """SWORD fileset → verses filtered by query substring."""
     mock_sword = mock_get_sword.return_value
@@ -97,19 +159,18 @@ def test_sword_search_filters_by_query(
         ],
     ]
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'beginning',
         'fileset_id': 'LVSGLU8',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    verses = response.data['data']['verses']
+    verses = response.json()['data']['verses']
     assert len(verses) == 1
     assert verses[0]['verse_start'] == 1
     assert verses[0]['book_id'] == 'GEN'
     assert verses[0]['chapter'] == 1
-    pagination = response.data['data']['meta']['pagination']
+    pagination = response.json()['data']['meta']['pagination']
     assert pagination['total'] == 1
 
 
@@ -117,7 +178,7 @@ def test_sword_search_filters_by_query(
 @patch('bible.views.is_sword_fileset', return_value=True)
 @patch('bible.views.get_default_sword_client')
 def test_sword_books_filter_limits_scan(
-    mock_get_sword, mock_is_sword, factory
+    mock_get_sword, mock_is_sword, client
 ):
     """SWORD books filter → only chapters from listed books scanned."""
     mock_sword = mock_get_sword.return_value
@@ -128,12 +189,11 @@ def test_sword_books_filter_limits_scan(
         {'verse_start': 1, 'verse_text': 'love'}
     ]
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'LVSGLU8',
         'books': 'GEN,MAT',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
     assert mock_sword.get_chapter_verses.call_count == 2
@@ -147,7 +207,7 @@ def test_sword_books_filter_limits_scan(
 @pytest.mark.django_db
 @patch('bible.views.get_default_esv_client')
 def test_esv_search_with_engesv_api_fileset(
-    mock_get_esv_client, factory
+    mock_get_esv_client, client
 ):
     """ENGESV_API fileset → uses ESV API search."""
     mock_esv_client = mock_get_esv_client.return_value
@@ -169,15 +229,14 @@ def test_esv_search_with_engesv_api_fileset(
         ]
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'ENGESV_API',
         'limit': '10',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    verses = response.data['data']['verses']
+    verses = response.json()['data']['verses']
     assert len(verses) == 2
 
     # Check first verse (John 3:16)
@@ -193,7 +252,7 @@ def test_esv_search_with_engesv_api_fileset(
     assert 'love God' in verses[1]['verse_text']
 
     # Check pagination metadata
-    pagination = response.data['data']['meta']['pagination']
+    pagination = response.json()['data']['meta']['pagination']
     assert pagination['total'] == 2
     assert pagination['count'] == 2
     assert pagination['per_page'] == 10
@@ -207,7 +266,7 @@ def test_esv_search_with_engesv_api_fileset(
 @pytest.mark.django_db
 @patch('bible.views.get_default_esv_client')
 def test_esv_search_handles_verse_ranges(
-    mock_get_esv_client, factory
+    mock_get_esv_client, client
 ):
     """ESV API search should handle verse ranges by taking first verse."""
     mock_esv_client = mock_get_esv_client.return_value
@@ -224,14 +283,13 @@ def test_esv_search_handles_verse_ranges(
         ]
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'beginning',
         'fileset_id': 'ENGESV_API',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    verses = response.data['data']['verses']
+    verses = response.json()['data']['verses']
     assert len(verses) == 1
     assert verses[0]['book_id'] == 'GEN'
     assert verses[0]['chapter'] == 1
@@ -241,7 +299,7 @@ def test_esv_search_handles_verse_ranges(
 @pytest.mark.django_db
 @patch('bible.views.get_default_esv_client')
 def test_esv_search_handles_books_with_numbers(
-    mock_get_esv_client, factory
+    mock_get_esv_client, client
 ):
     """ESV API search should handle book names with numbers (e.g., 1 John)."""
     mock_esv_client = mock_get_esv_client.return_value
@@ -258,14 +316,13 @@ def test_esv_search_handles_books_with_numbers(
         ]
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'God is love',
         'fileset_id': 'ENGESV_API',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    verses = response.data['data']['verses']
+    verses = response.json()['data']['verses']
     assert len(verses) == 1
     assert verses[0]['book_id'] == '1JN'
     assert verses[0]['chapter'] == 4
@@ -275,7 +332,7 @@ def test_esv_search_handles_books_with_numbers(
 @pytest.mark.django_db
 @patch('bible.views.get_default_esv_client')
 def test_esv_search_handles_malformed_references(
-    mock_get_esv_client, factory
+    mock_get_esv_client, client
 ):
     """ESV API search should skip malformed references and continue."""
     mock_esv_client = mock_get_esv_client.return_value
@@ -295,39 +352,120 @@ def test_esv_search_handles_malformed_references(
         ]
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'ENGESV_API',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    verses = response.data['data']['verses']
+    verses = response.json()['data']['verses']
     assert len(verses) == 1  # Only valid reference should be included
     assert verses[0]['book_id'] == 'JHN'
+
+
+# --- API.Bible branch (views.py:746-777) ---------------------------------
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_apibible_client')
+def test_apibible_search_dispatches(
+    mock_get_client, client
+):
+    """ENGNIV_API → offset-based ``search``; verses normalized
+    and ``meta.pagination`` carries the five public fields."""
+    apibible = mock_get_client.return_value
+    apibible.search.return_value = {
+        'data': {
+            'verses': [
+                {
+                    'id': 'JHN.3.16',
+                    'orgId': 'JHN.3.16',
+                    'bookId': 'JHN',
+                    'chapterId': 'JHN.3',
+                    'reference': 'John 3:16',
+                    'text': 'For God so loved the world',
+                }
+            ],
+            'total': 21,
+        }
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGNIV_API',
+        'limit': '10',
+        'page': '3',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    # offset = (page - 1) * limit, resolved API.Bible bible_id.
+    apibible.search.assert_called_once_with(
+        APINIV_BIBLE_ID, 'love', offset=20, limit=10,
+    )
+    data = response.json()['data']
+    assert data['verses'] == [{
+        'book_id': 'JHN',
+        'chapter': 3,
+        'verse_start': 16,
+        'verse_text': 'For God so loved the world',
+    }]
+    assert data['meta']['pagination'] == {
+        'total': 21,
+        'count': 1,
+        'per_page': 10,
+        'current_page': 3,
+        'total_pages': 3,
+    }
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_apibible_client')
+def test_apibible_search_empty_verses(
+    mock_get_client, client
+):
+    """Missing ``data.verses`` → empty list; ``total_pages``
+    computes to 0 when ``total`` is 0."""
+    mock_get_client.return_value.search.return_value = {
+        'data': {}
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGNIV_API',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()['data']
+    assert data['verses'] == []
+    assert data['meta']['pagination'] == {
+        'total': 0,
+        'count': 0,
+        'per_page': 15,
+        'current_page': 1,
+        'total_pages': 0,
+    }
 
 
 # --- group_by=book tests -------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_invalid_group_by_rejected(factory):
+def test_invalid_group_by_rejected(client):
     """group_by=<anything but book> → 400 with error."""
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'ENGESV',
         'group_by': 'chapter',
     })
-    response = BibleSearchView.as_view()(request)
     assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert 'group_by' in response.data['error']
+    assert 'group_by' in response.json()['error']
 
 
 @pytest.mark.django_db
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_dbt_grouped_search_groups_by_book(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """group_by=book → groups keyed by book_id in canonical
     order, verses sorted by (chapter, verse_start)."""
@@ -357,15 +495,14 @@ def test_dbt_grouped_search_groups_by_book(
         'meta': {'pagination': {'total': 3}},
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'son',
         'fileset_id': 'ENGESV',
         'group_by': 'book',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    data = response.data['data']
+    data = response.json()['data']
     assert 'verses' not in data
     groups = data['groups']
     # Canonical order: GEN before JHN though JHN arrived first
@@ -387,7 +524,7 @@ def test_dbt_grouped_search_groups_by_book(
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_dbt_grouped_search_sets_truncated(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """DBT total > fetched items → meta.truncated is True."""
     mock_get_client.return_value.search.side_effect = [
@@ -407,15 +544,14 @@ def test_dbt_grouped_search_sets_truncated(
         {'verses': {'data': []}},
     ]
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'ENGESV',
         'group_by': 'book',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    meta = response.data['data']['meta']
+    meta = response.json()['data']['meta']
     assert meta['total'] == 10
     assert meta['truncated'] is True
     assert mock_get_client.return_value.search.call_count == 2
@@ -425,7 +561,7 @@ def test_dbt_grouped_search_sets_truncated(
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_dbt_grouped_search_passes_books(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """Grouped DBT search forwards the books filter."""
     mock_get_client.return_value.search.return_value = {
@@ -433,30 +569,29 @@ def test_dbt_grouped_search_passes_books(
         'meta': {'pagination': {'total': 0}},
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'ENGESV',
         'group_by': 'book',
         'books': 'JHN,ROM',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
     mock_get_client.return_value.search.assert_called_once_with(
         'ENGESV', 'love', limit=5000, books='JHN,ROM',
     )
-    assert response.data['data']['groups'] == []
+    assert response.json()['data']['groups'] == []
 
 
 @pytest.mark.django_db
 @patch('bible.views.get_default_esv_client')
 def test_esv_grouped_search_fetches_all_pages(
-    mock_get_esv_client, factory
+    mock_get_esv_client, client
 ):
     """Grouped ESV search fetches every result page and groups
     matches canonically."""
-    client = mock_get_esv_client.return_value
-    client.search.side_effect = [
+    client_mock = mock_get_esv_client.return_value
+    client_mock.search.side_effect = [
         {
             'page': 1,
             'total_results': 3,
@@ -485,60 +620,58 @@ def test_esv_grouped_search_fetches_all_pages(
         },
     ]
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'God',
         'fileset_id': 'ENGESV_API',
         'group_by': 'book',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    groups = response.data['data']['groups']
+    groups = response.json()['data']['groups']
     assert [g['book_id'] for g in groups] == ['GEN', 'JHN']
     assert groups[0]['count'] == 1
     assert groups[1]['count'] == 2
-    assert response.data['data']['meta'] == {
+    assert response.json()['data']['meta'] == {
         'total': 3, 'truncated': False,
     }
-    assert client.search.call_count == 2
-    client.search.assert_any_call('God', 1, 100)
-    client.search.assert_any_call('God', 2, 100)
+    assert client_mock.search.call_count == 2
+    client_mock.search.assert_any_call('God', 1, 100)
+    client_mock.search.assert_any_call('God', 2, 100)
 
 
 @pytest.mark.django_db
 @patch('bible.views.get_default_esv_client')
 def test_esv_grouped_search_truncates_at_max_pages(
-    mock_get_esv_client, factory
+    mock_get_esv_client, client
 ):
     """ESV total_pages > MAX_ESV_PAGES → meta.truncated True."""
-    client = mock_get_esv_client.return_value
-    client.search.return_value = {
+    esv = mock_get_esv_client.return_value
+    esv.search.return_value = {
         'page': 1,
         'total_results': 10000,
         'total_pages': 100,
         'results': [],
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'God',
         'fileset_id': 'ENGESV_API',
         'group_by': 'book',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    meta = response.data['data']['meta']
+    meta = response.json()['data']['meta']
     assert meta['total'] == 10000
     assert meta['truncated'] is True
     # Page 1 + pages 2..30 = 30 calls
-    assert client.search.call_count == 30
+    assert esv.search.call_count == 30
 
 
 @pytest.mark.django_db
 @patch('bible.views.is_sword_fileset', return_value=True)
 @patch('bible.views.get_default_sword_client')
 def test_sword_grouped_search(
-    mock_get_sword, mock_is_sword, factory
+    mock_get_sword, mock_is_sword, client
 ):
     """Grouped SWORD search scans everything; never truncated."""
     mock_sword = mock_get_sword.return_value
@@ -555,19 +688,18 @@ def test_sword_grouped_search(
         ],
     ]
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'LVSGLU8',
         'group_by': 'book',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    groups = response.data['data']['groups']
+    groups = response.json()['data']['groups']
     assert [g['book_id'] for g in groups] == ['GEN', 'MAT']
     assert groups[0]['count'] == 1
     assert groups[1]['count'] == 1
-    assert response.data['data']['meta'] == {
+    assert response.json()['data']['meta'] == {
         'total': 2, 'truncated': False,
     }
 
@@ -576,7 +708,7 @@ def test_sword_grouped_search(
 @patch('bible.views.is_sword_fileset', return_value=True)
 @patch('bible.views.get_default_sword_client')
 def test_sword_grouped_books_filter(
-    mock_get_sword, mock_is_sword, factory
+    mock_get_sword, mock_is_sword, client
 ):
     """Grouped SWORD search honors the books filter."""
     mock_sword = mock_get_sword.return_value
@@ -587,17 +719,16 @@ def test_sword_grouped_books_filter(
         {'verse_start': 1, 'verse_text': 'love'}
     ]
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'LVSGLU8',
         'group_by': 'book',
         'books': 'MAT',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
     assert mock_sword.get_chapter_verses.call_count == 1
-    groups = response.data['data']['groups']
+    groups = response.json()['data']['groups']
     assert [g['book_id'] for g in groups] == ['MAT']
 
 
@@ -605,7 +736,7 @@ def test_sword_grouped_books_filter(
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_non_grouped_search_still_paginated(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """No group_by → unchanged paginated 'verses' response."""
     mock_get_client.return_value.search.return_value = {
@@ -622,14 +753,13 @@ def test_non_grouped_search_still_paginated(
         'meta': {'pagination': {'total': 1}},
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'loved',
         'fileset_id': 'ENGESV',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    data = response.data['data']
+    data = response.json()['data']
     assert 'groups' not in data
     assert len(data['verses']) == 1
     assert data['meta']['pagination']['total'] == 1
@@ -642,7 +772,7 @@ def test_non_grouped_search_still_paginated(
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_grouped_search_provider_error(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """Provider client raising in grouped mode → 502 with
     provider error fields, not a 400 carrying str(exc)."""
@@ -650,23 +780,22 @@ def test_grouped_search_provider_error(
         Exception("DBT exploded")
     )
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'ENGESV',
         'group_by': 'book',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_502_BAD_GATEWAY
-    assert response.data['error_code'] == 'provider_error'
-    assert 'DBT exploded' not in response.data['error']
+    assert response.json()['error_code'] == 'provider_error'
+    assert 'DBT exploded' not in response.json()['error']
 
 
 @pytest.mark.django_db
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_grouped_search_ignores_bad_page_param(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """group_by=book&page=abc → page is never parsed, no 400."""
     mock_get_client.return_value.search.return_value = {
@@ -674,13 +803,12 @@ def test_grouped_search_ignores_bad_page_param(
         'meta': {'pagination': {'total': 0}},
     }
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'ENGESV',
         'group_by': 'book',
         'page': 'abc',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
 
@@ -689,7 +817,7 @@ def test_grouped_search_ignores_bad_page_param(
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_dbt_grouped_search_uses_reported_page_size(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """Page 1 reports per_page below the requested limit →
     page 2 is fetched at the effective size so no results
@@ -733,21 +861,20 @@ def test_dbt_grouped_search_uses_reported_page_size(
         },
     ]
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'ENGESV',
         'group_by': 'book',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_200_OK
-    groups = response.data['data']['groups']
+    groups = response.json()['data']['groups']
     assert len(groups) == 1
     assert groups[0]['count'] == 3
     assert [
         v['verse_start'] for v in groups[0]['verses']
     ] == [16, 17, 18]
-    assert response.data['data']['meta'] == {
+    assert response.json()['data']['meta'] == {
         'total': 3, 'truncated': False,
     }
     # Follow-up page requested at the effective page size.
@@ -845,7 +972,7 @@ class FakeProviderError(Exception):
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_dbt_search_provider_error_no_credential_leak(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """A DBT search failure surfaces provider error fields — raw
     exception text can carry ``?key=`` credentials and must never
@@ -856,42 +983,63 @@ def test_dbt_search_provider_error_no_credential_leak(
         )
     )
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'loved',
         'fileset_id': 'ENGESV',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_502_BAD_GATEWAY
-    assert response.data['error_code'] == 'provider_error'
-    assert 'SECRET' not in response.data['error']
+    assert response.json()['error_code'] == 'provider_error'
+    assert 'SECRET' not in response.json()['error']
 
 
 @pytest.mark.django_db
 @patch('bible.views.is_sword_fileset', return_value=False)
 @patch('bible.views.get_default_dbt_client')
 def test_dbt_search_rate_limited(
-    mock_get_client, mock_is_sword, factory
+    mock_get_client, mock_is_sword, client
 ):
     """An upstream 429 maps to HTTP 429 + rate_limited."""
     mock_get_client.return_value.search.side_effect = (
         FakeProviderError(429)
     )
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'loved',
         'fileset_id': 'ENGESV',
     })
-    response = BibleSearchView.as_view()(request)
 
-    assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
-    assert response.data['error_code'] == 'rate_limited'
+    assert (
+        response.status_code
+        == status.HTTP_429_TOO_MANY_REQUESTS
+    )
+    assert response.json()['error_code'] == 'rate_limited'
+
+
+@pytest.mark.django_db
+@patch('bible.views.is_sword_fileset', return_value=False)
+@patch('bible.views.get_default_dbt_client')
+def test_provider_404_returns_not_found(
+    mock_get_client, mock_is_sword, client
+):
+    """An upstream 404 maps to HTTP 404 + not_found."""
+    mock_get_client.return_value.search.side_effect = (
+        FakeProviderError(404)
+    )
+
+    response = client.get(SEARCH_URL, {
+        'query': 'loved',
+        'fileset_id': 'ENGESV',
+    })
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()['error_code'] == 'not_found'
 
 
 @pytest.mark.django_db
 @patch('bible.views.get_default_esv_client')
 def test_esv_search_failure_surfaces_provider_error(
-    mock_get_esv_client, factory
+    mock_get_esv_client, client
 ):
     """An ESV search failure also goes through provider error
     fields instead of embedding str(exc)."""
@@ -899,12 +1047,11 @@ def test_esv_search_failure_surfaces_provider_error(
         Exception("ESV exploded")
     )
 
-    request = factory.get('/fake-url/', {
+    response = client.get(SEARCH_URL, {
         'query': 'love',
         'fileset_id': 'ENGESV_API',
     })
-    response = BibleSearchView.as_view()(request)
 
     assert response.status_code == status.HTTP_502_BAD_GATEWAY
-    assert response.data['error_code'] == 'provider_error'
-    assert 'ESV exploded' not in response.data['error']
+    assert response.json()['error_code'] == 'provider_error'
+    assert 'ESV exploded' not in response.json()['error']

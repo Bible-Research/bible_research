@@ -1,9 +1,14 @@
 import pytest
 from unittest.mock import patch
+from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APIRequestFactory
+from rest_framework.test import APIClient
 
-from bible.views import CopyrightView
+from bible.services.apibible.registry import get_apibible_meta
+
+
+COPYRIGHT_URL = reverse('bible-copyright')
+APINIV_BIBLE_ID = get_apibible_meta('ENGNIV_API')['bible_id']
 
 
 class FakeProviderError(Exception):
@@ -15,8 +20,8 @@ class FakeProviderError(Exception):
 
 
 @pytest.fixture
-def factory():
-    return APIRequestFactory()
+def client():
+    return APIClient()
 
 
 SAMPLE_COPYRIGHT_DATA = [
@@ -49,23 +54,20 @@ SAMPLE_COPYRIGHT_DATA = [
 
 @pytest.mark.django_db
 @patch('bible.views.get_default_dbt_client')
-def test_get_copyright_success(mock_get_client, factory):
+def test_get_copyright_success(mock_get_client, client):
     """Test successful retrieval of copyright info."""
     mock_dbt_instance = mock_get_client.return_value
     mock_dbt_instance.get_copyright.return_value = (
         SAMPLE_COPYRIGHT_DATA
     )
 
-    request = factory.get(
-        '/fake-url/', {'bible_id': 'ENGESV'}
-    )
-    view = CopyrightView.as_view()
-    response = view(request)
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
 
     assert response.status_code == status.HTTP_200_OK
-    assert len(response.data['data']) == 2
+    data = response.json()['data']
+    assert len(data) == 2
 
-    text_cr = response.data['data'][0]
+    text_cr = data[0]
     assert text_cr['id'] == 'ENGESV'
     assert text_cr['type'] == 'text_plain'
     assert text_cr['copyright'] == (
@@ -81,20 +83,18 @@ def test_get_copyright_success(mock_get_client, factory):
 
 
 @pytest.mark.django_db
-def test_get_copyright_missing_bible_id(factory):
+def test_get_copyright_missing_bible_id(client):
     """Test request with missing bible_id parameter."""
-    request = factory.get('/fake-url/')
-    view = CopyrightView.as_view()
-    response = view(request)
+    response = client.get(COPYRIGHT_URL)
 
     assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert 'error' in response.data
+    assert 'error' in response.json()
 
 
 @pytest.mark.django_db
 @patch('bible.views.get_default_dbt_client')
 def test_get_copyright_dbt_exception(
-    mock_get_client, factory
+    mock_get_client, client
 ):
     """Test handling of an exception from DBT client."""
     mock_dbt_instance = mock_get_client.return_value
@@ -102,38 +102,48 @@ def test_get_copyright_dbt_exception(
         Exception("DBT Error")
     )
 
-    request = factory.get(
-        '/fake-url/', {'bible_id': 'ENGESV'}
-    )
-    view = CopyrightView.as_view()
-    response = view(request)
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
 
     assert response.status_code == status.HTTP_502_BAD_GATEWAY
-    assert response.data['error_code'] == 'provider_error'
-    assert 'DBT Error' not in response.data['error']
+    assert response.json()['error_code'] == 'provider_error'
+    assert 'DBT Error' not in response.json()['error']
 
 
 @pytest.mark.django_db
 @patch('bible.views.get_default_dbt_client')
-def test_get_copyright_rate_limited(mock_get_client, factory):
+def test_get_copyright_rate_limited(mock_get_client, client):
     """An upstream 429 maps to HTTP 429 + rate_limited."""
     mock_get_client.return_value.get_copyright.side_effect = (
         FakeProviderError(429)
     )
 
-    request = factory.get(
-        '/fake-url/', {'bible_id': 'ENGESV'}
-    )
-    response = CopyrightView.as_view()(request)
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
 
-    assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
-    assert response.data['error_code'] == 'rate_limited'
+    assert (
+        response.status_code
+        == status.HTTP_429_TOO_MANY_REQUESTS
+    )
+    assert response.json()['error_code'] == 'rate_limited'
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+def test_provider_404_returns_not_found(mock_get_client, client):
+    """An upstream 404 maps to HTTP 404 + not_found."""
+    mock_get_client.return_value.get_copyright.side_effect = (
+        FakeProviderError(404)
+    )
+
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()['error_code'] == 'not_found'
 
 
 @pytest.mark.django_db
 @patch('bible.views.get_default_dbt_client')
 def test_get_copyright_error_does_not_leak_credentials(
-    mock_get_client, factory
+    mock_get_client, client
 ):
     """Exception text can carry ``?key=`` credentials — it must
     never reach the response body."""
@@ -144,11 +154,80 @@ def test_get_copyright_error_does_not_leak_credentials(
         )
     )
 
-    request = factory.get(
-        '/fake-url/', {'bible_id': 'ENGESV'}
-    )
-    response = CopyrightView.as_view()(request)
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
 
     assert response.status_code == status.HTTP_502_BAD_GATEWAY
-    assert response.data['error_code'] == 'provider_error'
-    assert 'SECRET' not in response.data['error']
+    assert response.json()['error_code'] == 'provider_error'
+    assert 'SECRET' not in response.json()['error']
+
+
+# --- API.Bible branch (views.py:483-501) --------------------------------
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_apibible_client')
+def test_apibible_branch_returns_copyright(
+    mock_get_client, client
+):
+    """API.Bible fileset → copyright built from ``get_bible``."""
+    mock_get_client.return_value.get_bible.return_value = {
+        'copyrightStatement': 'Copyright Biblica',
+    }
+
+    response = client.get(
+        COPYRIGHT_URL, {'bible_id': 'ENGNIV_API'}
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()['data'] == [{
+        'id': 'ENGNIV_API',
+        'type': 'text_plain',
+        'size': 'C',
+        'copyright': 'Copyright Biblica',
+        'copyright_date': '',
+        'copyright_description': 'Copyright Biblica',
+    }]
+    mock_get_client.return_value.get_bible \
+        .assert_called_once_with(APINIV_BIBLE_ID)
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_apibible_client')
+def test_apibible_branch_missing_statement_defaults(
+    mock_get_client, client
+):
+    """A missing ``copyrightStatement`` yields '' fields."""
+    mock_get_client.return_value.get_bible.return_value = {}
+
+    response = client.get(
+        COPYRIGHT_URL, {'bible_id': 'ENGNIV_API'}
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    entry = response.json()['data'][0]
+    assert entry['copyright'] == ''
+    assert entry['copyright_date'] == ''
+    assert entry['copyright_description'] == ''
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+def test_sword_and_esv_ids_fall_through_to_dbt(
+    mock_get_client, client
+):
+    """Only API.Bible ids are special-cased: a SWORD id
+    (``LVSGLU8``) and an ESV id (``ENGESV_API``) both fall
+    through to the DBT ``get_copyright`` call."""
+    mock_get_client.return_value.get_copyright.return_value = []
+
+    for bible_id in ('LVSGLU8', 'ENGESV_API'):
+        response = client.get(
+            COPYRIGHT_URL, {'bible_id': bible_id}
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()['data'] == []
+
+    get_copyright = mock_get_client.return_value.get_copyright
+    assert [c.args[0] for c in get_copyright.call_args_list] == [
+        'LVSGLU8', 'ENGESV_API',
+    ]
