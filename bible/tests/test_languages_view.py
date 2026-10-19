@@ -108,8 +108,8 @@ def test_get_languages_result_shape_and_pagination(
     mock_get_client, factory
 ):
     """Results expose only the contracted fields (``bibles``
-    passthrough included); ``meta.pagination`` is forwarded
-    unchanged."""
+    passthrough included); ``meta.pagination``'s documented
+    fields are forwarded."""
     mock_dbt_instance = mock_get_client.return_value
     mock_dbt_instance.get_languages.return_value = (
         DBT_LANGUAGES_RESPONSE
