@@ -1281,6 +1281,27 @@ class NoteUpdateVerseReferencesTest(TestCase):
         # Existing links are preserved when validation fails.
         self.assertEqual(self.note.verses.count(), 1)
 
+    def test_verseless_note_serializes_tag_as_object(self):
+        """Regression: a note with no verses must still serialize
+        ``tag`` as the full tag object. The early return in
+        to_representation skipped the expansion, leaking the raw
+        PK — the SPA's edit form then read tag.id as undefined
+        and silently cleared the tag on save."""
+        NoteVerse.objects.filter(note=self.note).delete()
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsInstance(resp.data['tag'], dict)
+        self.assertEqual(resp.data['tag']['id'], self.tag.id)
+
+        resp = self.client.patch(
+            self.url,
+            {'note_text': 'Verse-less edit'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsInstance(resp.data['tag'], dict)
+        self.assertEqual(resp.data['tag']['id'], self.tag.id)
+
 
 class LinkedNotesTest(TestCase):
     """Tests for POST /api/v1/notes/linked/."""

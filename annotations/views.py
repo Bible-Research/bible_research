@@ -604,9 +604,11 @@ class NoteViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(id=note_pk)
             logger.debug(f"Filtering by note_pk: {note_pk}")
 
-        # Apply ordering based on parameter
+        # Apply ordering based on parameter. to_representation
+        # dereferences note.tag for every row — select_related
+        # keeps it off the N+1 path.
         final_queryset = self._apply_ordering(
-            queryset, ordering_param
+            queryset.select_related('tag'), ordering_param
         )
         logger.info(
             f"Returning notes with ordering: {ordering_param}"

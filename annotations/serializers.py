@@ -334,6 +334,14 @@ class NoteSerializer(serializers.ModelSerializer):
         (empty 'text') and 'headings' is empty.
         """
         representation = super().to_representation(instance)
+
+        # Include full tag object if a tag exists. This must run
+        # before the verse-less early return below — every GET
+        # shape honors the documented contract (nested tag
+        # object), not just notes with verses.
+        if instance.tag:
+            representation['tag'] = TagSerializer(instance.tag).data
+
         # Sort in Python so a prefetch_related('verses') cache is
         # reused; .order_by() on the related manager would issue
         # a fresh query per note.
@@ -561,10 +569,6 @@ class NoteSerializer(serializers.ModelSerializer):
 
         representation['verses'] = verses_with_text
         representation['headings'] = headings
-
-        # Include full tag object if a tag exists
-        if instance.tag:
-            representation['tag'] = TagSerializer(instance.tag).data
 
         return representation
 
