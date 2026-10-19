@@ -207,3 +207,83 @@ def test_get_languages_invalid_limit(factory):
 
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert 'error' in response.data
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    'params',
+    [
+        {'page': '0'},
+        {'page': '-1'},
+        {'limit': '0'},
+        {'limit': '-5'},
+        {'page': '-1', 'limit': '0'},
+    ],
+)
+@patch('bible.views.get_default_dbt_client')
+def test_get_languages_non_positive_pagination(
+    mock_get_client, factory, params
+):
+    """Non-positive ``page``/``limit`` are client errors (400)
+    and must never reach DBT."""
+    request = factory.get('/fake-url/', params)
+    response = LanguageListView.as_view()(request)
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'error' in response.data
+    mock_get_client.return_value.get_languages.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+def test_get_languages_missing_pagination(
+    mock_get_client, factory
+):
+    """Without ``meta.pagination`` upstream, ``meta`` normalises
+    to an empty object rather than ``pagination: null``."""
+    mock_get_client.return_value.get_languages.return_value = {
+        'data': DBT_LANGUAGES_RESPONSE['data'],
+    }
+
+    request = factory.get('/fake-url/', {'search': 'russ'})
+    response = LanguageListView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data['meta'] == {}
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+def test_get_languages_pagination_whitelisted(
+    mock_get_client, factory
+):
+    """Only the documented pagination fields are forwarded;
+    DBT-internal extras (e.g. ``links``) are stripped."""
+    mock_get_client.return_value.get_languages.return_value = {
+        'data': [],
+        'meta': {
+            'pagination': {
+                'total': 10,
+                'count': 0,
+                'per_page': 25,
+                'current_page': 2,
+                'total_pages': 1,
+                'links': {'next': 'https://dbt.example?key=x'},
+            },
+            'links': {'first': 'https://dbt.example?key=x'},
+        },
+    }
+
+    request = factory.get('/fake-url/', {'page': '2'})
+    response = LanguageListView.as_view()(request)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data['meta'] == {
+        'pagination': {
+            'total': 10,
+            'count': 0,
+            'per_page': 25,
+            'current_page': 2,
+            'total_pages': 1,
+        }
+    }

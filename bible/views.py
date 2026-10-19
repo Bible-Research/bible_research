@@ -1007,6 +1007,22 @@ class LanguageListView(APIView):
                         {"error": "limit must be an integer."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+            # Non-positive pagination params are client errors —
+            # 400 instead of sending e.g. a negative ``page`` to
+            # DBT (matches BibleSearchView).
+            if (
+                (page is not None and page < 1)
+                or (limit is not None and limit < 1)
+            ):
+                return Response(
+                    {
+                        "error": (
+                            "limit and page must be "
+                            "positive integers."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             dbt_client = get_default_dbt_client()
             result = dbt_client.get_languages(
@@ -1026,16 +1042,33 @@ class LanguageListView(APIView):
                 }
                 for item in (result.get('data') or [])
             ]
+            # Normalise to a clean { pagination: { ... } } shape
+            # and whitelist the documented fields, like
+            # _dbt_search, so a missing meta.pagination emits {}
+            # rather than null.
             pagination = (result.get('meta') or {}).get(
                 'pagination'
-            )
+            ) or {}
+            meta = {
+                'pagination': {
+                    'total': pagination.get('total'),
+                    'count': pagination.get('count'),
+                    'per_page': pagination.get('per_page'),
+                    'current_page': (
+                        pagination.get('current_page')
+                    ),
+                    'total_pages': (
+                        pagination.get('total_pages')
+                    ),
+                }
+            } if pagination else {}
             logger.info(
                 f"Returning {len(results)} languages "
                 f"(page: {page or 'default'})"
             )
             return Response({
                 'results': results,
-                'meta': {'pagination': pagination},
+                'meta': meta,
             })
 
         except Exception as e:
