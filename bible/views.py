@@ -953,3 +953,94 @@ class TranslationListView(APIView):
                 f"language_iso: {language_iso} - {e}"
             )
             return provider_error_response(e)
+
+
+class LanguageListView(APIView):
+    """
+    Lists languages that have Bible content, fetched live from
+    the DBT API.
+
+    Query Parameters:
+        - search: Case-insensitive substring match on the
+          language name (e.g. 'russ' -> Russian, Buryat)
+        - code: Exact ISO 639-3 language code lookup
+          (e.g. 'rus')
+        - page: Result page number (DBT default 1)
+        - limit: Max results per page (DBT clamps to ~150)
+
+    Each result is ``{iso, name, autonym, bibles, filesets}``
+    and the response carries DBT's ``meta.pagination`` object
+    unchanged so callers can page through the full list.
+
+    Example:
+        /api/v1/bible/languages/?search=russ
+        /api/v1/bible/languages/?code=rus
+        /api/v1/bible/languages/?page=2&limit=50
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        search = request.query_params.get('search')
+        code = request.query_params.get('code')
+        logger.info(
+            f"LanguageListView.get called with "
+            f"search: {search or '-'}, code: {code or '-'}"
+        )
+
+        try:
+            page = request.query_params.get('page')
+            if page is not None:
+                try:
+                    page = int(page)
+                except (TypeError, ValueError):
+                    return Response(
+                        {"error": "page must be an integer."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            limit = request.query_params.get('limit')
+            if limit is not None:
+                try:
+                    limit = int(limit)
+                except (TypeError, ValueError):
+                    return Response(
+                        {"error": "limit must be an integer."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            dbt_client = get_default_dbt_client()
+            result = dbt_client.get_languages(
+                language_name=search,
+                language_code=code,
+                page=page,
+                limit=limit,
+            )
+
+            results = [
+                {
+                    'iso': item.get('iso'),
+                    'name': item.get('name'),
+                    'autonym': item.get('autonym'),
+                    'bibles': item.get('bibles'),
+                    'filesets': item.get('filesets'),
+                }
+                for item in (result.get('data') or [])
+            ]
+            pagination = (result.get('meta') or {}).get(
+                'pagination'
+            )
+            logger.info(
+                f"Returning {len(results)} languages "
+                f"(page: {page or 'default'})"
+            )
+            return Response({
+                'results': results,
+                'meta': {'pagination': pagination},
+            })
+
+        except Exception as e:
+            logger.exception(
+                f"Error fetching languages "
+                f"(search: {search}, code: {code}) - {e}"
+            )
+            return provider_error_response(e)

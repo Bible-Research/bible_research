@@ -539,6 +539,52 @@ Grouping rules (see `bible/services/fileset_groups.py`):
 GET /api/v1/bible/translations/?language_iso=eng
 ```
 
+#### List Languages
+```
+GET /api/v1/bible/languages/
+```
+Proxies the DBT `/languages` endpoint — every language that has
+Bible content in DBT (~2,600). Used by the frontend's "Other"
+language picker before fetching `/bible/translations/` for the
+chosen `iso`.
+
+**Query Parameters**:
+- `search` (optional): Case-insensitive substring match on the
+  language name (e.g., "russ" matches Russian and Buryat)
+- `code` (optional): Exact ISO 639-3 code lookup (e.g., "rus")
+- `page` (optional): Result page number
+- `limit` (optional): Max results per page (DBT clamps to ~150)
+
+**Response** — `meta.pagination` is DBT's pagination object
+passed through unchanged:
+```json
+{
+  "results": [
+    {
+      "iso": "rus",
+      "name": "Russian",
+      "autonym": "Русский",
+      "bibles": 6,
+      "filesets": 18
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "total": 1,
+      "count": 1,
+      "per_page": 25,
+      "current_page": 1,
+      "total_pages": 1
+    }
+  }
+}
+```
+
+**Example**:
+```
+GET /api/v1/bible/languages/?search=russ&page=1&limit=25
+```
+
 #### Search the Bible
 ```
 GET /api/v1/bible/search/?query=love&fileset_id=ENGESV

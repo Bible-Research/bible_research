@@ -9,6 +9,11 @@ urlpatterns = [
         name='translation-list'
     ),
     path(
+        'bible/languages/',
+        views.LanguageListView.as_view(),
+        name='language-list'
+    ),
+    path(
         'bible/timestamps/',
         views.AudioTimestampView.as_view(),
         name='audio-timestamps'
