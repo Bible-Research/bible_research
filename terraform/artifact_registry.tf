@@ -1,9 +1,10 @@
 # App Engine Standard created this repository; we track it to avoid drift.
 resource "google_artifact_registry_repository" "gae_standard" {
-  # App Engine Standard uses the regional repo in the app region (not var.region / tfvars).
+  # App Engine Standard uses the regional repo in the app region
+  # (not var.region / tfvars).
   location      = "europe-west3"
   repository_id = "gae-standard"
-  description   = "Repository to store images related to App Engine Standard deployments - Cost Optimized"
+  description   = "App Engine Standard deployment images - Cost Optimized"
   format        = "DOCKER"
 
   # 1. DELETE Policy: Target ALL images older than 1 day
@@ -16,12 +17,14 @@ resource "google_artifact_registry_repository" "gae_standard" {
     }
   }
 
-  # 2. KEEP Policy: Protect the most recent 2 versions from deletion
+  # 2. KEEP Policy: Protect only the most recent version from
+  # deletion — old deploy images are removed after 24 h. Rollback
+  # means redeploying, which builds a fresh image anyway.
   cleanup_policies {
-    id     = "keep-latest-2"
+    id     = "keep-latest-1"
     action = "KEEP"
     most_recent_versions {
-      keep_count = 2
+      keep_count = 1
     }
   }
 
@@ -41,7 +44,7 @@ resource "google_artifact_registry_repository" "gae_standard" {
 resource "google_artifact_registry_repository" "audio_generator" {
   location      = "europe-west3"
   repository_id = "audio-generator"
-  description   = "Container image for the audio-generator Cloud Run Job - Cost Optimized"
+  description   = "audio-generator Cloud Run Job image - Cost Optimized"
   format        = "DOCKER"
 
   # 1. DELETE Policy: Target ALL images older than 1 day
