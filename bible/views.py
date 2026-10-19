@@ -969,8 +969,9 @@ class LanguageListView(APIView):
         - limit: Max results per page (DBT clamps to ~150)
 
     Each result is ``{iso, name, autonym, bibles, filesets}``
-    and the response carries DBT's ``meta.pagination`` object
-    unchanged so callers can page through the full list.
+    and the response carries the whitelisted fields of DBT's
+    ``meta.pagination`` (``{}`` when absent) so callers can
+    page through the full list.
 
     Example:
         /api/v1/bible/languages/?search=russ

@@ -555,8 +555,8 @@ chosen `iso`.
 - `page` (optional): Result page number
 - `limit` (optional): Max results per page (DBT clamps to ~150)
 
-**Response** — `meta.pagination` is DBT's pagination object
-passed through unchanged:
+**Response** — `meta.pagination` carries the whitelisted fields
+of DBT's pagination object (`{}` when absent):
 ```json
 {
   "results": [
