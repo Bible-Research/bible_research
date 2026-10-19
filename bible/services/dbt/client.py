@@ -376,6 +376,58 @@ class DBTClient:
             )
             raise
 
+    def get_languages(
+        self,
+        language_name: str = None,
+        language_code: str = None,
+        page: int = None,
+        limit: int = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        List languages that have Bible content in DBT.
+
+        Uses requests directly, like ``get_bibles``/``search``:
+        the endpoint only lists content-bearing languages and
+        returns ``meta.pagination`` for page traversal.
+
+        Args:
+            language_name: Case-insensitive substring match on
+                the language name (optional)
+            language_code: Exact ISO 639-3 code lookup (optional)
+            page: Result page number (optional)
+            limit: Max results per page (optional)
+            **kwargs: Additional query parameters
+
+        Returns:
+            Dictionary with language data and meta.pagination
+        """
+        params = kwargs.copy()
+        params['v'] = 4
+        params['key'] = self.api_key
+        if language_name:
+            params['language_name'] = language_name
+        if language_code:
+            params['language_code'] = language_code
+        if page is not None:
+            params['page'] = page
+        if limit is not None:
+            params['limit'] = limit
+
+        url = f"{self.base_url}/languages"
+
+        try:
+            response = self.session.get(
+                url, params=params
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(
+                f"DBT languages request error: {e}"
+            )
+            raise
+
 
 _default_client: Optional["DBTClient"] = None
 _default_client_lock = threading.Lock()
