@@ -15,6 +15,7 @@ def pytest_configure():
             IMAGE_SIGNED_URL_TTL_SECONDS=600,
             MONTHLY_TTS_CHAR_LIMIT=100000,
             LOCK_STALE_HOURS=24,
+            GEMINI_API_KEYS=['test-gemini-key'],
             # A minimal set of settings required for DRF and Django to run
             # tests
             INSTALLED_APPS=[
