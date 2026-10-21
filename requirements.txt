@@ -11,7 +11,7 @@ psycopg2-binary==2.9.13
 gunicorn==26.2.0
 google-cloud-secret-manager
 google-cloud-texttospeech>=2.38.0,<3
-google-cloud-storage>=3.17.0,<4
+google-cloud-storage>=3.17.1,<4
 google-auth>=2.62.0,<3
 mutagen>=1.48.1,<2
 Pillow>=12.3.0,<13
