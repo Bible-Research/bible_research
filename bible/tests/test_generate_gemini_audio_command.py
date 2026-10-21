@@ -48,10 +48,12 @@ class _FakeSynth:
         self.client = client
         self.kwargs = kwargs
         self.runs = []
+        self.run_kwargs = []
         type(self).instances.append(self)
 
-    def run(self, fileset_id, book_id, chapter):
+    def run(self, fileset_id, book_id, chapter, **kwargs):
         self.runs.append((book_id, chapter))
+        self.run_kwargs.append(kwargs)
         self.client.requests_made += 1
         outcome = type(self).outcome
         if callable(outcome):
@@ -157,6 +159,76 @@ def test_files_on_disk_count_as_completed(
 
     synth = _FakeSynth.instances[-1]
     assert synth.runs == [("GEN", 2), ("GEN", 3)]
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_zero_byte_mp3_counts_as_pending(
+    sword_factory, tmp_path, worklist_client,
+):
+    """A crash mid-write leaves an empty MP3 that must NOT mark
+    the chapter done — it gets re-synthesized."""
+    sword_factory.return_value = worklist_client
+    gen_dir = tmp_path / "tts-out" / "LVSGLU8" / "GEN"
+    gen_dir.mkdir(parents=True)
+    (gen_dir / "1.mp3").write_bytes(b"")
+    (gen_dir / "1_timestamps.json").write_text("{}")
+
+    _invoke(tmp_path)
+
+    synth = _FakeSynth.instances[-1]
+    assert ("GEN", 1) in synth.runs
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_corrupt_timestamps_json_counts_as_pending(
+    sword_factory, tmp_path, worklist_client,
+):
+    sword_factory.return_value = worklist_client
+    gen_dir = tmp_path / "tts-out" / "LVSGLU8" / "GEN"
+    gen_dir.mkdir(parents=True)
+    (gen_dir / "1.mp3").write_bytes(b"\xff\xfb")
+    (gen_dir / "1_timestamps.json").write_text("{truncated")
+
+    _invoke(tmp_path)
+
+    synth = _FakeSynth.instances[-1]
+    assert ("GEN", 1) in synth.runs
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_request_budget_passes_remaining_headroom(
+    sword_factory, tmp_path, worklist_client,
+):
+    """With 13/14 already spent today, the next chapter gets
+    request_budget=1 so it can never overshoot the daily cap,
+    and the run stops right after it."""
+    sword_factory.return_value = worklist_client
+    state = RunState(tmp_path / "state.json")
+    state.add_requests(13)
+    state.save()
+
+    text = _invoke_out(tmp_path)
+
+    synth = _FakeSynth.instances[-1]
+    assert synth.runs == [("GEN", 1)]
+    assert synth.run_kwargs == [{"request_budget": 1}]
+    assert "reason=daily_request_cap" in text
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_voice_option_reaches_synthesizer(
+    sword_factory, tmp_path, worklist_client,
+):
+    sword_factory.return_value = worklist_client
+
+    _invoke(tmp_path, "--voice", "Charon")
+
+    synth = _FakeSynth.instances[-1]
+    assert synth.kwargs["voice_name"] == "Charon"
 
 
 @patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)

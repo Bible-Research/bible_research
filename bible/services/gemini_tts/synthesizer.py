@@ -39,8 +39,11 @@ TRUNCATED_OUTPUT_TOKENS = 16000
 MAX_PLAUSIBLE_CHARS_PER_SECOND = 15.0
 
 # Cap on truncation-triggered segment splits per chapter so one
-# pathological chapter cannot burn the whole daily request quota.
-DEFAULT_MAX_RETRIES = 6
+# pathological chapter cannot burn the whole daily request
+# quota. Worst case is ~segments + 2 * retries requests (~7 for
+# a single-segment chapter); ``run()``'s ``request_budget`` adds
+# a hard per-chapter bound tied to the remaining daily quota.
+DEFAULT_MAX_RETRIES = 3
 
 MP3_BIT_RATE = 64
 
@@ -54,6 +57,10 @@ DEFAULT_STYLE_PROMPT = (
 
 class SegmentTruncatedError(Exception):
     """A segment stayed truncated after the retry budget ran out."""
+
+
+class RequestBudgetExceeded(Exception):
+    """The chapter hit its API request budget mid-synthesis."""
 
 
 @dataclass
@@ -130,11 +137,12 @@ def encode_pcm_to_mp3(
     return bytes(encoder.encode(pcm_bytes) + encoder.flush())
 
 
-class _RetryBudget:
-    """Shared countdown of truncation splits allowed per chapter."""
+class _SpendBudget:
+    """Shared countdown bounding spend (splits or API calls)
+    within one chapter."""
 
-    def __init__(self, retries: int):
-        self.left = retries
+    def __init__(self, units: int):
+        self.left = units
 
     def spend(self) -> bool:
         if self.left <= 0:
@@ -167,7 +175,14 @@ class GeminiSynthesizer:
         fileset_id: str,
         book_id: str,
         chapter: int,
+        request_budget: Optional[int] = None,
     ) -> GeminiChapterArtifacts:
+        """Synthesize one chapter.
+
+        ``request_budget`` caps how many API calls the chapter may
+        make; synthesis raises :class:`RequestBudgetExceeded` once
+        it is spent, so a single chapter can never overrun the
+        caller's remaining daily quota."""
         canon = canonical_sword_fileset_id(fileset_id)
         if not canon:
             raise ValueError(f"Unknown SWORD fileset: {fileset_id!r}")
@@ -182,7 +197,12 @@ class GeminiSynthesizer:
         segments = split_verses_into_segments(
             verses, self._max_segment_chars,
         )
-        retry_budget = _RetryBudget(self._max_retries)
+        retry_budget = _SpendBudget(self._max_retries)
+        spend_budget = (
+            _SpendBudget(request_budget)
+            if request_budget is not None
+            else None
+        )
 
         # (verses, PCM) pairs in synthesis order — every actual
         # request boundary is an exact timestamp anchor, including
@@ -190,7 +210,9 @@ class GeminiSynthesizer:
         rendered: List[Tuple[List[dict], bytes]] = []
         for segment in segments:
             rendered.extend(
-                self._synthesize_segment(segment, retry_budget)
+                self._synthesize_segment(
+                    segment, retry_budget, spend_budget,
+                )
             )
 
         full_pcm = b"".join(pcm for _seg, pcm in rendered)
@@ -218,13 +240,23 @@ class GeminiSynthesizer:
     def _synthesize_segment(
         self,
         segment: List[dict],
-        retry_budget: _RetryBudget,
+        retry_budget: _SpendBudget,
+        request_budget: Optional[_SpendBudget],
     ) -> List[Tuple[List[dict], bytes]]:
         """Synthesize one segment; on truncation split it in half
         and retry each half, bounded by the shared retry budget.
 
         Returns ``(verses, pcm)`` pairs — one per actual API call —
         so every synthesized boundary can anchor timestamps."""
+        if (
+            request_budget is not None
+            and not request_budget.spend()
+        ):
+            raise RequestBudgetExceeded(
+                "request budget exhausted mid-chapter "
+                f"(segment starting at verse "
+                f"{segment[0]['verse_start']})"
+            )
         text = self._segment_text(segment)
         result = self._client.synthesize(
             text=text, voice_name=self._voice_name,
@@ -245,10 +277,10 @@ class GeminiSynthesizer:
             len(segment), segment[mid]["verse_start"],
         )
         left = self._synthesize_segment(
-            segment[:mid], retry_budget,
+            segment[:mid], retry_budget, request_budget,
         )
         right = self._synthesize_segment(
-            segment[mid:], retry_budget,
+            segment[mid:], retry_budget, request_budget,
         )
         return left + right
 

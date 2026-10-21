@@ -53,9 +53,10 @@ class GeminiTTSClient:
     """Multi-key Gemini TTS client with per-request pacing.
 
     ``api_keys`` holds one key per free-tier GCP project; when a key
-    answers 429 the client rotates to the next key for the remainder
-    of the run and only raises :class:`QuotaExceeded` once every key
-    is exhausted.
+    is rejected (429 quota exhaustion, or a 403/400 invalid-key
+    response) the client rotates to the next key for the remainder
+    of the run and only raises :class:`QuotaExceeded` once every
+    key is exhausted.
     """
 
     def __init__(
@@ -91,10 +92,10 @@ class GeminiTTSClient:
     ) -> SynthesisResult:
         """Synthesize ``text`` to raw LINEAR16 24 kHz mono PCM.
 
-        Raises :class:`QuotaExceeded` when every key is rate-limited,
-        :class:`GeminiApiError` on other API/transport failures, and
-        :class:`GeminiResponseError` when the response carries no
-        audio part."""
+        Raises :class:`QuotaExceeded` when every key is
+        rate-limited or rejected, :class:`GeminiApiError` on other
+        API/transport failures, and :class:`GeminiResponseError`
+        when the response carries no audio part."""
         if not self._keys:
             raise GeminiApiError(
                 "No Gemini API keys configured; add GEMINI_API_KEY "
@@ -107,15 +108,20 @@ class GeminiTTSClient:
             key = self._current_key()
             if key is None:
                 raise QuotaExceeded(
-                    "All Gemini API keys returned 429; the free "
-                    "daily quota resets at midnight Pacific."
+                    "All Gemini API keys were rejected or hit the "
+                    "daily quota; the free quota resets at "
+                    "midnight Pacific."
                 )
             status, body = self._post(key, payload)
-            if status == 429:
+            if _is_key_rejection(status, body):
+                # Key-scoped failure (quota spent, or the key is
+                # invalid/revoked): burn the key and try the next
+                # one. 5xx and transport errors stay fatal below.
                 self._exhausted.add(key)
                 logger.warning(
-                    "Gemini API key #%d hit 429; rotating to the "
-                    "next key.", self._key_index + 1,
+                    "Gemini API key #%d failed (HTTP %d); "
+                    "rotating to the next key.",
+                    self._key_index + 1, status,
                 )
                 continue
             if status == 200:
@@ -125,7 +131,7 @@ class GeminiTTSClient:
             )
 
     def _current_key(self) -> Optional[str]:
-        """First key that has not yet hit 429 this run."""
+        """First key that has not yet failed this run."""
         while self._key_index < len(self._keys):
             key = self._keys[self._key_index]
             if key not in self._exhausted:
@@ -165,6 +171,30 @@ class GeminiTTSClient:
         except ValueError:
             body = {}
         return response.status_code, body
+
+
+def _is_key_rejection(status: int, body: dict) -> bool:
+    """Whether an HTTP failure is scoped to the API key.
+
+    429 means the key's quota is spent and 403 means the key (or
+    its project) is forbidden — both warrant rotation. A 400 only
+    rotates when the error actually names the API key; a generic
+    bad-request 400 would fail identically on every key, so it
+    stays a fatal :class:`GeminiApiError`."""
+    if status in (403, 429):
+        return True
+    if status != 400:
+        return False
+    error = body.get("error") or {}
+    details = error.get("details") or []
+    reasons = {
+        d.get("reason", "")
+        for d in details
+        if isinstance(d, dict)
+    }
+    if "API_KEY_INVALID" in reasons:
+        return True
+    return "api key" in str(error.get("message", "")).lower()
 
 
 def build_payload(text: str, voice_name: str) -> dict:

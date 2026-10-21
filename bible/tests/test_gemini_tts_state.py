@@ -1,6 +1,8 @@
 """Tests for the resumable ``RunState`` JSON file."""
 import json
 
+import pytest
+
 from bible.services.gemini_tts.state import RunState
 
 
@@ -53,6 +55,31 @@ def test_request_counter_resets_on_new_pacific_day(tmp_path):
 def test_corrupt_state_file_starts_fresh(tmp_path):
     path = tmp_path / "state.json"
     path.write_text("{not json")
+
+    state = RunState(path)
+
+    assert state.requests_today == 0
+    assert state.completed_count() == 0
+    # ... and the file can be overwritten cleanly afterwards.
+    state.mark_completed("GEN", 1)
+    state.save()
+    assert RunState(path).is_completed("GEN", 1)
+
+
+@pytest.mark.parametrize("payload", [
+    {"completed": 5},                 # .items() on an int
+    {"completed": {"GEN": "abc"}},    # int("a") ValueError
+    {"completed": {"GEN": 5}},        # iterating an int
+    {"requests_today": {"bad": 1}},   # int(dict) TypeError
+    [1, 2, 3],                        # valid JSON, wrong root
+    "just a string",
+    42,
+])
+def test_wrong_shape_state_file_starts_fresh(tmp_path, payload):
+    """Valid-JSON-but-wrong-shape files must not wedge the run —
+    they are treated exactly like unparseable ones."""
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(payload))
 
     state = RunState(path)
 

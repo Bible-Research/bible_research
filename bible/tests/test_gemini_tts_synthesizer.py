@@ -12,6 +12,7 @@ from bible.services.gemini_tts import synthesizer as synth_module
 from bible.services.gemini_tts.client import SynthesisResult
 from bible.services.gemini_tts.synthesizer import (
     GeminiSynthesizer,
+    RequestBudgetExceeded,
     SegmentTruncatedError,
     is_truncated,
     split_verses_into_segments,
@@ -203,6 +204,57 @@ def test_retry_budget_bounds_requests_on_bad_chapter():
     # 1 initial call + at most a few retries — the budget caps
     # total spend instead of exploring the full split tree.
     assert client.requests_made <= 7
+
+
+def test_request_budget_caps_mid_chapter_spend():
+    """The daily-cap backstop: a chapter that keeps splitting can
+    never spend more API calls than ``request_budget`` allows,
+    so remaining headroom is a hard bound, not a suggestion."""
+    client = _FakeGemini(output_tokens=16384)  # always truncated
+    synth = _synth(
+        _verses(8, text_len=30), client,
+        max_segment_chars=10000, max_retries=10,
+    )
+
+    with pytest.raises(RequestBudgetExceeded):
+        synth.run("LVSGLU8", "JHN", 3, request_budget=3)
+
+    assert client.requests_made == 3
+
+
+def test_request_budget_spans_segments_not_just_splits():
+    """The budget counts every API call — a plain multi-segment
+    chapter stops mid-way too, not only during retry splits."""
+    client = _FakeGemini()
+    synth = _synth(
+        _verses(6, text_len=10), client,
+        max_segment_chars=30,  # 3 segments of 2 verses
+    )
+
+    with pytest.raises(RequestBudgetExceeded):
+        synth.run("LVSGLU8", "JHN", 3, request_budget=2)
+
+    assert client.requests_made == 2
+
+
+def test_request_budget_zero_makes_no_calls():
+    client = _FakeGemini()
+    synth = _synth(
+        _verses(2), client, max_segment_chars=30,
+    )
+
+    with pytest.raises(RequestBudgetExceeded):
+        synth.run("LVSGLU8", "JHN", 3, request_budget=0)
+
+    assert client.requests_made == 0
+
+
+def test_default_max_retries_bounds_worst_case_chapter():
+    """Regression for the review finding: the default retry cap
+    must keep a pathological single-segment chapter near ~7
+    requests (1 + 2 per split), not ~13."""
+    from bible.services.gemini_tts import synthesizer as m
+    assert m.DEFAULT_MAX_RETRIES == 3
 
 
 def test_single_truncated_verse_cannot_split_raises():
