@@ -9,7 +9,7 @@ first, ``--upload-gcs`` comes later.
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -62,10 +62,20 @@ def chapter_files_exist(
     book_id: str,
     chapter: int,
 ) -> bool:
+    """Both artifacts present and usable.
+
+    A zero-byte MP3 or unparseable JSON left by a crash mid-write
+    must not count as done — the chapter gets re-synthesized."""
     mp3_path, json_path = chapter_output_paths(
         output_dir, fileset_id, book_id, chapter,
     )
-    return mp3_path.exists() and json_path.exists()
+    if not mp3_path.is_file() or mp3_path.stat().st_size == 0:
+        return False
+    try:
+        json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def write_chapter_artifacts(
@@ -214,8 +224,15 @@ class Command(BaseCommand):
                 break
             before = client.requests_made
             try:
+                # Bound the chapter's spend by the remaining daily
+                # headroom: synthesis aborts mid-chapter
+                # (RequestBudgetExceeded) rather than letting one
+                # pathological chapter overrun the cap.
                 artifacts = synthesizer.run(
                     fileset_id, book_id, chap,
+                    request_budget=(
+                        max_requests - state.requests_today
+                    ),
                 )
             except QuotaExceeded as exc:
                 logger.warning(

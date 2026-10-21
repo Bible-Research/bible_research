@@ -10,6 +10,7 @@ import base64
 import json
 
 import pytest
+import requests
 
 from bible.services.gemini_tts.client import (
     GeminiApiError,
@@ -151,6 +152,105 @@ def test_non_429_http_error_raises_api_error():
 
     with pytest.raises(GeminiApiError, match="HTTP 500"):
         client.synthesize(text="teksts")
+
+
+def test_403_rotates_to_next_api_key():
+    """A revoked/forbidden key is key-scoped, not fatal: burn it
+    and keep going with the next key."""
+    session = _FakeSession([
+        _FakeResponse(403, {"error": {"status": "PERMISSION_DENIED"}}),
+        _FakeResponse(200, _tts_payload()),
+    ])
+    client = _client(session, keys=("key-a", "key-b"))
+
+    result = client.synthesize(text="teksts")
+
+    assert result.pcm_bytes
+    used_keys = [
+        c["headers"]["x-goog-api-key"] for c in session.calls
+    ]
+    assert used_keys == ["key-a", "key-b"]
+
+
+def test_400_invalid_api_key_rotates():
+    """Gemini answers HTTP 400 with reason API_KEY_INVALID for a
+    dead key — rotate instead of failing every chapter."""
+    session = _FakeSession([
+        _FakeResponse(400, {
+            "error": {
+                "status": "INVALID_ARGUMENT",
+                "message": "API key not valid.",
+                "details": [{"reason": "API_KEY_INVALID"}],
+            },
+        }),
+        _FakeResponse(200, _tts_payload()),
+    ])
+    client = _client(session, keys=("key-a", "key-b"))
+
+    result = client.synthesize(text="teksts")
+
+    assert result.pcm_bytes
+    used_keys = [
+        c["headers"]["x-goog-api-key"] for c in session.calls
+    ]
+    assert used_keys == ["key-a", "key-b"]
+
+
+def test_400_bad_payload_stays_fatal():
+    """A 400 that is NOT about the key would fail identically on
+    every key — rotate nothing, raise immediately."""
+    session = _FakeSession([
+        _FakeResponse(400, {
+            "error": {
+                "status": "INVALID_ARGUMENT",
+                "message": "Request contains an invalid argument.",
+            },
+        }),
+    ])
+    client = _client(session, keys=("key-a", "key-b"))
+
+    with pytest.raises(GeminiApiError, match="HTTP 400"):
+        client.synthesize(text="teksts")
+    assert len(session.calls) == 1
+
+
+def test_all_keys_rejected_raises_quota_exceeded():
+    session = _FakeSession([
+        _FakeResponse(403, {}),
+        _FakeResponse(403, {}),
+    ])
+    client = _client(session, keys=("key-a", "key-b"))
+
+    with pytest.raises(QuotaExceeded):
+        client.synthesize(text="teksts")
+    assert client.requests_made == 2
+
+
+def test_transport_error_raises_api_error():
+    """A connection failure surfaces as GeminiApiError, not a raw
+    requests exception. The attempt still counts toward
+    requests_made (deliberate conservative accounting)."""
+
+    class _FailSession:
+        def post(self, *args, **kwargs):
+            raise requests.ConnectionError("refused")
+
+    client = _client(_FailSession())
+
+    with pytest.raises(GeminiApiError, match="Gemini request failed"):
+        client.synthesize(text="teksts")
+    assert client.requests_made == 1
+
+
+def test_voice_name_override_reaches_payload():
+    session = _FakeSession([_FakeResponse(200, _tts_payload())])
+    client = _client(session)
+
+    client.synthesize(text="teksts", voice_name="Charon")
+
+    voice = session.calls[0]["json"]["generationConfig"]
+    cfg = voice["speechConfig"]["voiceConfig"]
+    assert cfg["prebuiltVoiceConfig"]["voiceName"] == "Charon"
 
 
 def test_response_without_audio_part_raises_response_error():

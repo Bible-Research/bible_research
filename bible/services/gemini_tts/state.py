@@ -95,24 +95,32 @@ class RunState:
             raw = json.loads(
                 self._path.read_text(encoding="utf-8")
             )
-        except (OSError, json.JSONDecodeError) as exc:
-            # A corrupt state file must not wedge the run: start
-            # over. Completed chapters are re-detected from the
-            # output dir anyway, so only the request counter is
-            # really lost.
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    "state root is not an object"
+                )
+            completed = {
+                book: {int(c) for c in chapters}
+                for book, chapters in (
+                    raw.get("completed") or {}
+                ).items()
+            }
+            day = raw.get("day")
+            requests_today = int(raw.get("requests_today", 0))
+        except (
+            OSError, ValueError, AttributeError, TypeError,
+        ) as exc:
+            # A corrupt or wrongly-shaped state file must not
+            # wedge the run: start over (JSONDecodeError is a
+            # ValueError; AttributeError/TypeError cover valid
+            # JSON of the wrong shape). Completed chapters are
+            # re-detected from the output dir anyway, so only
+            # the request counter is really lost.
             logger.warning(
                 "Could not parse state file %s (%s); starting "
                 "fresh.", self._path, exc,
             )
             return
-        for book, chapters in (raw.get("completed") or {}).items():
-            self._completed[book] = {
-                int(c) for c in chapters
-            }
-        self._day = raw.get("day")
-        try:
-            self._requests_today = int(
-                raw.get("requests_today", 0)
-            )
-        except (TypeError, ValueError):
-            self._requests_today = 0
+        self._completed = completed
+        self._day = day
+        self._requests_today = requests_today
