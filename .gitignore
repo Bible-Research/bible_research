@@ -15,6 +15,10 @@ db.sqlite3
 
 plan.md
 
+# Gemini TTS local audio output + resumable run state
+tts-out/
+gemini-tts-state.json
+
 # Terraform: ignore local secret overrides only (committed *.auto.tfvars set region/project).
 terraform/terraform.tfvars
 terraform/tfplan

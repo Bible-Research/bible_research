@@ -255,6 +255,17 @@ LOCK_STALE_HOURS = int(
     _audio_settings_source.get("LOCK_STALE_HOURS", 24)
 )
 
+# Gemini API key(s) for the free-tier generateContent TTS endpoint.
+# config.yaml may set GEMINI_API_KEY to a single string or a YAML
+# list (one key per free-tier project); normalized to a list here.
+_gemini_api_key = _audio_settings_source.get("GEMINI_API_KEY", [])
+if isinstance(_gemini_api_key, str):
+    _gemini_api_key = [_gemini_api_key]
+GEMINI_API_KEYS = [
+    str(k).strip() for k in (_gemini_api_key or [])
+    if str(k).strip()
+]
+
 _gcp_project = os.environ.get(
     "GOOGLE_CLOUD_PROJECT", "bible-research-489314"
 )

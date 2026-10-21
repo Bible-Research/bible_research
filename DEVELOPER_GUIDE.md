@@ -1306,6 +1306,39 @@ unchanged. The translations listing emits both audio filesets.
 `AUDIO_BUCKET_NAME`, `AUDIO_SIGNED_URL_TTL_SECONDS`,
 `MONTHLY_TTS_CHAR_LIMIT`, `LOCK_STALE_HOURS`.
 
+### Generated Audio (Gemini API free tier, local)
+
+`manage.py generate_gemini_audio` synthesizes the same LVSGLU8
+worklist through the **Gemini API** `generateContent` endpoint
+(`gemini-2.5-flash-preview-tts`), which has a free tier — unlike
+Cloud TTS. It is a local-only command (run on each boot, e.g. via
+launchd) that drips through ~15 requests/day per project until all
+1,189 chapters exist; no GCS upload yet.
+
+- **Auth**: `GEMINI_API_KEY` in `config.yaml` (gitignored) — a
+  single string or a YAML list of keys (one per free-tier GCP
+  project), normalized to `settings.GEMINI_API_KEYS`. Keys travel
+  in the `x-goog-api-key` header, never in URLs or logs.
+- **Segments**: each chapter splits into consecutive-verse
+  segments under `--max-segment-chars` (default 3000; ~5 chars/sec
+  at reverent pace keeps output under the ~655 s/16,384-token cap).
+  On truncation — detected via `usageMetadata` output tokens near
+  the cap or an implausible chars/sec, never via `finishReason`
+  (it stays `STOP` even when truncated) — the segment halves and
+  retries, bounded by a per-chapter retry budget.
+- **Pacing/quota**: `--sleep-seconds` (default 21, ~3 RPM) between
+  calls; `--max-requests` (default 14) per day. HTTP 429 rotates to
+  the next key; all keys exhausted → stop for the day.
+- **Resume**: `gemini-tts-state.json` (gitignored, repo root)
+  tracks completed chapters + a request counter that resets at
+  midnight Pacific. Chapters already on disk count as done even
+  if the state file is lost.
+- **Output**: `tts-out/LVSGLU8/<BOOK>/<CH>.mp3` plus
+  `<CH>_timestamps.json` — char-proportional verse-timestamp
+  estimates with exact anchors at each synthesized segment
+  boundary (Gemini TTS has no SSML-mark timepoints). MP3 encoding
+  uses `lameenc` (no ffmpeg).
+
 ---
 
 ## Authentication & Authorization
