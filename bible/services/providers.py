@@ -61,6 +61,7 @@ from bible.services.esv.registry import (
 )
 from bible.services.google_tts.registry import get_tts_config
 from bible.services.search_grouping import (
+    MAX_RESULTS,
     fetch_apibible_matches,
     fetch_dbt_matches,
     fetch_esv_matches,
@@ -174,9 +175,12 @@ class Provider:
         page of search results."""
         raise NotImplementedError
 
-    def search_grouped(self, query, books=None):
+    def search_grouped(self, query, books=None, sort_by=None):
         """Return ``{'groups': [...], 'meta': {...}}`` — every
-        match grouped per book (``group_by=book`` mode)."""
+        match grouped per book (``group_by=book`` mode).
+
+        ``sort_by`` is provider-specific (DBT only); providers
+        without an upstream sort parameter ignore it."""
         raise NotImplementedError
 
     def translation_listing(self, language_iso=None):
@@ -205,7 +209,10 @@ def _filter_by_iso(entries, language_iso):
     if not language_iso:
         return entries
     needle = language_iso.lower()
-    return [e for e in entries if e['iso'].lower() == needle]
+    return [
+        e for e in entries
+        if (e.get('iso') or '').lower() == needle
+    ]
 
 
 def _apibible_timecode(item):
@@ -255,6 +262,12 @@ def _no_verses(book_id, chapter, fileset_id):
         f"No verses found for {book_id} {chapter} "
         f"in fileset_id={fileset_id}"
     )
+
+
+def _fallback(value, default):
+    """``value`` unless it is ``None`` — distinguishes "absent"
+    from a legitimate ``0`` where ``or`` would misfire."""
+    return value if value is not None else default
 
 
 class ESVProvider(Provider):
@@ -330,7 +343,7 @@ class ESVProvider(Provider):
             'meta': {'pagination': pagination},
         }
 
-    def search_grouped(self, query, books=None):
+    def search_grouped(self, query, books=None, sort_by=None):
         verses, total, truncated = fetch_esv_matches(
             get_default_esv_client(), query
         )
@@ -398,12 +411,22 @@ class ApiBibleProvider(Provider):
             self._meta['audio_bible_id'], book_id, chapter
         )
         timecodes = audio.get('timecodes') or []
-        if not timecodes:
+        # Drop entries whose verse reference or timestamp failed
+        # to parse — emitting ``null`` fields would push the
+        # malformed upstream row onto clients.
+        mapped = [
+            tc for tc in (
+                _apibible_timecode(tc) for tc in timecodes
+            )
+            if tc['verse_start'] is not None
+            and tc['timestamp'] is not None
+        ]
+        if not mapped:
             raise TimestampsNotGeneratedError(
                 f"No timecodes for {book_id} {chapter} "
                 f"in fileset_id={self.fileset_id}"
             )
-        return [_apibible_timecode(tc) for tc in timecodes]
+        return mapped
 
     def get_copyright(self):
         # Audio fileset ids (``ENGNIVC1DA``) carry their own
@@ -461,7 +484,7 @@ class ApiBibleProvider(Provider):
             },
         }
 
-    def search_grouped(self, query, books=None):
+    def search_grouped(self, query, books=None, sort_by=None):
         verses, total, truncated = fetch_apibible_matches(
             get_default_apibible_client(),
             self._meta['bible_id'], query,
@@ -602,9 +625,15 @@ class SwordProvider(Provider):
         )
 
     def search(self, query, limit, page, sort_by=None, books=None):
-        matches = scan_sword_matches(
+        # Bound the local scan to what this page needs — a search
+        # that matches ~31k verses used to read every chapter in
+        # the module to answer page 1 (S7/search #5). When the
+        # cap stops the scan early, ``truncated`` marks ``total``
+        # as a lower bound so callers keep paging.
+        matches, truncated = scan_sword_matches(
             get_default_sword_client(),
             self.fileset_id, query, books,
+            max_matches=page * limit,
         )
         total = len(matches)
         start = (page - 1) * limit
@@ -621,20 +650,25 @@ class SwordProvider(Provider):
                     'per_page': limit,
                     'current_page': page,
                     'total_pages': total_pages,
-                }
+                },
+                'truncated': truncated,
             },
         }
 
-    def search_grouped(self, query, books=None):
-        verses = scan_sword_matches(
+    def search_grouped(self, query, books=None, sort_by=None):
+        # Grouped mode returns every match — cap it at the same
+        # MAX_RESULTS bound the other providers honor instead of
+        # scanning a whole-Bible result set into memory.
+        verses, truncated = scan_sword_matches(
             get_default_sword_client(),
             self.fileset_id, query, books,
+            max_matches=MAX_RESULTS,
         )
         return {
             'groups': group_verses_by_book(verses),
             'meta': {
                 'total': len(verses),
-                'truncated': False,
+                'truncated': truncated,
             },
         }
 
@@ -760,7 +794,14 @@ class DbtProvider(Provider):
         )
         filesets = []
         for item in (result or []):
+            # Defensive: a malformed DBT row (non-dict item, or a
+            # non-dict ``copyright`` payload) must not turn into
+            # an AttributeError → misleading 502.
+            if not isinstance(item, dict):
+                continue
             cr = item.get('copyright') or {}
+            if not isinstance(cr, dict):
+                cr = {}
             filesets.append({
                 'id': item.get('id'),
                 'type': item.get('type'),
@@ -789,32 +830,42 @@ class DbtProvider(Provider):
         # or result['verses']['meta'] (observed b4.dbt.io
         # behaviour). Normalise to a clean { pagination: { ... } }
         # shape and strip internal DBT 'links' so callers only
-        # ever use our own API to paginate.
+        # ever use our own API to paginate. The pagination object
+        # is always emitted — fields the provider omitted fall
+        # back to locally-known values rather than dropping the
+        # whole ``meta`` to ``{}``.
         raw_meta = (
             result.get('meta')
             or raw_verses.get('meta')
             or {}
         )
         pagination = raw_meta.get('pagination') or {}
+        total = _fallback(pagination.get('total'), len(normalized))
+        total_pages = pagination.get('total_pages')
+        if total_pages is None:
+            total_pages = (total + limit - 1) // limit if limit else 1
         meta = {
             'pagination': {
-                'total': pagination.get('total'),
-                'count': pagination.get('count'),
-                'per_page': pagination.get('per_page'),
-                'current_page': (
-                    pagination.get('current_page')
+                'total': total,
+                'count': _fallback(
+                    pagination.get('count'), len(normalized)
                 ),
-                'total_pages': (
-                    pagination.get('total_pages')
+                'per_page': _fallback(
+                    pagination.get('per_page'), limit
                 ),
+                'current_page': _fallback(
+                    pagination.get('current_page'), page
+                ),
+                'total_pages': total_pages,
             }
-        } if pagination else {}
+        }
         return {'verses': normalized, 'meta': meta}
 
-    def search_grouped(self, query, books=None):
+    def search_grouped(self, query, books=None, sort_by=None):
         verses, total, truncated = fetch_dbt_matches(
             get_default_dbt_client(),
             self.fileset_id, query, books,
+            sort_by=sort_by,
         )
         return {
             'groups': group_verses_by_book(verses),
@@ -823,7 +874,14 @@ class DbtProvider(Provider):
 
     def translation_listing(self, language_iso=None):
         """Raw DBT ``/bibles`` rows — the caller folds them
-        through ``TranslationService._process_translations``."""
+        through ``TranslationService._process_translations``.
+
+        Note: the listing is truncated at ``limit=500`` rows
+        (first page only). DBT hosts more bibles than that, so
+        long-tail translations never reach the endpoint —
+        accepted for now because the frontend's selector only
+        needs the well-known set; paging the full catalog would
+        multiply upstream calls on an anonymous endpoint."""
         params = {'limit': 500}
         if language_iso:
             params['language_code'] = language_iso.upper()

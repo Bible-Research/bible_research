@@ -368,6 +368,21 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Process-local cache. The app runs a single-instance App Engine
+# F1, so locmem is sufficient: it backs DRF throttling plus the
+# provider-response caches in ``bible/views.py`` and
+# ``bible/services/storage/gcs.py`` (translations, copyright, the
+# immutable GCS timestamps artifact, signed audio URLs). Cache
+# keys carry a ``v1:`` namespace so a format change can bump the
+# version instead of needing a flush. If a second instance or a
+# shared cache is ever needed, swap in Memcached/Redis.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'bible-research-locmem',
+    }
+}
+
 # REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [

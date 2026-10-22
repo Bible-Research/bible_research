@@ -1,6 +1,7 @@
 import logging
 import re
 
+from django.core.cache import cache
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
@@ -64,6 +65,14 @@ _MAX_VERSE_NUMBER = 200
 # SWORD scan pays per character.
 _MAX_SEARCH_QUERY_LENGTH = 200
 
+# Response-cache TTLs (S7). Translations change rarely and every
+# anonymous request used to cost a live DBT ``/bibles`` call;
+# copyright text is static per (provider, bible_id). Both get
+# ``Cache-Control: public, max-age=<ttl>`` so CDN/browser caches
+# match. Degraded/error responses are never cached.
+_TRANSLATIONS_CACHE_TTL_SECONDS = 6 * 60 * 60
+_COPYRIGHT_CACHE_TTL_SECONDS = 24 * 60 * 60
+
 
 def _parse_chapter_part(chapter_part):
     """Parse the trailing ``chapter[:verses]`` token of a passage.
@@ -123,14 +132,20 @@ class SearchRateThrottle(UserRateThrottle):
     scope = 'search'
 
 
-def provider_error_response(exc):
+def provider_error_response(exc, not_found_message=None):
     """Build an error ``Response`` for an upstream provider failure.
 
     Uses ``provider_error_fields`` so raw exception text — which can
     contain request URLs carrying credentials (e.g. DBT's ``?key=``
     query param) — never reaches the response body.
+
+    ``not_found_message`` overrides the default "Passage not found"
+    wording for endpoints that look up something else (e.g.
+    copyright info) — the ``error_code`` contract is unchanged.
     """
-    fields = provider_error_fields(exc)
+    fields = provider_error_fields(
+        exc, not_found_message=not_found_message
+    )
     return Response(
         fields,
         status=PROVIDER_ERROR_STATUSES.get(
@@ -260,18 +275,6 @@ class BiblePassageView(APIView):
                 )
                 raise
 
-            # Kept outside the ``int()`` try/except so this
-            # ValueError is not swallowed and re-raised as
-            # "Chapter must be a valid number".
-            if chapter <= 0:
-                logger.error(
-                    f"Invalid chapter number: {chapter} "
-                    f"(must be positive)"
-                )
-                raise ValueError(
-                    "Chapter must be a positive number"
-                )
-
             data = {
                 'book': book_id,
                 'book_name': book_name,
@@ -372,6 +375,37 @@ class BiblePassageView(APIView):
             )
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='fileset_id',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Audio fileset ID (e.g. ENGESVN2DA, '
+                'LVSGLU8C1DA, ENGNIVC1DA).'
+            ),
+            required=True,
+        ),
+        OpenApiParameter(
+            name='book',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Book name (e.g. John) — resolved to a '
+                'USFM book id.'
+            ),
+            required=True,
+        ),
+        OpenApiParameter(
+            name='chapter',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Chapter number (positive integer).',
+            required=True,
+        ),
+    ],
+)
 class AudioTimestampView(APIView):
     """Return audio timestamps for a chapter."""
 
@@ -441,8 +475,31 @@ class AudioTimestampView(APIView):
             return provider_error_response(e)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='bible_id',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Bible/fileset id (e.g. ENGESV, LVSGLU8, '
+                'ENGNIV_API) or a listing abbr (GLU8, NIV). '
+                'Named ``bible_id`` for historical reasons — '
+                'it accepts the same id space as '
+                '``fileset_id`` on the other endpoints.'
+            ),
+            required=True,
+        ),
+    ],
+)
 class CopyrightView(APIView):
-    """Return copyright info for a Bible translation."""
+    """Return copyright info for a Bible translation.
+
+    Successful responses are cached for
+    ``_COPYRIGHT_CACHE_TTL_SECONDS`` — copyright text is static —
+    and carry ``Cache-Control: public`` for CDN/browser caches.
+    Error and client-input responses are never cached.
+    """
 
     permission_classes = [AllowAny]
 
@@ -467,13 +524,36 @@ class CopyrightView(APIView):
             # license metadata instead of 404ing through DBT;
             # API.Bible still fetches the live copyright
             # statement; everything else proxies DBT.
-            data = provider_for(bible_id).get_copyright()
-            return Response({"data": data})
+            provider = provider_for(bible_id)
+            # The cache key covers every input that changes the
+            # output: the resolved provider and the raw id.
+            cache_key = (
+                f"v1:copyright:"
+                f"{type(provider).__name__}:{bible_id}"
+            )
+            cached = cache.get(cache_key)
+            if cached is not None:
+                response = Response(cached)
+            else:
+                data = provider.get_copyright()
+                body = {"data": data}
+                cache.set(
+                    cache_key, body,
+                    _COPYRIGHT_CACHE_TTL_SECONDS,
+                )
+                response = Response(body)
+            response['Cache-Control'] = (
+                f"public, max-age="
+                f"{_COPYRIGHT_CACHE_TTL_SECONDS}"
+            )
+            return response
         except Exception as e:
             logger.exception(
                 "Error fetching copyright: %s", e
             )
-            return provider_error_response(e)
+            return provider_error_response(
+                e, not_found_message='Copyright not found'
+            )
 
 
 @extend_schema(
@@ -640,7 +720,9 @@ class BibleSearchView(APIView):
             if group_by == 'book':
                 payload = provider_for(
                     fileset_id
-                ).search_grouped(query, books)
+                ).search_grouped(
+                    query, books, sort_by=sort_by
+                )
                 return Response({'data': payload})
 
             try:
@@ -681,17 +763,43 @@ class BibleSearchView(APIView):
             return provider_error_response(e)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='language_iso',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Filter by ISO 639-2/639-3 language code '
+                '(e.g. eng, lvs). Omit to list all '
+                'translations.'
+            ),
+            required=False,
+        ),
+    ],
+)
 class TranslationListView(APIView):
     """
-    Lists available Bible translations by fetching live from DBT API.
+    Lists available Bible translations, merging the live DBT
+    ``/bibles`` list with the bundled registry translations.
+
+    Successful responses are cached per ``language_iso`` for
+    ``_TRANSLATIONS_CACHE_TTL_SECONDS`` and carry
+    ``Cache-Control: public`` — an anonymous request used to cost
+    a live DBT call every time.
+
+    A DBT outage does not fail the request: the service falls
+    back to the static registry entries and the response carries
+    ``"degraded": true`` (never cached). A failure outside the
+    DBT fetch still surfaces as 502 ``provider_error``.
 
     Query Parameters:
         - language_iso: Filter by ISO language code
                        (e.g., 'eng', 'lvs')
 
     Example:
-        /api/v1/translations/
-        /api/v1/translations/?language_iso=eng
+        /api/v1/bible/translations/
+        /api/v1/bible/translations/?language_iso=eng
     """
 
     permission_classes = [AllowAny]
@@ -709,31 +817,71 @@ class TranslationListView(APIView):
                 "language_iso must be a 2-3 letter ISO code."
             )
 
+        # The cache key covers every input that changes the
+        # output: the iso filter (case-insensitive; ''/missing
+        # both mean "all").
+        cache_key = (
+            f"v1:translations:"
+            f"{(language_iso or '').lower() or 'all'}"
+        )
+        cached = cache.get(cache_key)
+        if cached is not None:
+            response = Response(cached)
+            response['Cache-Control'] = (
+                f"public, max-age="
+                f"{_TRANSLATIONS_CACHE_TTL_SECONDS}"
+            )
+            return response
+
         try:
-            translations = TranslationService.get_live_translations(
-                language_iso
+            translations, dbt_failed = (
+                TranslationService.get_live_translations(
+                    language_iso
+                )
             )
             logger.info(
                 f"Found {len(translations)} translations "
                 f"for language_iso: {language_iso or 'all'}"
             )
 
+            # Defensive mapping: a malformed service row must
+            # degrade to null fields, not KeyError → a
+            # misleading 502 provider_error.
             response_data = [
                 {
-                    'abbr': t['abbr'],
-                    'name': t['name'],
-                    'language': t['language'],
-                    'language_iso': t['iso'],
-                    'filesets': t['filesets'],
-                    'text_options': t.get('text_options', []),
-                    'audio_options': t.get('audio_options', []),
+                    'abbr': t.get('abbr'),
+                    'name': t.get('name'),
+                    'language': t.get('language'),
+                    'language_iso': t.get('iso'),
+                    'filesets': t.get('filesets') or [],
+                    'text_options': t.get('text_options') or [],
+                    'audio_options': t.get('audio_options') or [],
                 }
                 for t in translations
             ]
             logger.debug(
                 f"Returning {len(response_data)} translations"
             )
-            return Response({'results': response_data})
+            body = {
+                'results': response_data,
+                'degraded': dbt_failed,
+            }
+            # Degraded responses are intentionally cached neither
+            # server-side nor downstream — they must recover as
+            # soon as DBT does.
+            response = Response(body)
+            if dbt_failed:
+                response['Cache-Control'] = 'no-store'
+            else:
+                cache.set(
+                    cache_key, body,
+                    _TRANSLATIONS_CACHE_TTL_SECONDS,
+                )
+                response['Cache-Control'] = (
+                    f"public, max-age="
+                    f"{_TRANSLATIONS_CACHE_TTL_SECONDS}"
+                )
+            return response
 
         except Exception as e:
             logger.exception(

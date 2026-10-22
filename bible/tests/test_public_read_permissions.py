@@ -54,9 +54,11 @@ class BibleAnonymousReadTests(TestCase):
     @patch.object(
         TranslationService,
         'get_live_translations',
-        return_value=[],
+        return_value=([], False),
     )
     def test_translations_anonymous(self, _mock):
         resp = self.client.get(reverse('translation-list'))
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {'results': []})
+        self.assertEqual(
+            resp.json(), {'results': [], 'degraded': False}
+        )

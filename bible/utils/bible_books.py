@@ -134,6 +134,70 @@ _BOOK_ALIASES = {
     'apocalypse': 'revelation',
 }
 
+# OSIS book abbreviations ('Ps', 'Gen', 'Matt', '1Sam', ...) plus
+# frequent short forms, keyed by their post-normalisation
+# lowercase spelling. These are exact lookups, not fuzzy guesses:
+# e.g. 'phil' is Philippians while 'phlm' is Philemon, and 'jud'
+# is deliberately absent (ambiguous between Judges and Jude).
+_BOOK_ALIASES.update({
+    # Old Testament
+    'gen': 'genesis',
+    'exod': 'exodus',
+    'lev': 'leviticus',
+    'num': 'numbers',
+    'deut': 'deuteronomy',
+    'josh': 'joshua',
+    'judg': 'judges',
+    '1sam': '1 samuel', '1 sam': '1 samuel',
+    '2sam': '2 samuel', '2 sam': '2 samuel',
+    '1kgs': '1 kings', '1 kgs': '1 kings',
+    '2kgs': '2 kings', '2 kgs': '2 kings',
+    '1chr': '1 chronicles', '1 chr': '1 chronicles',
+    '2chr': '2 chronicles', '2 chr': '2 chronicles',
+    'neh': 'nehemiah',
+    'esth': 'esther', 'est': 'esther',
+    'ps': 'psalms',
+    'prov': 'proverbs',
+    'eccl': 'ecclesiastes',
+    'song': 'song of solomon',
+    'isa': 'isaiah',
+    'jer': 'jeremiah',
+    'lam': 'lamentations',
+    'ezek': 'ezekiel',
+    'dan': 'daniel',
+    'hos': 'hosea',
+    'obad': 'obadiah',
+    'mic': 'micah',
+    'nah': 'nahum',
+    'hab': 'habakkuk',
+    'zeph': 'zephaniah',
+    'hag': 'haggai',
+    'zech': 'zechariah',
+    'mal': 'malachi',
+    # New Testament
+    'matt': 'matthew',
+    'rom': 'romans',
+    '1cor': '1 corinthians', '1 cor': '1 corinthians',
+    '2cor': '2 corinthians', '2 cor': '2 corinthians',
+    'gal': 'galatians',
+    'eph': 'ephesians',
+    'phil': 'philippians',
+    'col': 'colossians',
+    '1thess': '1 thessalonians', '1 thess': '1 thessalonians',
+    '2thess': '2 thessalonians', '2 thess': '2 thessalonians',
+    '1tim': '1 timothy', '1 tim': '1 timothy',
+    '2tim': '2 timothy', '2 tim': '2 timothy',
+    'phlm': 'philemon',
+    'heb': 'hebrews',
+    'jas': 'james',
+    '1pet': '1 peter', '1 pet': '1 peter',
+    '2pet': '2 peter', '2 pet': '2 peter',
+    '1john': '1 john',
+    '2john': '2 john',
+    '3john': '3 john',
+    'rev': 'revelation',
+})
+
 _NUMBER_WORDS = {'first': '1', 'second': '2', 'third': '3'}
 
 _ORDINAL_RE = re.compile(r'\b([123])(?:st|nd|rd|th)\b')

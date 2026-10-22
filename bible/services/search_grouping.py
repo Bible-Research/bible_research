@@ -63,12 +63,22 @@ def parse_esv_results(results):
     return verses
 
 
+def _int_or_none(value):
+    """Coerce a provider value to ``int`` (``None`` when not
+    numeric) — DBT serializes ``chapter``/``verse_start`` as
+    strings in some payloads."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_dbt_verse(item):
     """Normalize one DBT ``/search`` verse item."""
     return {
         'book_id': item.get('book_id'),
-        'chapter': item.get('chapter'),
-        'verse_start': item.get('verse_start'),
+        'chapter': _int_or_none(item.get('chapter')),
+        'verse_start': _int_or_none(item.get('verse_start')),
         'verse_text': item.get('verse_text'),
     }
 
@@ -166,18 +176,23 @@ def group_verses_by_book(verses):
     return groups
 
 
-def fetch_dbt_matches(client, fileset_id, query, books):
+def fetch_dbt_matches(
+    client, fileset_id, query, books, sort_by=None,
+):
     """Fetch all DBT matches for a grouped search.
 
     ``limit`` is uncapped on DBT, so the first call usually
     returns everything; remaining pages are fetched until the
     provider-reported total is reached or ``MAX_RESULTS`` caps
-    the fetch.
+    the fetch. ``sort_by`` is forwarded on every call — dropping
+    it on page 2+ would let the provider reorder mid-pagination
+    and skip/duplicate rows.
 
     Returns ``(verses, total, truncated)``.
     """
     result = client.search(
-        fileset_id, query, limit=MAX_RESULTS, books=books,
+        fileset_id, query,
+        limit=MAX_RESULTS, sort_by=sort_by, books=books,
     )
     raw_verses = result.get('verses') or {}
     items = list(raw_verses.get('data') or [])
@@ -203,7 +218,8 @@ def fetch_dbt_matches(client, fileset_id, query, books):
         page += 1
         result = client.search(
             fileset_id, query,
-            limit=per_page, page=page, books=books,
+            limit=per_page, page=page,
+            sort_by=sort_by, books=books,
         )
         more = (result.get('verses') or {}).get('data') or []
         if not more:
@@ -288,12 +304,19 @@ def fetch_esv_matches(client, query):
     return verses, total, total_pages > MAX_ESV_PAGES
 
 
-def scan_sword_matches(client, fileset_id, query, books):
-    """Scan all SWORD chapters and return the full match list.
+def scan_sword_matches(
+    client, fileset_id, query, books, max_matches=None,
+):
+    """Scan SWORD chapters and return ``(matches, truncated)``.
 
     ``books`` (comma-separated USFM ids) restricts the chapters
     scanned. Matches stay in the chapter order the client
     returns; grouping sorts them canonically anyway.
+
+    ``max_matches`` bounds the local scan: once that many matches
+    are collected the remaining chapters are skipped and
+    ``truncated`` is ``True`` (the match count is then a lower
+    bound, not the true total). ``None`` scans everything.
     """
     chapters = client.list_chapters(fileset_id)
 
@@ -308,12 +331,32 @@ def scan_sword_matches(client, fileset_id, query, books):
 
     needle = query.lower()
     matches = []
+    truncated = False
     for book_id, chapter in chapters:
         try:
             verses = client.get_chapter_verses(
                 fileset_id, book_id, chapter
             )
+        except (ValueError, OSError) as e:
+            # Expected coverage misses: the chapter is outside
+            # the module's canon (ValueError /
+            # PassageNotFoundError) or its data file is absent
+            # (OSError) — skip it like the old bare ``except``.
+            logger.debug(
+                "Skipping SWORD chapter %s %s: %s",
+                book_id, chapter, e,
+            )
+            continue
         except Exception:
+            # Anything else is a real bug or data corruption —
+            # log it instead of swallowing silently, but keep
+            # the scan going so one bad chapter can't blank a
+            # whole search.
+            logger.exception(
+                "Unexpected error scanning SWORD chapter "
+                "%s %s in %s",
+                book_id, chapter, fileset_id,
+            )
             continue
         for v in verses:
             text = v.get('verse_text', '')
@@ -324,4 +367,8 @@ def scan_sword_matches(client, fileset_id, query, books):
                     'verse_start': v['verse_start'],
                     'verse_text': text,
                 })
-    return matches
+        if max_matches is not None and len(matches) >= max_matches:
+            truncated = True
+            matches = matches[:max_matches]
+            break
+    return matches, truncated
