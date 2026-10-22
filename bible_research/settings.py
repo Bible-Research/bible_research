@@ -374,11 +374,13 @@ REST_FRAMEWORK = {
         'bible_research.permissions.GuestReadOnly',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
-    # GAE's load balancer appends the real client IP as the
-    # last X-Forwarded-For entry; trusting exactly one proxy
-    # hop makes DRF key throttle idents on that appended IP
-    # instead of the whole client-spoofable XFF string.
-    'NUM_PROXIES': 1,
+    # GAE's fronting load balancer appends TWO IPs to
+    # X-Forwarded-For: the client IP, then the fixed
+    # GLOBAL_FORWARDING_RULE_IP. NUM_PROXIES=2 makes DRF key
+    # throttle idents on the second-to-last entry — the real
+    # client IP — not the shared forwarding-rule IP or the
+    # client-spoofable XFF prefix.
+    'NUM_PROXIES': 2,
     # Scoped throttle rates — only /api/token/ and
     # /api/v1/users/register/ opt in via throttle_classes; no
     # global DEFAULT_THROTTLE_CLASSES is configured.

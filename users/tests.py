@@ -232,9 +232,10 @@ class AuthEndpointThrottlingTest(TestCase):
         RegisterRateThrottle.THROTTLE_RATES, {'register': '1/min'}
     )
     def test_register_throttle_ignores_spoofed_xff_prefix(self):
-        """NUM_PROXIES=1 keys the throttle ident on the LAST
-        X-Forwarded-For entry — the IP the trusted GAE load
-        balancer appends — so rotating a client-supplied XFF
+        """NUM_PROXIES=2 keys the throttle ident on the
+        second-to-last X-Forwarded-For entry — the client IP:
+        GAE's load balancer appends CLIENT_IP plus a fixed
+        forwarding-rule IP, so rotating a client-supplied XFF
         prefix cannot mint a fresh ident per request."""
         payload = {
             'username': 'xff_user1',
@@ -245,7 +246,9 @@ class AuthEndpointThrottlingTest(TestCase):
             self.REGISTER_URL,
             payload,
             format='json',
-            HTTP_X_FORWARDED_FOR='198.51.100.1, 203.0.113.9',
+            HTTP_X_FORWARDED_FOR=(
+                'spoofedA, 198.51.100.1, 203.0.113.9'
+            ),
         )
         self.assertEqual(resp.status_code, 201)
         payload['username'] = 'xff_user2'
@@ -253,6 +256,8 @@ class AuthEndpointThrottlingTest(TestCase):
             self.REGISTER_URL,
             payload,
             format='json',
-            HTTP_X_FORWARDED_FOR='192.0.2.77, 203.0.113.9',
+            HTTP_X_FORWARDED_FOR=(
+                'spoofedB, 198.51.100.1, 203.0.113.9'
+            ),
         )
         self.assertEqual(resp.status_code, 429)
