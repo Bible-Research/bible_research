@@ -67,8 +67,56 @@ def pytest_configure():
                     ],
                 },
             }],
+            # Mirror production's validators so register tests
+            # exercise the same password rules (the global
+            # default is an empty list — validate_password
+            # would no-op).
+            AUTH_PASSWORD_VALIDATORS=[
+                {
+                    'NAME': (
+                        'django.contrib.auth.'
+                        'password_validation.'
+                        'UserAttributeSimilarityValidator'
+                    ),
+                },
+                {
+                    'NAME': (
+                        'django.contrib.auth.'
+                        'password_validation.'
+                        'MinimumLengthValidator'
+                    ),
+                },
+                {
+                    'NAME': (
+                        'django.contrib.auth.'
+                        'password_validation.'
+                        'CommonPasswordValidator'
+                    ),
+                },
+                {
+                    'NAME': (
+                        'django.contrib.auth.'
+                        'password_validation.'
+                        'NumericPasswordValidator'
+                    ),
+                },
+            ],
             # Full URL conf so comment API routes resolve
             ROOT_URLCONF='bible_research.urls',
+            # Scoped throttles on /api/token/ and
+            # /api/v1/users/register/ need their scope rates to
+            # exist or SimpleRateThrottle raises
+            # ImproperlyConfigured. Generous on purpose: throttle
+            # history lives in the process-wide locmem cache that
+            # is shared across tests, so the real rates in
+            # settings.py would trip the suite — dedicated
+            # throttle tests shrink the rate via patch.dict.
+            REST_FRAMEWORK={
+                'DEFAULT_THROTTLE_RATES': {
+                    'token': '1000/min',
+                    'register': '1000/min',
+                },
+            },
             # Suppress warning about default secret key
             SECRET_KEY='a-test-secret-for-pytest',
         )
@@ -102,6 +150,15 @@ PROD_REST_FRAMEWORK = {
         'bible_research.permissions.GuestReadOnly',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Mirrors production's rates for fidelity; note that
+    # SimpleRateThrottle.THROTTLE_RATES is bound once at
+    # rest_framework.throttling import time (to the pytest
+    # settings above), so in practice the generous test rates
+    # apply even under this override.
+    'DEFAULT_THROTTLE_RATES': {
+        'token': '5/min',
+        'register': '10/min',
+    },
 }
 
 

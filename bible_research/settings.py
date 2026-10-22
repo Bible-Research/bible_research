@@ -374,6 +374,13 @@ REST_FRAMEWORK = {
         'bible_research.permissions.GuestReadOnly',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Scoped throttle rates — only /api/token/ and
+    # /api/v1/users/register/ opt in via throttle_classes; no
+    # global DEFAULT_THROTTLE_CLASSES is configured.
+    'DEFAULT_THROTTLE_RATES': {
+        'token': '5/min',
+        'register': '10/min',
+    },
 }
 
 SPECTACULAR_SETTINGS = {

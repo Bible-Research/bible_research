@@ -6,8 +6,9 @@ from drf_spectacular.views import (
     SpectacularRedocView,
     SpectacularSwaggerView,
 )
-from rest_framework.authtoken.views import obtain_auth_token
 from rest_framework.permissions import AllowAny
+
+from users.views import ThrottledObtainAuthToken
 
 urlpatterns = [
     path('', RedirectView.as_view(url='/api/v1/docs/', permanent=False)),
@@ -15,7 +16,11 @@ urlpatterns = [
     path('api/v1/', include('bible.urls')),
     path('api/v1/', include('annotations.urls')),
     path('api/v1/users/', include('users.urls')),
-    path('api/token/', obtain_auth_token, name='api_token'),
+    path(
+        'api/token/',
+        ThrottledObtainAuthToken.as_view(),
+        name='api_token',
+    ),
 
     # API Schema and Documentation (public — auth enforced per endpoint)
     path(

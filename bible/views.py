@@ -59,6 +59,20 @@ _CHAPTER_PART_RE = re.compile(
     r"^(\d+)(?::(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*))?$"
 )
 
+# Bounds for the ``passage`` input and its verse grammar. This
+# endpoint is AllowAny: without caps a value like
+# ``John 3:1-999999999`` expands into ~10^9 ints in memory
+# (unauthenticated DoS). 200 covers the longest chapter in the
+# canon (Psalms 119 has 176 verses).
+_MAX_PASSAGE_LENGTH = 100
+_MAX_VERSE_SEGMENTS = 25
+_MAX_VERSE_NUMBER = 200
+
+# Bound for the ``query`` param of ``BibleSearchView`` — upstream
+# providers reject absurdly long queries anyway, and the local
+# SWORD scan pays per character.
+_MAX_SEARCH_QUERY_LENGTH = 200
+
 
 def _parse_chapter_part(chapter_part):
     """Parse the trailing ``chapter[:verses]`` token of a passage.
@@ -80,8 +94,14 @@ def _parse_chapter_part(chapter_part):
     selector = match.group(2)
     if not selector:
         return chapter, None
+    segments = selector.split(',')
+    if len(segments) > _MAX_VERSE_SEGMENTS:
+        raise ValueError(
+            f"Too many verse segments "
+            f"(max {_MAX_VERSE_SEGMENTS})"
+        )
     verses = set()
-    for segment in selector.split(','):
+    for segment in segments:
         bounds = segment.split('-')
         start = int(bounds[0])
         end = int(bounds[1]) if len(bounds) > 1 else start
@@ -89,6 +109,11 @@ def _parse_chapter_part(chapter_part):
             raise ValueError(
                 "Verse selectors must be positive numbers "
                 "with Start <= End (e.g., '3:16-18')"
+            )
+        if end > _MAX_VERSE_NUMBER:
+            raise ValueError(
+                f"Verse numbers must be between 1 and "
+                f"{_MAX_VERSE_NUMBER}"
             )
         verses.update(range(start, end + 1))
     return chapter, sorted(verses)
@@ -193,6 +218,21 @@ class BiblePassageView(APIView):
                 {
                     "error": "Passage parameter is required. "
                              "Example: ?passage=John+3"
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if len(passage) > _MAX_PASSAGE_LENGTH:
+            logger.warning(
+                "Passage parameter too long: %d chars",
+                len(passage),
+            )
+            return Response(
+                {
+                    "error": (
+                        f"Passage parameter is too long "
+                        f"(max {_MAX_PASSAGE_LENGTH} characters)."
+                    )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -407,6 +447,7 @@ class AudioTimestampView(APIView):
                                 "Timestamps not yet generated for "
                                 "this chapter."
                             ),
+                            "error_code": "not_found",
                         },
                         status=status.HTTP_404_NOT_FOUND,
                     )
@@ -439,6 +480,7 @@ class AudioTimestampView(APIView):
                                 "Timestamps not yet generated for "
                                 "this chapter."
                             ),
+                            "error_code": "not_found",
                         },
                         status=status.HTTP_404_NOT_FOUND,
                     )
@@ -462,7 +504,7 @@ class AudioTimestampView(APIView):
                         "timestamp"
                     ),
                 }
-                for item in result.get("data", [])
+                for item in (result.get("data") or [])
             ]
             return Response({"data": timestamps})
         except Exception as e:
@@ -642,9 +684,23 @@ class BibleSearchView(APIView):
         query = request.query_params.get('query')
         fileset_id = request.query_params.get('fileset_id')
 
+        # A whitespace-only query must not pass the required check:
+        # ``' ' in text`` matches ~31k verses per SWORD chapter and
+        # turns the local scan into a whole-Bible crawl.
+        query = (query or '').strip()
         if not query:
             return Response(
                 {"error": "query parameter is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(query) > _MAX_SEARCH_QUERY_LENGTH:
+            return Response(
+                {
+                    "error": (
+                        f"query must be at most "
+                        f"{_MAX_SEARCH_QUERY_LENGTH} characters."
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not fileset_id:

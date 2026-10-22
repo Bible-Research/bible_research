@@ -1,9 +1,14 @@
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
+
+from users.views import RegisterRateThrottle, TokenRateThrottle
 
 User = get_user_model()
 
@@ -115,3 +120,99 @@ class ObtainAuthTokenTestCase(TestCase):
         self.assertEqual(
             response.status_code, status.HTTP_400_BAD_REQUEST
         )
+
+
+class AuthEndpointThrottlingTest(TestCase):
+    """Scoped throttles on POST /api/token/ and register/.
+
+    The pytest settings use a generous rate so ordinary tests
+    never trip; these tests shrink it via ``patch.dict`` on the
+    shared THROTTLE_RATES dict (the class attribute DRF binds
+    once at import — override_settings cannot reach it).
+    """
+
+    TOKEN_URL = '/api/token/'
+    REGISTER_URL = '/api/v1/users/register/'
+
+    def setUp(self):
+        # Throttle history lives in the process-wide locmem
+        # cache shared by every test — clear it so history
+        # from unrelated tests can't skew these counts.
+        cache.clear()
+        self.client = APIClient()
+
+    def _register(self, username):
+        return self.client.post(
+            self.REGISTER_URL,
+            {
+                'username': username,
+                'password': 'secure-pass-123',
+                'password_confirm': 'secure-pass-123',
+            },
+            format='json',
+        )
+
+    @patch.dict(
+        TokenRateThrottle.THROTTLE_RATES, {'token': '2/min'}
+    )
+    def test_token_endpoint_throttles_per_username(self):
+        """The third token attempt for the same username inside
+        the window is rejected with 429."""
+        User.objects.create_user(
+            username='limited', password='password123'
+        )
+        payload = {
+            'username': 'limited', 'password': 'password123',
+        }
+        for _ in range(2):
+            resp = self.client.post(
+                self.TOKEN_URL, payload, format='json'
+            )
+            self.assertEqual(resp.status_code, 200)
+        resp = self.client.post(
+            self.TOKEN_URL, payload, format='json'
+        )
+        self.assertEqual(resp.status_code, 429)
+
+    @patch.dict(
+        TokenRateThrottle.THROTTLE_RATES, {'token': '1/min'}
+    )
+    def test_token_throttle_is_per_username_not_per_ip(self):
+        """A different username keeps working after another
+        account hits the cap — the key is the username."""
+        User.objects.create_user(
+            username='capped', password='password123'
+        )
+        User.objects.create_user(
+            username='other', password='password123'
+        )
+        self.client.post(
+            self.TOKEN_URL,
+            {'username': 'capped', 'password': 'password123'},
+            format='json',
+        )
+        resp = self.client.post(
+            self.TOKEN_URL,
+            {'username': 'capped', 'password': 'password123'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 429)
+        resp = self.client.post(
+            self.TOKEN_URL,
+            {'username': 'other', 'password': 'password123'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    @patch.dict(
+        RegisterRateThrottle.THROTTLE_RATES, {'register': '2/min'}
+    )
+    def test_register_endpoint_throttles(self):
+        """The third registration from the same client inside
+        the window is rejected with 429."""
+        resp = self._register('throttle_user1')
+        self.assertEqual(resp.status_code, 201)
+        resp = self._register('throttle_user2')
+        self.assertEqual(resp.status_code, 201)
+        resp = self._register('throttle_user3')
+        self.assertEqual(resp.status_code, 429)

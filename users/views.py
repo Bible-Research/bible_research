@@ -1,10 +1,16 @@
 import logging
 
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework.decorators import (
+    api_view,
+    permission_classes,
+    throttle_classes,
+)
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
+from rest_framework.throttling import SimpleRateThrottle
 from django.contrib.auth import get_user_model
 from drf_spectacular.utils import (
     extend_schema,
@@ -19,6 +25,51 @@ from .serializers import (
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+
+
+class TokenRateThrottle(SimpleRateThrottle):
+    """Per-username throttle for ``POST /api/token/``.
+
+    Keying on the supplied username (rather than the source IP)
+    bounds online credential brute force against a single account
+    regardless of how the requests are distributed. Requests
+    without a ``username`` fall back to per-IP throttling so
+    malformed enumeration probes are still bounded.
+    """
+    scope = 'token'
+
+    def get_cache_key(self, request, view):
+        username = request.data.get('username')
+        if username:
+            ident = str(username).lower()
+        else:
+            ident = self.get_ident(request)
+        return self.cache_format % {
+            'scope': self.scope,
+            'ident': ident,
+        }
+
+
+class RegisterRateThrottle(SimpleRateThrottle):
+    """Per-client throttle on ``POST /api/v1/users/register/``
+    — bounds bulk account creation and username/email
+    enumeration."""
+    scope = 'register'
+
+    def get_cache_key(self, request, view):
+        if request.user and request.user.is_authenticated:
+            ident = request.user.pk
+        else:
+            ident = self.get_ident(request)
+        return self.cache_format % {
+            'scope': self.scope,
+            'ident': ident,
+        }
+
+
+class ThrottledObtainAuthToken(ObtainAuthToken):
+    """``obtain_auth_token`` with a credential-guess throttle."""
+    throttle_classes = [TokenRateThrottle]
 
 
 @extend_schema(
@@ -58,6 +109,7 @@ logger = logging.getLogger(__name__)
 )
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([RegisterRateThrottle])
 def register_user(request):
     """
     Register a new user account.

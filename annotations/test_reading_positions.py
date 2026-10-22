@@ -174,15 +174,11 @@ class ReadingPositionApiTest(TestCase):
         )
         self.assertEqual(resp.status_code, 403)
 
-    def test_case_variant_books_create_separate_rows(self):
-        """'John' and 'john' currently upsert into TWO rows.
-
-        Pinned current behaviour — not desired behaviour.
-        """
-        # FIXME: case-variant book names bypass the upsert —
-        # validate_book stores the raw value while the
-        # (user, book) unique_together is case-sensitive, so
-        # 'John' and 'john' never merge into one position.
+    def test_case_variant_books_upsert_one_row(self):
+        """'John' and 'john' canonicalize to the same stored
+        book and upsert into ONE row — validate_book returns
+        the title-cased canonical name so the case-sensitive
+        (user, book) unique_together can't be forked."""
         resp = self.client.post(
             self.URL,
             {'book': 'John', 'chapter': 3, 'verse': 16},
@@ -196,10 +192,40 @@ class ReadingPositionApiTest(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         positions = ReadingPosition.objects.filter(user=self.user)
-        self.assertEqual(positions.count(), 2)
-        self.assertEqual(
-            {p.book for p in positions}, {'John', 'john'}
+        self.assertEqual(positions.count(), 1)
+        position = positions.get()
+        self.assertEqual(position.book, 'John')
+        self.assertEqual(position.chapter, 5)
+        self.assertEqual(position.verse, 1)
+
+    def test_patch_book_is_rejected(self):
+        """book is the upsert key and immutable after create:
+        PATCHing it to another book returns 400 instead of
+        colliding with (or forking) a second row."""
+        position = self._position(self.user, 'John')
+        resp = self.client.patch(
+            f'{self.URL}{position.id}/',
+            {'book': 'Mark'},
+            format='json',
         )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('book', resp.json())
+        position.refresh_from_db()
+        self.assertEqual(position.book, 'John')
+
+    def test_patch_same_book_canonical_form_allowed(self):
+        """PATCH carrying the same book (in any accepted
+        variant) is a no-op on the key and still 200s."""
+        position = self._position(self.user, 'John')
+        resp = self.client.patch(
+            f'{self.URL}{position.id}/',
+            {'book': 'john', 'chapter': 7},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        position.refresh_from_db()
+        self.assertEqual(position.book, 'John')
+        self.assertEqual(position.chapter, 7)
 
     def test_guest_patch_delete_bulk_403(self):
         """GuestReadOnly rejects every write by the shared 'guest'

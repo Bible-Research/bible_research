@@ -17,7 +17,10 @@ from bible.services.esv.client import get_default_esv_client
 from bible.services.esv.registry import is_esv_fileset
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import is_sword_fileset
-from bible.utils.bible_books import get_dbt_book_id
+from bible.utils.bible_books import (
+    get_book_name_from_id,
+    get_dbt_book_id,
+)
 from bible.utils.provider_errors import (
     PassageNotFoundError,
     provider_error_fields,
@@ -297,6 +300,16 @@ class NoteSerializer(serializers.ModelSerializer):
             instance.verses.all(), key=lambda v: v.verse
         )
         if not verses:
+            # Emit the same keys as the verse-linked path so the
+            # response shape never depends on verse linkage
+            # (clients used to have to sniff for absent
+            # ``verses``/``headings`` and a raw ``tag`` PK).
+            representation['verses'] = []
+            representation['headings'] = []
+            if instance.tag:
+                representation['tag'] = TagSerializer(
+                    instance.tag
+                ).data
             return representation
 
         dbt_book_id = verses[0].dbt_book_id
@@ -861,12 +874,39 @@ class ReadingPositionSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'last_accessed']
 
     def validate_book(self, value):
-        """Validate book name against known Bible books."""
-        if get_dbt_book_id(value) is None:
+        """Validate *and canonicalize* the book name.
+
+        The lookup is tolerant (aliases, case, typos) but the row
+        must store one canonical title-cased name — the
+        ``(user, book)`` uniqueness and the ``?book=``/``bulk``
+        lookups are exact-match, so storing the raw variant
+        ('john') would fork a second position for the same
+        logical book.
+        """
+        book_id = get_dbt_book_id(value)
+        if book_id is None:
             raise serializers.ValidationError(
                 f"Invalid book name: {value}"
             )
-        return value
+        return get_book_name_from_id(book_id)
+
+    def update(self, instance, validated_data):
+        """Reject attempts to change ``book`` on an existing row.
+
+        ``book`` is the upsert key: letting it change under PATCH
+        would either fork the position or collide with another
+        row's ``(user, book)`` pair (a 500). Re-seating a
+        position goes through delete + create instead.
+        """
+        new_book = validated_data.get('book')
+        if new_book is not None and new_book != instance.book:
+            raise serializers.ValidationError({
+                'book': (
+                    'book cannot be changed after creation; '
+                    'delete the position and create a new one.'
+                )
+            })
+        return super().update(instance, validated_data)
 
     def create(self, validated_data):
         """Create or update reading position (upsert behavior)."""
