@@ -2,8 +2,10 @@
 """
 Script to create users for the Bible Research project.
 
-This script can create both a guest user (for anonymous access) and a test user
-(for development and testing purposes).
+This script can create both a guest user (a locked legacy
+account that owns rows predating the removal of device
+auto-provisioning) and a test user (for development and
+testing purposes).
 
 Usage:
     # Create both guest and test users
@@ -64,19 +66,28 @@ def create_user(username, email, password, is_staff=False):
 
 
 def create_guest_user():
-    """Create a guest user for anonymous access.
-    
-    This user will be used when no authenticated user is available.
-    
+    """Create the legacy 'guest' account with a locked password.
+
+    Guest exists only to own rows created before device
+    auto-provisioning was removed. Anonymous requests are real
+    AnonymousUsers now, so nothing logs in as 'guest' — the
+    unusable password also blocks /api/token/. Tokens issued
+    before the lock stay governed by GuestReadOnly (read-only).
+
     Returns:
         User: The guest user object
     """
-    return create_user(
+    user = create_user(
         username='guest',
         email='guest@example.com',
-        password='guest_password_123',  # This password won't be used for login
+        password=None,
         is_staff=False
     )
+    # Belt-and-suspenders: also lock the account when it
+    # already existed (created with a usable password earlier).
+    user.set_unusable_password()
+    user.save()
+    return user
 
 
 def create_test_user():
@@ -97,7 +108,10 @@ def list_all_users():
     """List all users in the system."""
     print('\nAll users in the system:')
     for user in User.objects.all():
-        print(f'Username: {user.username}, Email: {user.email}, ID: {user.id}, Staff: {user.is_staff}')
+        print(
+            f'Username: {user.username}, Email: {user.email}, '
+            f'ID: {user.id}, Staff: {user.is_staff}'
+        )
 
 
 if __name__ == '__main__':

@@ -11,7 +11,6 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.conf import settings
-from django.contrib.auth import get_user_model
 from django.db import models, transaction, IntegrityError
 from django.db.models import Count, Q, F, Min, Prefetch
 from django.shortcuts import get_object_or_404
@@ -40,7 +39,6 @@ from .serializers import (
 )
 from .services.image_storage import upload_original, delete_original
 
-User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
@@ -125,10 +123,8 @@ class TagViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         # Reads are open: get_queryset scopes anonymous
         # requests to tags carrying at least one public note.
-        # Writes always require authentication — explicitly,
-        # not just via DeviceAndCountryMiddleware
-        # auto-provisioning — and are denied for the shared
-        # read-only 'guest' account.
+        # Writes always require authentication and are denied
+        # for the shared read-only 'guest' account.
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
         return [IsAuthenticated(), GuestReadOnly()]
@@ -176,28 +172,14 @@ class TagViewSet(viewsets.ModelViewSet):
         user = self.request.user
         tag_name = serializer.validated_data.get('name', 'N/A')
 
-        if user.is_authenticated:
-            logger.info(
-                f"Creating tag '{tag_name}' "
-                f"for user {user.username}"
-            )
-            serializer.save(user=user)
-        else:
-            # For unauthenticated users, use guest user
-            try:
-                guest_user = User.objects.get(username='guest')
-                logger.info(
-                    f"Creating tag '{tag_name}' "
-                    f"for guest user"
-                )
-                serializer.save(user=guest_user)
-            except User.DoesNotExist:
-                logger.error(
-                    f"Guest user does not exist, "
-                    f"creating tag '{tag_name}' "
-                    f"without user assignment"
-                )
-                serializer.save()
+        # IsAuthenticated (get_permissions) guarantees a real
+        # user here — anonymous callers can no longer reach
+        # create.
+        logger.info(
+            f"Creating tag '{tag_name}' "
+            f"for user {user.username}"
+        )
+        serializer.save(user=user)
 
     def perform_update(self, serializer):
         """
@@ -329,10 +311,9 @@ class NoteViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         # Reads are open: get_queryset scopes anonymous
         # requests to public notes only. Writes and the
-        # other actions always require authentication —
-        # explicitly, not just via DeviceAndCountryMiddleware
-        # auto-provisioning (issue #47) — and are denied for
-        # the shared read-only 'guest' account.
+        # other actions always require authentication
+        # (issue #47) and are denied for the shared
+        # read-only 'guest' account.
         if self.action in ('list', 'retrieve', 'order_index'):
             return [AllowAny()]
         return [IsAuthenticated(), GuestReadOnly()]
@@ -1497,6 +1478,11 @@ class CommentCountView(APIView):
     Exactly one of tag_id or note_ids must be supplied.
     `tag_id=untagged` counts comments on notes with no tag.
     """
+
+    # Anonymous callers must keep working: share pages fetch
+    # comment counts without a token. Counts stay scoped to
+    # public notes via get_accessible_notes_qs below.
+    permission_classes = [AllowAny]
 
     def get(self, request):
         params = request.query_params

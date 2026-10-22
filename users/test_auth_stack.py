@@ -2,40 +2,43 @@
 Tests exercising the production auth/middleware stack.
 
 The class is decorated with ``prod_auth_stack`` (see the root
-conftest.py), which loads the prod MIDDLEWARE — including
-DeviceAndCountryMiddleware, which auto-provisions a
-``'<lang> <device>'`` user for anonymous requests — plus the
-prod REST_FRAMEWORK authentication and permission classes.
+conftest.py), which loads the prod MIDDLEWARE plus the prod
+REST_FRAMEWORK authentication and permission classes —
+Token/Bearer auth only. DeviceAndCountryMiddleware is gone:
+anonymous requests reach the views as a real ``AnonymousUser``,
+no user rows are minted from headers, and unauthenticated
+writes are clean 401s.
 """
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
-import bible_research.middleware as device_middleware
-from annotations.models import ReadingPosition
-from bible_research.authentication import (
-    BearerTokenAuthentication,
-    CSRFExemptSessionAuthentication,
-)
-from conftest import PROD_MIDDLEWARE, prod_auth_stack
+from annotations.models import Comment, Note, Tag
+from bible_research.authentication import BearerTokenAuthentication
+from conftest import prod_auth_stack
 from users.views import current_user
 
 ME_URL = '/api/v1/users/me/'
+REGISTER_URL = '/api/v1/users/register/'
+TOKEN_URL = '/api/token/'
+NOTES_URL = '/api/v1/notes/'
+TAGS_URL = '/api/v1/tags/'
 POSITIONS_URL = '/api/v1/reading-positions/'
+COMMENT_COUNTS_URL = '/api/v1/comments/counts/'
 
-# The middleware derives the username '<lang> <device>' from
-# these headers: 'en-US' + 'Android 12; Mobile'.
-ANDROID_HEADERS = {
+# The middleware that used to mint a per-device user from
+# headers like these is gone; sending them must now change
+# nothing — the tests below prove it.
+DEVICE_HEADERS = {
     'HTTP_USER_AGENT': (
         'Mozilla/5.0 (Android 12; Mobile; rv:131.0)'
     ),
     'HTTP_ACCEPT_LANGUAGE': 'en-US,en;q=0.9',
 }
-DEVICE_USERNAME = 'en-US Android 12; Mobile'
 
 # @api_view copies APIView.authentication_classes onto the
 # generated WrappedAPIView at import time, so the class-level
@@ -45,7 +48,6 @@ DEVICE_USERNAME = 'en-US Android 12; Mobile'
 ME_AUTH_CLASSES = [
     TokenAuthentication,
     BearerTokenAuthentication,
-    CSRFExemptSessionAuthentication,
 ]
 
 
@@ -57,26 +59,22 @@ class ProdAuthStackTest(TestCase):
         self.client = APIClient()
         self.User = get_user_model()
 
-    def test_device_headers_provision_and_authenticate(self):
-        """An anonymous request with device headers is
-        provisioned a '<lang> <device>' user that reaches the
-        view authenticated."""
-        resp = self.client.get(ME_URL, **ANDROID_HEADERS)
+    def test_anonymous_me_returns_401_and_mints_no_user(self):
+        """Anonymous /me/ is a real 401 — no device user is
+        provisioned to satisfy it, so no User row appears."""
+        with patch.object(
+            current_user.cls,
+            'authentication_classes',
+            ME_AUTH_CLASSES,
+        ):
+            resp = self.client.get(ME_URL, **DEVICE_HEADERS)
 
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(
-            resp.json()['username'], DEVICE_USERNAME
-        )
-        self.assertTrue(
-            self.User.objects.filter(
-                username__contains='Android 12'
-            ).exists()
-        )
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(self.User.objects.count(), 0)
 
     def test_token_authorization_header_authenticates(self):
         """Authorization: Token <key> authenticates the real
-        user even though the middleware also auto-provisions
-        a device user for the request."""
+        user."""
         user = self.User.objects.create_user(
             username='tokenuser', password='pass'
         )
@@ -90,7 +88,7 @@ class ProdAuthStackTest(TestCase):
             resp = self.client.get(
                 ME_URL,
                 HTTP_AUTHORIZATION=f'Token {token.key}',
-                **ANDROID_HEADERS,
+                **DEVICE_HEADERS,
             )
 
         self.assertEqual(resp.status_code, 200)
@@ -112,7 +110,7 @@ class ProdAuthStackTest(TestCase):
             resp = self.client.get(
                 ME_URL,
                 HTTP_AUTHORIZATION=f'Bearer {token.key}',
-                **ANDROID_HEADERS,
+                **DEVICE_HEADERS,
             )
 
         self.assertEqual(resp.status_code, 200)
@@ -120,73 +118,111 @@ class ProdAuthStackTest(TestCase):
             resp.json()['username'], 'beareruser'
         )
 
-    def test_guest_fallback_and_readonly(self):
-        """When the device-user path raises, the middleware
-        falls back to the shared 'guest' user; the real
-        GuestReadOnly then blocks writes with 403 while reads
-        still succeed."""
-        real_login = device_middleware.login
-
-        def fail_non_guest_login(request, user, backend=None):
-            # The middleware catches exceptions inside
-            # auto_authenticate and provisions 'guest' —
-            # fail every login except the guest one so BOTH
-            # requests below exercise the fallback branch.
-            if user.username != 'guest':
-                raise RuntimeError('forced login failure')
-            return real_login(request, user, backend=backend)
-
-        with patch.object(
-            device_middleware, 'login', fail_non_guest_login
-        ):
-            post_resp = self.client.post(
-                POSITIONS_URL,
-                {'book': 'John', 'chapter': 3, 'verse': 1},
-                format='json',
-                **ANDROID_HEADERS,
-            )
-            get_resp = self.client.get(
-                POSITIONS_URL, **ANDROID_HEADERS
-            )
-
-        self.assertEqual(post_resp.status_code, 403)
-        self.assertEqual(get_resp.status_code, 200)
-        self.assertTrue(
-            self.User.objects.filter(username='guest').exists()
+    def test_register_creates_exactly_one_user(self):
+        """POST register/ creates only the registered account —
+        the removed middleware used to mint a second device
+        user on the very same request."""
+        resp = self.client.post(
+            REGISTER_URL,
+            {
+                'username': 'newuser',
+                'email': 'new@example.com',
+                'password': 'secure-pass-123',
+                'password_confirm': 'secure-pass-123',
+            },
+            format='json',
+            **DEVICE_HEADERS,
         )
-        # The denied write really stored nothing.
-        self.assertFalse(ReadingPosition.objects.exists())
 
-    def test_session_user_not_replaced_by_device_user(self):
-        """A session-authenticated user keeps their identity —
-        the middleware must not re-authenticate them as the
-        device-derived user (regression guard for #85, which
-        fixed the silent session-user replacement)."""
-        real_user = self.User.objects.create_user(
-            username='sessionuser', password='pass'
+        self.assertEqual(resp.status_code, 201)
+        users = list(self.User.objects.all())
+        self.assertEqual(len(users), 1)
+        self.assertEqual(users[0].username, 'newuser')
+
+    def test_token_endpoint_creates_no_users(self):
+        """POST /api/token/ only issues a token — it must not
+        mint a device User row on the side."""
+        self.User.objects.create_user(
+            username='loginuser', password='pass'
         )
-        self.client.force_login(real_user)
-
-        resp = self.client.get(ME_URL, **ANDROID_HEADERS)
+        resp = self.client.post(
+            TOKEN_URL,
+            {'username': 'loginuser', 'password': 'pass'},
+            format='json',
+            **DEVICE_HEADERS,
+        )
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()['username'], 'sessionuser')
+        self.assertIn('token', resp.json())
+        self.assertEqual(self.User.objects.count(), 1)
 
-    @override_settings(
-        MIDDLEWARE=[
-            mw
-            for mw in PROD_MIDDLEWARE
-            if 'DeviceAndCountryMiddleware' not in mw
-        ]
-    )
-    def test_default_permission_denies_when_unauthenticated(self):
-        """With the device middleware removed, an anonymous
-        request stays unauthenticated and the patched prod
-        DEFAULT_PERMISSION_CLASSES (IsAuthenticated +
-        GuestReadOnly) reject the write on TagViewSet, which
-        relies on the APIView defaults."""
-        client = APIClient()  # created inside the override
-        resp = client.post(
-            '/api/v1/tags/', {'name': 'nope'}, format='json'
+    def test_anonymous_writes_return_401(self):
+        """Anonymous writes to notes, tags, comments and
+        reading positions are all rejected with 401 — no
+        silent auto-provisioned account, nothing saved."""
+        owner = self.User.objects.create_user(
+            username='owner', password='pass'
         )
-        self.assertEqual(resp.status_code, 401)
+        note = Note.objects.create(
+            user=owner, note_text='public note', public=True,
+        )
+        writes = [
+            (TAGS_URL, {'name': 'hijack'}),
+            (NOTES_URL, {'note_text': 'hijack'}),
+            (
+                f'/api/v1/notes/{note.id}/comments/',
+                {'content': 'hijack'},
+            ),
+            (
+                POSITIONS_URL,
+                {'book': 'John', 'chapter': 1, 'verse': 1},
+            ),
+        ]
+        for url, payload in writes:
+            with self.subTest(url=url):
+                resp = self.client.post(
+                    url, payload, format='json',
+                    **DEVICE_HEADERS,
+                )
+                self.assertEqual(resp.status_code, 401)
+
+        self.assertEqual(self.User.objects.count(), 1)
+        self.assertEqual(Note.objects.count(), 1)
+        self.assertEqual(Comment.objects.count(), 0)
+        self.assertFalse(
+            Tag.objects.filter(name='hijack').exists()
+        )
+
+    def test_anonymous_comment_counts_public_only(self):
+        """Anonymous GET /comments/counts/ must keep working
+        (share pages call it without a token) while counting
+        only public notes — private note ids stay absent."""
+        owner = self.User.objects.create_user(
+            username='owner', password='pass'
+        )
+        tag = Tag.objects.create(user=owner, name='share tag')
+        public_note = Note.objects.create(
+            user=owner, tag=tag,
+            note_text='public', public=True,
+        )
+        private_note = Note.objects.create(
+            user=owner, tag=tag,
+            note_text='private', public=False,
+        )
+        Comment.objects.create(
+            user=owner, note=public_note, content='hi',
+        )
+        Comment.objects.create(
+            user=owner, note=private_note, content='secret',
+        )
+
+        resp = self.client.get(
+            COMMENT_COUNTS_URL,
+            {'tag_id': tag.id},
+            **DEVICE_HEADERS,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        counts = resp.json()['counts']
+        self.assertEqual(counts.get(public_note.id), 1)
+        self.assertNotIn(private_note.id, counts)

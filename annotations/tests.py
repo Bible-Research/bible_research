@@ -2,10 +2,14 @@ import datetime
 from unittest import expectedFailure
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.test import APIRequestFactory, APIClient
+from rest_framework.test import (
+    APIRequestFactory,
+    APIClient,
+    force_authenticate,
+)
 from rest_framework.request import Request
 from rest_framework.views import APIView
 from annotations.serializers import (
@@ -50,8 +54,10 @@ class SerializerTestCase(TestCase):
         # Create a factory for requests
         factory = APIRequestFactory()
         request = factory.get('/')
-        # Force authentication
-        request.user = self.user
+        # Force authentication — setting request.user directly
+        # is ignored when DRF re-wraps the request; the
+        # force_authenticate marker survives the wrap.
+        force_authenticate(request, user=self.user)
         # Create a proper request context
         self.context = {'request': Request(request)}
 
@@ -82,7 +88,6 @@ class SerializerTestCase(TestCase):
         
         return tag  # Return for use in other tests
 
-    @expectedFailure
     def test_note_serializer(self):
         """NoteSerializer creates a note with verse references."""
         # First create a tag to associate with the note
@@ -1447,9 +1452,10 @@ class NoteAnonymousAccessTest(TestCase):
     """
     Anonymous /notes/ requests (issue #47): reads must expose
     only public notes and writes must be rejected with
-    401/403 rather than 500ing or silently succeeding. The
-    test environment omits DeviceAndCountryMiddleware, so
-    request.user is a real AnonymousUser here.
+    401/403 rather than 500ing or silently succeeding.
+    DeviceAndCountryMiddleware has been removed entirely, so
+    request.user is a real AnonymousUser here — matching
+    production exactly.
     """
 
     LIST_URL = '/api/v1/notes/'
@@ -2890,10 +2896,11 @@ class TestGuestReadOnly(TestCase):
     Regression tests for the shared 'guest' account being
     read-only (GitHub issue #58).
 
-    DeviceAndCountryMiddleware falls back to authenticating
-    requests as the single shared 'guest' user, and anyone can
-    end up acting as that account. Guest may read its own data
-    but every write must be rejected with 403.
+    'guest' is a locked legacy account: the device middleware
+    that used to authenticate requests as 'guest' is gone, so
+    only a previously issued token can still act as it. Guest
+    may read its own data but every write must be rejected
+    with 403.
     """
 
     @classmethod
@@ -3163,84 +3170,3 @@ class TagDeleteViewTest(TestCase):
         self.assertEqual(resp.json()['note_count'], 1)
         self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
         self.assertTrue(Tag.objects.filter(id=child.id).exists())
-
-
-# conftest.py's MIDDLEWARE plus DeviceAndCountryMiddleware, which
-# the pytest settings strip so anonymous tests see a real
-# AnonymousUser.
-DEVICE_AUTH_MIDDLEWARE = [
-    'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'bible_research.middleware.DeviceAndCountryMiddleware',
-]
-
-
-@override_settings(MIDDLEWARE=DEVICE_AUTH_MIDDLEWARE)
-class DeviceAndCountryMiddlewareTest(TestCase):
-    """
-    Covers the auto-authentication scoping fixed for issue #9:
-    safe reads on public prefixes stay anonymous, non-safe
-    methods still auto-provision a device user, and an already
-    session-authenticated request is never re-logged-in as a
-    phantom device user (the old `or`-bug).
-    """
-
-    def setUp(self):
-        self.User = get_user_model()
-        self.user = self.User.objects.create_user(
-            username='real_user',
-            email='real@example.com',
-            password='pass',
-        )
-        self.client = APIClient()
-
-    def test_anonymous_get_notes_creates_no_user(self):
-        """GET /api/v1/notes/ anonymous must stay anonymous."""
-        resp = self.client.get('/api/v1/notes/')
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self.User.objects.count(), 1)
-
-    def test_anonymous_get_tags_creates_no_user(self):
-        """GET /api/v1/tags/ anonymous must stay anonymous."""
-        resp = self.client.get('/api/v1/tags/')
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self.User.objects.count(), 1)
-
-    def test_anonymous_post_notes_still_autoprovisions(self):
-        """Non-safe methods keep device auto-provisioning so
-        existing clients can write notes without a login."""
-        resp = self.client.post(
-            '/api/v1/notes/',
-            {'note_text': 'device note', 'tag': None},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 201)
-        self.assertEqual(self.User.objects.count(), 2)
-        note = Note.objects.get(note_text='device note')
-        self.assertNotEqual(note.user, self.user)
-        self.assertTrue(note.user.username.endswith('Device'))
-
-    def test_session_user_not_swapped_for_device_user(self):
-        """Regression for the `or`-bug: a session-authenticated
-        request used to be re-logged-in as a phantom device
-        user. The private note must remain visible, proving
-        the real identity survived."""
-        Note.objects.create(
-            user=self.user,
-            note_text='private note',
-            public=False,
-            tag_position=1,
-        )
-        self.client.login(username='real_user', password='pass')
-        resp = self.client.get('/api/v1/notes/')
-        self.assertEqual(resp.status_code, 200)
-        texts = [
-            n['note_text'] for n in resp.json()['results']
-        ]
-        self.assertIn('private note', texts)
-        self.assertEqual(self.User.objects.count(), 1)

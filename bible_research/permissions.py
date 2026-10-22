@@ -8,12 +8,13 @@ class GuestReadOnly(BasePermission):
     """
     The shared 'guest' account may read but never write.
 
-    DeviceAndCountryMiddleware auto-provisions per-device users and
-    falls back to authenticating requests as the single shared
-    'guest' user. Because anyone can end up acting as that account,
-    requests authenticated as 'guest' are limited to safe HTTP
-    methods; writes are rejected with 403. Registered users and
-    auto-provisioned per-device users are unaffected.
+    'guest' is a legacy account: the device auto-provisioning
+    middleware that used to fall back to it has been removed, so
+    the only way to act as 'guest' now is a previously issued
+    auth token. Because such tokens may still circulate, requests
+    authenticated as 'guest' are limited to safe HTTP methods;
+    writes are rejected with 403. All other authenticated users
+    are unaffected.
     """
 
     message = 'The shared guest account is read-only.'

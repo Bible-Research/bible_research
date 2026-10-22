@@ -89,21 +89,27 @@ can contain request URLs with credentials.
 
 ## Auth quirks
 
-- `bible_research/authentication.py`: DRF `TokenAuthentication`
-  (`Authorization: Token …`) plus `BearerTokenAuthentication`
-  (`Authorization: Bearer …`) and a CSRF-exempt session auth.
-- `DeviceAndCountryMiddleware` auto-provisions/authenticates users
-  from device + language headers and falls back to a `guest` user —
-  anonymous requests are not necessarily unauthenticated. Exception:
-  safe-method reads (`GET`/`HEAD`/`OPTIONS`) on `/api/v1/bible`,
-  `/api/v1/notes`, `/api/v1/tags` stay truly anonymous (public
-  content, issue #9).
-- The shared `guest` account is read-only:
+- Token auth only: `bible_research/authentication.py` holds DRF
+  `TokenAuthentication` (`Authorization: Token …`) plus
+  `BearerTokenAuthentication` (`Authorization: Bearer …`). The
+  DRF API no longer accepts cookie sessions (the old CSRF-exempt
+  session auth was deleted); Django session auth still exists for
+  `/admin` only.
+- No auto-provisioning: anonymous requests arrive as a real
+  `AnonymousUser` — `DeviceAndCountryMiddleware` and its
+  header-derived per-device `User` rows are gone. Every write
+  endpoint requires `IsAuthenticated` explicitly, so anonymous
+  writes return 401 and `/me/` 401s for anonymous callers.
+- The legacy `guest` account is read-only:
   `bible_research/permissions.py` `GuestReadOnly` (wired into
   `DEFAULT_PERMISSION_CLASSES` plus the image/reading-position
   views that override permissions) rejects its writes with 403.
-- Serializers scope tag/note querysets to `request.user`, else to the
-  `guest` user.
+  It exists only to own rows created before provisioning was
+  removed and is reachable only via a previously issued token.
+- Serializers scope tag/note querysets to `request.user`;
+  anonymous callers get `.none()`. `GET
+  /api/v1/comments/counts/` carries `permission_classes =
+  [AllowAny]` so share pages can count public-note comments.
 
 ## Databases
 

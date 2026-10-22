@@ -50,7 +50,6 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'bible_research.middleware.DeviceAndCountryMiddleware',
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
@@ -369,10 +368,6 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
         'bible_research.authentication.BearerTokenAuthentication',
-        (
-            'bible_research.authentication.'
-            'CSRFExemptSessionAuthentication'
-        ),
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',

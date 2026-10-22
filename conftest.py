@@ -74,11 +74,11 @@ def pytest_configure():
         )
 
 
-# Exact copy of the production stack in
-# bible_research/settings.py:45-54 — includes CorsMiddleware and
-# DeviceAndCountryMiddleware, and (unlike the pytest settings
-# above) excludes CsrfViewMiddleware. Used only by tests that
-# opt in via the ``prod_auth_stack`` class decorator below.
+# Exact copy of the production MIDDLEWARE in
+# bible_research/settings.py — includes CorsMiddleware and
+# (unlike the pytest settings above) excludes
+# CsrfViewMiddleware. Used only by tests that opt in via the
+# ``prod_auth_stack`` class decorator below.
 PROD_MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -87,19 +87,15 @@ PROD_MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'bible_research.middleware.DeviceAndCountryMiddleware',
 ]
 
-# Exact copy of the production stack in
-# bible_research/settings.py:357-371.
+# Exact copy of the production REST_FRAMEWORK in
+# bible_research/settings.py — token auth only; the API no
+# longer accepts cookie sessions.
 PROD_REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
         'bible_research.authentication.BearerTokenAuthentication',
-        (
-            'bible_research.authentication.'
-            'CSRFExemptSessionAuthentication'
-        ),
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -112,9 +108,9 @@ PROD_REST_FRAMEWORK = {
 def prod_auth_stack(cls):
     """
     Class decorator: run a Django ``TestCase`` under the
-    production request/auth stack — prod ``MIDDLEWARE``
-    (including ``DeviceAndCountryMiddleware``) and prod
-    ``REST_FRAMEWORK`` authentication/permission defaults.
+    production request/auth stack — prod ``MIDDLEWARE`` and
+    prod ``REST_FRAMEWORK`` authentication/permission
+    defaults.
 
     Usage notes:
 
@@ -123,12 +119,9 @@ def prod_auth_stack(cls):
       ``settings.MIDDLEWARE`` lazily per client, so the
       override must already be active when the client is
       created.
-    - The middleware auto-provisions and session-logs a
-      ``'<lang> <device>'`` user for every anonymous request
-      (derived from the User-Agent and Accept-Language
-      headers) — anonymous requests are NOT unauthenticated
-      under this stack; they fall back to the shared
-      read-only ``guest`` user only when provisioning fails.
+    - Anonymous requests ARE unauthenticated under this stack:
+      nothing provisions an identity from headers anymore, so
+      unauthenticated writes return 401.
     - ``APIView.authentication_classes`` and
       ``APIView.permission_classes`` were bound to concrete
       lists at DRF import time (no ``REST_FRAMEWORK`` in the
@@ -144,9 +137,6 @@ def prod_auth_stack(cls):
       on such a view also patch
       ``<view>.cls.authentication_classes`` locally (see
       ``users/test_auth_stack.py``).
-    - ``DeviceAndCountryMiddleware`` prints on every request;
-      the decorator patches ``bible_research.middleware.print``
-      to keep test output quiet.
 
     All imports are deferred to call time: ``conftest`` itself
     is imported before ``pytest_configure`` configures Django
@@ -162,19 +152,9 @@ def prod_auth_stack(cls):
 
     from bible_research.authentication import (
         BearerTokenAuthentication,
-        CSRFExemptSessionAuthentication,
     )
     from bible_research.permissions import GuestReadOnly
 
-    # Keep DeviceAndCountryMiddleware's per-request print()
-    # noise out of the captured test output. An explicit `new`
-    # is required: omitting it would make patch inject a mock
-    # into every decorated test method as an extra argument.
-    cls = patch(
-        'bible_research.middleware.print',
-        new=lambda *args, **kwargs: None,
-        create=True,
-    )(cls)
     # override_settings(REST_FRAMEWORK=...) does NOT rebind
     # APIView class attributes bound at import time — patch
     # them with the real prod classes.
@@ -184,7 +164,6 @@ def prod_auth_stack(cls):
         [
             TokenAuthentication,
             BearerTokenAuthentication,
-            CSRFExemptSessionAuthentication,
         ],
     )(cls)
     cls = patch.object(

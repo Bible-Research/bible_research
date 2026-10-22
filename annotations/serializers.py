@@ -35,26 +35,6 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
-class CurrentAuthenticatedUserDefault:
-    """Custom default callable for authenticated user field.
-    Returns the current user if authenticated, otherwise the guest user.
-    """
-    requires_context = True
-
-    def __call__(self, serializer_field):
-        request = serializer_field.context.get('request')
-        if (request and hasattr(request, 'user') and
-                request.user.is_authenticated):
-            return request.user
-        # Return guest user instead of None
-        try:
-            return User.objects.get(username='guest')
-        except User.DoesNotExist:
-            # If guest user doesn't exist, return None
-            # The create method will handle this case
-            return None
-
-
 class TagSerializer(serializers.ModelSerializer):
     """Serializes Tag model data for API input and output.
     Includes the 'parent_tag' as its primary key for relationships.
@@ -66,7 +46,7 @@ class TagSerializer(serializers.ModelSerializer):
         default=None
     )
     user = serializers.HiddenField(
-        default=CurrentAuthenticatedUserDefault()
+        default=serializers.CurrentUserDefault()
     )
     name = serializers.CharField(max_length=100)
 
@@ -95,25 +75,12 @@ class TagSerializer(serializers.ModelSerializer):
                     user=request.user
                 )
             else:
-                # For unauthenticated users, only show guest user tags
-                try:
-                    guest_user = User.objects.get(username='guest')
-                    self.fields['parent_tag'].queryset = Tag.objects.filter(
-                        user=guest_user
-                    )
-                except User.DoesNotExist:
-                    self.fields['parent_tag'].queryset = Tag.objects.none()
-
-    def create(self, validated_data):
-        # If user is None, try to use guest user
-        if 'user' in validated_data and validated_data['user'] is None:
-            try:
-                validated_data['user'] = User.objects.get(username='guest')
-            except User.DoesNotExist:
-                # If guest user doesn't exist, remove user field
-                # to let the model use its default
-                validated_data.pop('user')
-        return super().create(validated_data)
+                # Anonymous callers can only read; writes are
+                # rejected by the view's permissions before
+                # validation, so the queryset stays empty.
+                self.fields['parent_tag'].queryset = (
+                    Tag.objects.none()
+                )
 
 
 class NoteVerseReferenceSerializer(serializers.Serializer):
@@ -158,7 +125,7 @@ class NoteSerializer(serializers.ModelSerializer):
         help_text="UUID of the primary Tag associated with this note."
     )
     user = serializers.HiddenField(
-        default=CurrentAuthenticatedUserDefault()
+        default=serializers.CurrentUserDefault()
     )
     verse_references = NoteVerseReferenceSerializer(
         many=True,
@@ -189,14 +156,10 @@ class NoteSerializer(serializers.ModelSerializer):
                     user=request.user
                 )
             else:
-                # For unauthenticated users, only show guest user tags
-                try:
-                    guest_user = User.objects.get(username='guest')
-                    self.fields['tag'].queryset = Tag.objects.filter(
-                        user=guest_user
-                    )
-                except User.DoesNotExist:
-                    self.fields['tag'].queryset = Tag.objects.none()
+                # Anonymous callers can only read; writes are
+                # rejected by the view's permissions before
+                # validation, so the queryset stays empty.
+                self.fields['tag'].queryset = Tag.objects.none()
 
     class Meta:
         model = Note
@@ -221,13 +184,6 @@ class NoteSerializer(serializers.ModelSerializer):
         """
         # Pop out the 'verse_references' as it's not a direct field on the Note
         verse_references_data = validated_data.pop('verse_references', [])
-        # If user is None, try to use guest user
-        if 'user' in validated_data and validated_data['user'] is None:
-            try:
-                validated_data['user'] = User.objects.get(username='guest')
-            except User.DoesNotExist:
-                # If guest user doesn't exist, remove user field
-                validated_data.pop('user')
         # Create the Note row and its NoteVerse links in one
         # transaction so a failed verse resolution rolls the Note
         # back instead of leaving an orphan row behind.
@@ -610,17 +566,12 @@ class BulkNoteCreateSerializer(serializers.Serializer):
                     Tag.objects.filter(user=request.user)
                 )
             else:
-                try:
-                    guest_user = User.objects.get(
-                        username='guest'
-                    )
-                    self.fields['tag_id'].queryset = (
-                        Tag.objects.filter(user=guest_user)
-                    )
-                except User.DoesNotExist:
-                    self.fields['tag_id'].queryset = (
-                        Tag.objects.none()
-                    )
+                # Anonymous callers can only read; writes are
+                # rejected by the view's permissions before
+                # validation, so the queryset stays empty.
+                self.fields['tag_id'].queryset = (
+                    Tag.objects.none()
+                )
 
     def validate_notes(self, value):
         if not value:
@@ -679,15 +630,9 @@ class BulkNoteCreateSerializer(serializers.Serializer):
         """
         tag = validated_data['tag_id']
         notes_data = validated_data['notes']
-        request = self.context.get('request')
-
-        if request and request.user.is_authenticated:
-            user = request.user
-        else:
-            try:
-                user = User.objects.get(username='guest')
-            except User.DoesNotExist:
-                user = None
+        # The view requires IsAuthenticated, so a real user is
+        # always present here.
+        user = self.context['request'].user
 
         verse_map = self._resolve_verses(notes_data)
 
