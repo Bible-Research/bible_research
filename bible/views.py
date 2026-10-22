@@ -12,12 +12,14 @@ from rest_framework.views import APIView
 
 from bible.utils.bible_books import get_dbt_book_id
 from bible.utils.error_responses import (
-    INVALID_PARAMETER,
     MISSING_PARAMETER,
     bad_request,
     not_found,
 )
-from bible.utils.provider_errors import provider_error_fields
+from bible.utils.provider_errors import (
+    PassageNotFoundError,
+    provider_error_fields,
+)
 from bible.utils.request_params import (
     is_valid_bible_id,
     is_valid_book_id_list,
@@ -403,12 +405,20 @@ class BiblePassageView(APIView):
                 "Invalid request parameters."
             )
 
+        except PassageNotFoundError:
+            # ``PassageNotFoundError`` subclasses ValueError, so
+            # it must be caught before the generic handler: a
+            # provider "no such passage" is a 404, and its text
+            # must never land in a ``bad_request`` body if
+            # provider calls move into this try block.
+            return not_found("Passage not found.")
         except ValueError as e:
-            # Every ValueError reachable here carries one of the
-            # fixed client-input messages raised above or inside
-            # ``_parse_chapter_part`` — provider failures are
-            # classified inside the serializer — so the text
-            # holds no upstream URLs or credentials.
+            # Every ValueError reaching this handler carries one
+            # of the fixed client-input messages raised above or
+            # inside ``_parse_chapter_part`` — provider failures
+            # are classified inside the serializer or caught
+            # above — so the text holds no upstream URLs or
+            # credentials.
             return bad_request(str(e))
         except Exception:
             logger.exception(

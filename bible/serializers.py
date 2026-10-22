@@ -25,6 +25,7 @@ from bible.services.storage import gcs
 from bible.utils.provider_errors import (
     PassageNotFoundError,
     provider_error_fields,
+    upstream_status_code,
 )
 
 
@@ -441,9 +442,15 @@ class BiblePassageSerializer(serializers.Serializer):
         except Exception as e:
             logger.exception(f"Error fetching Bible passage: {e}")
             # An upstream HTTP 404 that escaped a provider branch
-            # (e.g. an API.Bible HTTPError) is also a coverage
-            # miss — normalize to book_not_in_fileset.
-            if _is_http_404(e) or getattr(e, 'status', None) == 404:
+            # is also a coverage miss — normalize to
+            # book_not_in_fileset. ``upstream_status_code``
+            # covers every status carrier: ``exc.status`` (DBT
+            # ApiException), ``exc.response.status_code``
+            # (requests HTTPError) and ``exc.code`` (the
+            # google.api_core exceptions GCS raises, e.g. a
+            # missing timestamps artifact in the SWORD audio
+            # path above).
+            if upstream_status_code(e) == 404:
                 return _book_not_in_fileset_body(
                     book_id, book_name, chapter, fileset_id
                 )

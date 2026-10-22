@@ -224,15 +224,6 @@ code bugs, not test failures:
   delete of a note/comment leaves orphaned GCS blobs; no
   `post_delete` receiver calls `delete_original`
   (models.py:303-318).
-- `bible/tests/test_timestamp_view.py:228`
-  (`test_gcs_not_found_returns_404`) —
-  `gcs_exceptions.NotFound` → 404 returns a bare `{"error"}`
-  body with no `error_code` (views.py:398-407), breaking the
-  error/error_code contract.
-- `bible/tests/test_timestamp_view.py:270`
-  (`test_apibible_empty_timecodes_returns_404`) — API.Bible
-  empty timecodes → 404 likewise returns bare `{"error"}`
-  without `error_code` (views.py:430-439).
 
 ## Housekeeping
 

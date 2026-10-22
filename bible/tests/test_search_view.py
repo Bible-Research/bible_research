@@ -119,6 +119,11 @@ def test_missing_fileset_id_param(client):
         ),
         (
             {'query': 'love', 'fileset_id': 'ENGESV',
+             'books': 'JHN;DROP'},
+            'invalid_parameter',
+        ),
+        (
+            {'query': 'love', 'fileset_id': 'ENGESV',
              'limit': 'abc'},
             'invalid_parameter',
         ),
@@ -130,7 +135,7 @@ def test_missing_fileset_id_param(client):
     ],
     ids=[
         'missing-query', 'missing-fileset', 'overlong-query',
-        'bad-group_by', 'bad-limit', 'bad-page',
+        'bad-group_by', 'bad-books', 'bad-limit', 'bad-page',
     ],
 )
 def test_search_400s_carry_error_code(client, params, code):
