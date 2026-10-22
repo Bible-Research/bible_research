@@ -39,7 +39,11 @@ class TokenRateThrottle(SimpleRateThrottle):
     scope = 'token'
 
     def get_cache_key(self, request, view):
-        username = request.data.get('username')
+        # A non-dict body (e.g. a top-level JSON array) parses
+        # fine but has no .get — guard so the serializer can
+        # return its 400 instead of an AttributeError 500.
+        data_get = getattr(request.data, 'get', None)
+        username = data_get('username') if data_get else None
         if username:
             ident = str(username).lower()
         else:
@@ -101,9 +105,11 @@ class ThrottledObtainAuthToken(ObtainAuthToken):
     },
     description=(
         "Register a new user account. "
-        "Email is optional. Password must be at least "
-        "8 characters. Returns user data and "
-        "authentication token."
+        "Email is optional. Password must pass Django's "
+        "AUTH_PASSWORD_VALIDATORS: at least 8 characters, "
+        "not entirely numeric, not a common password, and "
+        "not too similar to the username/email. Returns "
+        "user data and authentication token."
     ),
     tags=['Users']
 )
@@ -117,9 +123,13 @@ def register_user(request):
     Accepts username, email, password, and password_confirm.
     Returns the created user data and authentication token.
     """
+    # request.data may be a non-dict body (e.g. a JSON
+    # array) — .get would AttributeError into a 500 before
+    # the serializer can return its 400.
+    data_get = getattr(request.data, 'get', None)
+    username = data_get('username', 'N/A') if data_get else 'N/A'
     logger.info(
-        f"Registration attempt for username: "
-        f"{request.data.get('username', 'N/A')}"
+        f"Registration attempt for username: {username}"
     )
 
     serializer = UserRegistrationSerializer(data=request.data)

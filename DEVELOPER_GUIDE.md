@@ -282,6 +282,10 @@ POST /api/token/
 - Throttled at 5 requests/minute per username (per client IP
   when no `username` is supplied); excess requests return
   HTTP 429
+- Throttle counters use the default per-process locmem cache
+  (no shared `CACHES` backend is configured), so on GAE the
+  effective limit is roughly rate × running instances and
+  counters reset on every restart/deploy
 
 ### User Management
 
@@ -321,6 +325,10 @@ POST /api/v1/users/register/
 - No authentication required for this endpoint
 - Throttled at 10 requests/minute per client IP; excess
   requests return HTTP 429
+- Throttle counters use the default per-process locmem cache
+  (no shared `CACHES` backend is configured), so on GAE the
+  effective limit is roughly rate × running instances and
+  counters reset on every restart/deploy
 
 #### Get Current User
 ```

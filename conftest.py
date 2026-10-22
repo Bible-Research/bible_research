@@ -112,6 +112,10 @@ def pytest_configure():
             # settings.py would trip the suite — dedicated
             # throttle tests shrink the rate via patch.dict.
             REST_FRAMEWORK={
+                # Mirror production: trust one XFF hop so
+                # throttle idents resolve to the last
+                # X-Forwarded-For entry.
+                'NUM_PROXIES': 1,
                 'DEFAULT_THROTTLE_RATES': {
                     'token': '1000/min',
                     'register': '1000/min',
@@ -150,6 +154,7 @@ PROD_REST_FRAMEWORK = {
         'bible_research.permissions.GuestReadOnly',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'NUM_PROXIES': 1,
     # Mirrors production's rates for fidelity; note that
     # SimpleRateThrottle.THROTTLE_RATES is bound once at
     # rest_framework.throttling import time (to the pytest

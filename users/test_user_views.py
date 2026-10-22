@@ -213,6 +213,18 @@ class RegisterUserTest(TestCase):
         )
         self.assertEqual(response.data['user']['email'], '')
 
+    def test_register_json_array_body_400_not_500(self):
+        """A top-level JSON array body makes request.data a
+        list — the logger's getattr guard must defer to the
+        serializer's 400 instead of AttributeError-ing."""
+        response = self.client.post(
+            REGISTER_URL, ['not', 'a', 'dict'], format='json'
+        )
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+
 
 class CurrentUserTest(TestCase):
     """Coverage for GET /api/v1/users/me/."""

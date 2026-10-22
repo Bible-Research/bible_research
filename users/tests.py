@@ -121,6 +121,17 @@ class ObtainAuthTokenTestCase(TestCase):
             response.status_code, status.HTTP_400_BAD_REQUEST
         )
 
+    def test_json_array_body_400_not_500(self):
+        """A top-level JSON array body makes request.data a
+        list — the throttle's getattr guard must defer to the
+        serializer's 400 instead of AttributeError-ing."""
+        response = self.client.post(
+            self.url, ['no', 'dict'], format='json'
+        )
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+
 
 class AuthEndpointThrottlingTest(TestCase):
     """Scoped throttles on POST /api/token/ and register/.
@@ -215,4 +226,33 @@ class AuthEndpointThrottlingTest(TestCase):
         resp = self._register('throttle_user2')
         self.assertEqual(resp.status_code, 201)
         resp = self._register('throttle_user3')
+        self.assertEqual(resp.status_code, 429)
+
+    @patch.dict(
+        RegisterRateThrottle.THROTTLE_RATES, {'register': '1/min'}
+    )
+    def test_register_throttle_ignores_spoofed_xff_prefix(self):
+        """NUM_PROXIES=1 keys the throttle ident on the LAST
+        X-Forwarded-For entry — the IP the trusted GAE load
+        balancer appends — so rotating a client-supplied XFF
+        prefix cannot mint a fresh ident per request."""
+        payload = {
+            'username': 'xff_user1',
+            'password': 'secure-pass-123',
+            'password_confirm': 'secure-pass-123',
+        }
+        resp = self.client.post(
+            self.REGISTER_URL,
+            payload,
+            format='json',
+            HTTP_X_FORWARDED_FOR='198.51.100.1, 203.0.113.9',
+        )
+        self.assertEqual(resp.status_code, 201)
+        payload['username'] = 'xff_user2'
+        resp = self.client.post(
+            self.REGISTER_URL,
+            payload,
+            format='json',
+            HTTP_X_FORWARDED_FOR='192.0.2.77, 203.0.113.9',
+        )
         self.assertEqual(resp.status_code, 429)

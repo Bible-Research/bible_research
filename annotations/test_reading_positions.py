@@ -3,8 +3,9 @@
 Covers the upsert semantics of ``create()`` (HTTP 200 on both the
 create and update pass, never 201), per-user scoping of
 list/retrieve/update/destroy, the ``?book=`` filter, the ``bulk/``
-action, guest read-only enforcement, and pins the case-variant
-duplicate-book behaviour.
+action, guest read-only enforcement, and book-name
+canonicalization — case variants of a book collapse into one
+canonical row instead of forking duplicates.
 """
 from django.contrib.auth import get_user_model
 from django.test import TestCase
