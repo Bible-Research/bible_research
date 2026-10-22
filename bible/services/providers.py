@@ -510,7 +510,7 @@ class SwordProvider(Provider):
             # PassageNotFoundError). FileNotFoundError — a
             # missing module zip — is an OSError and still falls
             # through to the generic provider_error mapping.
-            raise PassageNotFoundError(str(e))
+            raise PassageNotFoundError(str(e)) from e
         return {
             'verses': [
                 {
@@ -592,7 +592,7 @@ class SwordProvider(Provider):
                 mode=audio_mode,
             )
         except gcs_exceptions.NotFound as e:
-            raise TimestampsNotGeneratedError(str(e))
+            raise TimestampsNotGeneratedError(str(e)) from e
         return payload.get('data') or []
 
     def get_copyright(self):

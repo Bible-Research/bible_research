@@ -5,8 +5,8 @@
 verse selection and error mapping all live in
 ``bible.services.providers.get_passage_body``, which the view
 calls on ``serializer.validated_data``. ``to_representation``
-delegates to the same function so direct callers (tests, the
-management commands) keep working through one code path.
+delegates to the same function so direct callers (tests)
+keep working through one code path.
 """
 from rest_framework import serializers
 
