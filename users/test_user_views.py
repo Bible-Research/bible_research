@@ -319,14 +319,14 @@ class CurrentUserTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['account_kind'], 'guest')
 
-    def test_me_unauthenticated_403(self):
-        """Anonymous requests are denied: the view's explicit
-        @permission_classes([IsAuthenticated]) yields 403 under
-        the pytest settings (no authenticator supplies a
-        WWW-Authenticate header here)."""
+    def test_me_unauthenticated_401(self):
+        """Anonymous requests are denied with 401 — the pytest
+        settings now mirror production, where Token/Bearer
+        authentication supplies the WWW-Authenticate header
+        DRF needs to answer 401 instead of 403."""
         response = self.client.get(ME_URL)
 
         self.assertEqual(
             response.status_code,
-            status.HTTP_403_FORBIDDEN,
+            status.HTTP_401_UNAUTHORIZED,
         )

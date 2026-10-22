@@ -3,7 +3,6 @@ import re
 
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
-from google.api_core import exceptions as gcs_exceptions
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -18,6 +17,7 @@ from bible.utils.error_responses import (
 )
 from bible.utils.provider_errors import (
     PassageNotFoundError,
+    TimestampsNotGeneratedError,
     provider_error_fields,
 )
 from bible.utils.request_params import (
@@ -27,38 +27,13 @@ from bible.utils.request_params import (
     is_valid_fileset_id,
     is_valid_language_iso,
 )
-from bible.services.apibible.registry import (
-    get_apibible_meta,
-    is_apibible_fileset,
+from bible.services.providers import (
+    get_passage_body,
+    provider_for,
 )
-from bible.services.google_tts.registry import get_tts_config
-from bible.services.sword.client import get_default_sword_client
-from bible.services.sword.registry import (
-    audio_mode_for_fileset,
-    canonical_sword_fileset_id,
-    is_sword_fileset,
-)
-from bible.services.esv.registry import is_esv_fileset
-from bible.services.search_grouping import (
-    fetch_apibible_matches,
-    fetch_dbt_matches,
-    fetch_esv_matches,
-    group_verses_by_book,
-    normalize_apibible_verse,
-    normalize_dbt_verse,
-    parse_esv_results,
-    scan_sword_matches,
-)
-from bible.services.storage import gcs
 from .serializers import BiblePassageSerializer
 from .services.translation_service import TranslationService
-from .services.apibible.client import (
-    get_default_apibible_client,
-)
 from .services.dbt.client import get_default_dbt_client
-from .services.esv.client import (
-    get_default_esv_client
-)
 
 logger = logging.getLogger(__name__)
 
@@ -133,48 +108,6 @@ def _parse_chapter_part(chapter_part):
             )
         verses.update(range(start, end + 1))
     return chapter, sorted(verses)
-
-
-def _apibible_timecode(item):
-    """Map an API.Bible audio timecode to ``{verse_start,
-    timestamp}``.
-
-    Timecode entries carry a ``verseId`` like ``JHN.3.16`` (some
-    payloads expose ``verse_start``/``verse``/``verse_id``
-    directly); the trailing dotted segment is the verse number.
-    API.Bible serializes numbers as strings, so both fields are
-    coerced to real ``int``/``float`` values.
-    """
-    verse = (
-        item.get('verse_start')
-        or item.get('verse')
-        or item.get('verse_id')
-    )
-    if verse is not None:
-        try:
-            verse = int(verse)
-        except (TypeError, ValueError):
-            verse = None
-    if verse is None:
-        verse_id = item.get('verseId') or ''
-        try:
-            # Strip the range tail first: both "JHN.3.16-17"
-            # and "JHN.3.16-JHN.3.17" must resolve to 16.
-            verse = int(
-                str(verse_id).split('-', 1)[0].split('.')[-1]
-            )
-        except ValueError:
-            verse = None
-    timestamp = item.get('timestamp')
-    if timestamp is not None:
-        try:
-            timestamp = float(timestamp)
-        except (TypeError, ValueError):
-            timestamp = None
-    return {
-        'verse_start': verse,
-        'timestamp': timestamp,
-    }
 
 
 class SearchRateThrottle(UserRateThrottle):
@@ -360,7 +293,10 @@ class BiblePassageView(APIView):
                     f"Successfully retrieved passage: "
                     f"{book_name} {chapter} ({fileset_id})"
                 )
-                body = serializer.to_representation(data)
+                # Provider dispatch + fetch + shaping live in
+                # the service layer — the serializer only
+                # validates the request boundary.
+                body = get_passage_body(serializer.validated_data)
                 # Provider failures come back with ``error`` /
                 # ``error_code`` fields — surface them with a real
                 # HTTP status so clients can branch on it. This
@@ -483,73 +419,21 @@ class AudioTimestampView(APIView):
             if not book_id:
                 return bad_request(f"Unknown book: {book}")
 
-            if is_sword_fileset(fileset_id):
-                canon = canonical_sword_fileset_id(fileset_id)
-                voice_name = get_tts_config(canon)["voice_name"]
-                # Audio fileset id selects the artifact layout:
-                # LVSGLU8C1DA -> audio/ (verse mode),
-                # LVSGLU8C2DA -> audio_chapter/ (chapter mode).
-                audio_mode = audio_mode_for_fileset(fileset_id)
-                try:
-                    payload = gcs.read_timestamps_json(
-                        canon, book_id, int(chapter), voice_name,
-                        mode=audio_mode,
-                    )
-                except gcs_exceptions.NotFound:
-                    return not_found(
-                        "Timestamps not yet generated for "
-                        "this chapter."
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    # Auth / network / malformed-JSON errors are not
-                    # a missing resource -- surface them as 502 so
-                    # clients don't mistake them for a 404.
-                    logger.exception(
-                        "Failed to read timestamps for %s %s %s",
-                        canon, book_id, chapter,
-                    )
-                    return provider_error_response(exc)
-                return Response({"data": payload.get("data", [])})
-
-            if is_apibible_fileset(fileset_id):
-                meta = get_apibible_meta(fileset_id)
-                audio = (
-                    get_default_apibible_client()
-                    .get_chapter_audio(
-                        meta["audio_bible_id"],
-                        book_id,
-                        chapter_num,
-                    )
-                )
-                timecodes = audio.get("timecodes") or []
-                if not timecodes:
-                    return not_found(
-                        "Timestamps not yet generated for "
-                        "this chapter."
-                    )
-                return Response({
-                    "data": [
-                        _apibible_timecode(tc)
-                        for tc in timecodes
-                    ]
-                })
-
-            dbt_client = get_default_dbt_client()
-            result = dbt_client.get_timestamps(
-                fileset_id, book_id, chapter_num
+            # Provider dispatch lives in the facade: SWORD reads
+            # the generated GCS sidecar, API.Bible maps its
+            # timecodes, everything else hits DBT timestamps.
+            data = provider_for(fileset_id).get_timestamps(
+                book_id, chapter_num
             )
-            timestamps = [
-                {
-                    "verse_start": item.get(
-                        "verse_start"
-                    ),
-                    "timestamp": item.get(
-                        "timestamp"
-                    ),
-                }
-                for item in (result.get("data") or [])
-            ]
-            return Response({"data": timestamps})
+            return Response({"data": data})
+        except TimestampsNotGeneratedError:
+            # The audio exists but its timestamps artifact was
+            # not generated yet (GCS sidecar missing, or an
+            # empty API.Bible timecodes list).
+            return not_found(
+                "Timestamps not yet generated for "
+                "this chapter."
+            )
         except Exception as e:
             logger.exception(
                 "Error fetching timestamps: %s", e
@@ -578,45 +462,13 @@ class CopyrightView(APIView):
             )
 
         try:
-            if is_apibible_fileset(bible_id):
-                meta = get_apibible_meta(bible_id)
-                bible = (
-                    get_default_apibible_client()
-                    .get_bible(meta['bible_id'])
-                )
-                copyright_text = (
-                    bible.get('copyrightStatement') or ''
-                )
-                return Response({
-                    "data": [{
-                        "id": bible_id,
-                        "type": "text_plain",
-                        "size": "C",
-                        "copyright": copyright_text,
-                        "copyright_date": "",
-                        "copyright_description": copyright_text,
-                    }]
-                })
-
-            dbt_client = get_default_dbt_client()
-            result = dbt_client.get_copyright(bible_id)
-
-            filesets = []
-            for item in (result or []):
-                cr = item.get("copyright") or {}
-                filesets.append({
-                    "id": item.get("id"),
-                    "type": item.get("type"),
-                    "size": item.get("size"),
-                    "copyright": cr.get("copyright", ""),
-                    "copyright_date": cr.get(
-                        "copyright_date", ""
-                    ),
-                    "copyright_description": cr.get(
-                        "copyright_description", ""
-                    ),
-                })
-            return Response({"data": filesets})
+            # Non-DBT ids resolve through the facade: ESV/SWORD
+            # (and abbrs like GLU8/NIV) answer from registry
+            # license metadata instead of 404ing through DBT;
+            # API.Bible still fetches the live copyright
+            # statement; everything else proxies DBT.
+            data = provider_for(bible_id).get_copyright()
+            return Response({"data": data})
         except Exception as e:
             logger.exception(
                 "Error fetching copyright: %s", e
@@ -782,10 +634,14 @@ class BibleSearchView(APIView):
             )
 
         try:
+            # Provider dispatch lives in the facade — grouped
+            # mode skips pagination parsing entirely (``page``
+            # is meaningless there).
             if group_by == 'book':
-                return self._grouped_search(
-                    fileset_id, query, books
-                )
+                payload = provider_for(
+                    fileset_id
+                ).search_grouped(query, books)
+                return Response({'data': payload})
 
             try:
                 limit = int(
@@ -811,199 +667,18 @@ class BibleSearchView(APIView):
                     "limit and page must be positive integers."
                 )
 
-            if is_esv_fileset(fileset_id):
-                return self._esv_search(query, limit, page)
-            if is_apibible_fileset(fileset_id):
-                return self._apibible_search(
-                    fileset_id, query, limit, page
-                )
-            if is_sword_fileset(fileset_id):
-                return self._sword_search(
-                    fileset_id, query, limit, page, books
-                )
-            return self._dbt_search(
-                fileset_id, query, limit, page,
-                sort_by, books,
+            # Each provider returns the normalized
+            # ``{verses, meta}`` payload.
+            payload = provider_for(fileset_id).search(
+                query, limit, page,
+                sort_by=sort_by, books=books,
             )
+            return Response({'data': payload})
         except Exception as e:
             logger.exception(
                 "Error in BibleSearchView: %s", e
             )
             return provider_error_response(e)
-
-    def _esv_search(self, query, limit, page):
-        """Search using ESV API passage search endpoint."""
-        esv_client = get_default_esv_client()
-
-        # Call ESV API search
-        result = esv_client.search(query, page, limit)
-
-        # Transform ESV API response to match our format
-        verses = parse_esv_results(result.get('results', []))
-
-        # Build pagination metadata
-        pagination = {
-            'total': result.get('total_results', 0),
-            'count': len(verses),
-            'per_page': limit,
-            'current_page': result.get('page', page),
-            'total_pages': result.get('total_pages', 1),
-        }
-
-        return Response({
-            'data': {
-                'verses': verses,
-                'meta': {
-                    'pagination': pagination
-                }
-            }
-        })
-
-    def _apibible_search(self, fileset_id, query, limit, page):
-        """Search using API.Bible's offset-based search endpoint."""
-        meta = get_apibible_meta(fileset_id)
-        client = get_default_apibible_client()
-        offset = (page - 1) * limit
-        result = client.search(
-            meta['bible_id'], query,
-            offset=offset, limit=limit,
-        )
-        data = result.get('data') or {}
-        verses = [
-            normalize_apibible_verse(v)
-            for v in data.get('verses') or []
-        ]
-        total = data.get('total') or 0
-        total_pages = (
-            (total + limit - 1) // limit if limit else 1
-        )
-        return Response({
-            'data': {
-                'verses': verses,
-                'meta': {
-                    'pagination': {
-                        'total': total,
-                        'count': len(verses),
-                        'per_page': limit,
-                        'current_page': page,
-                        'total_pages': total_pages,
-                    }
-                },
-            }
-        })
-
-    def _grouped_search(self, fileset_id, query, books):
-        """Return every match grouped by book (``group_by=book``).
-
-        Response shape: ``data.groups`` = per-book groups in
-        canonical order; ``data.meta`` = ``{total, truncated}``
-        where ``truncated`` is True when a safety cap cut
-        results off.
-        """
-        if is_esv_fileset(fileset_id):
-            verses, total, truncated = fetch_esv_matches(
-                get_default_esv_client(), query
-            )
-        elif is_apibible_fileset(fileset_id):
-            meta = get_apibible_meta(fileset_id)
-            verses, total, truncated = fetch_apibible_matches(
-                get_default_apibible_client(),
-                meta['bible_id'], query,
-            )
-        elif is_sword_fileset(fileset_id):
-            verses = scan_sword_matches(
-                get_default_sword_client(),
-                fileset_id, query, books,
-            )
-            total, truncated = len(verses), False
-        else:
-            verses, total, truncated = fetch_dbt_matches(
-                get_default_dbt_client(),
-                fileset_id, query, books,
-            )
-        return Response({
-            'data': {
-                'groups': group_verses_by_book(verses),
-                'meta': {
-                    'total': total,
-                    'truncated': truncated,
-                },
-            }
-        })
-
-    def _dbt_search(
-        self, fileset_id, query, limit, page, sort_by, books
-    ):
-        dbt_client = get_default_dbt_client()
-        result = dbt_client.search(
-            fileset_id, query,
-            limit=limit, page=page,
-            sort_by=sort_by, books=books,
-        )
-        raw_verses = result.get('verses') or {}
-        verse_items = raw_verses.get('data') or []
-        normalized = [
-            normalize_dbt_verse(v)
-            for v in verse_items
-        ]
-        # Pagination lives in result['meta'] (documented schema) or
-        # result['verses']['meta'] (observed b4.dbt.io behaviour).
-        # Normalise to a clean { pagination: { ... } } shape and
-        # strip internal DBT 'links' so callers only ever use our
-        # own API to paginate.
-        raw_meta = (
-            result.get('meta')
-            or raw_verses.get('meta')
-            or {}
-        )
-        pagination = raw_meta.get('pagination') or {}
-        meta = {
-            'pagination': {
-                'total': pagination.get('total'),
-                'count': pagination.get('count'),
-                'per_page': pagination.get('per_page'),
-                'current_page': (
-                    pagination.get('current_page')
-                ),
-                'total_pages': (
-                    pagination.get('total_pages')
-                ),
-            }
-        } if pagination else {}
-        return Response({
-            'data': {
-                'verses': normalized,
-                'meta': meta,
-            }
-        })
-
-    def _sword_search(
-        self, fileset_id, query, limit, page, books
-    ):
-        matches = scan_sword_matches(
-            get_default_sword_client(),
-            fileset_id, query, books,
-        )
-        total = len(matches)
-        start = (page - 1) * limit
-        page_items = matches[start:start + limit]
-        total_pages = (
-            (total + limit - 1) // limit if limit else 1
-        )
-        return Response({
-            'data': {
-                'verses': page_items,
-                'meta': {
-                    'pagination': {
-                        'total': total,
-                        'count': len(page_items),
-                        'per_page': limit,
-                        'current_page': page,
-                        'total_pages': total_pages,
-                    }
-                },
-            }
-        })
 
 
 class TranslationListView(APIView):
@@ -1149,9 +824,9 @@ class LanguageListView(APIView):
                 for item in (result.get('data') or [])
             ]
             # Normalise to a clean { pagination: { ... } } shape
-            # and whitelist the documented fields, like
-            # _dbt_search, so a missing meta.pagination emits {}
-            # rather than null.
+            # and whitelist the documented fields, like the
+            # facade's DBT search, so a missing meta.pagination
+            # emits {} rather than null.
             pagination = (result.get('meta') or {}).get(
                 'pagination'
             ) or {}

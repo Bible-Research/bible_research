@@ -5,26 +5,12 @@ from django.db import transaction
 from django.db.models import Q
 from rest_framework import serializers
 from bible.models import Verse
-from bible.services.apibible.client import (
-    get_default_apibible_client,
-)
-from bible.services.apibible.registry import (
-    get_apibible_meta,
-    is_apibible_fileset,
-)
-from bible.services.dbt.client import get_default_dbt_client
-from bible.services.esv.client import get_default_esv_client
-from bible.services.esv.registry import is_esv_fileset
-from bible.services.sword.client import get_default_sword_client
-from bible.services.sword.registry import is_sword_fileset
+from bible.services.providers import provider_for
 from bible.utils.bible_books import (
     get_book_name_from_id,
     get_dbt_book_id,
 )
-from bible.utils.provider_errors import (
-    PassageNotFoundError,
-    provider_error_fields,
-)
+from bible.utils.provider_errors import provider_error_fields
 from .models import (
     Note,
     NoteVerse,
@@ -281,6 +267,31 @@ class NoteSerializer(serializers.ModelSerializer):
 
         return note
 
+    def _chapter_payload(self, fileset_id, dbt_book_id, chapter):
+        """Fetch (or reuse) the chapter's provider payload.
+
+        Results are memoized on the shared serializer context
+        keyed by ``(fileset_id, book_id, chapter)`` — DRF
+        serializes each note instance through a fresh
+        ``to_representation`` call, so the batching cache has to
+        live in ``context`` where a ``many=True`` list can share
+        it. Failures are cached too: every note on a missing
+        chapter degrades with the same error fields.
+        """
+        cache = self.context.setdefault('chapter_cache', {})
+        key = (fileset_id, dbt_book_id, chapter)
+        if key not in cache:
+            try:
+                cache[key] = provider_for(fileset_id).get_chapter(
+                    dbt_book_id, chapter
+                )
+            except Exception as exc:  # noqa: BLE001
+                cache[key] = exc
+        result = cache[key]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
     def to_representation(self, instance):
         """
         Overrides the default representation for GET requests to
@@ -317,8 +328,6 @@ class NoteSerializer(serializers.ModelSerializer):
         book_name = verses[0].book
 
         verse_numbers = [v.verse for v in verses]
-        first_verse_num = verse_numbers[0]
-        last_verse_num = verse_numbers[-1]
 
         # Get fileset_id from context, default to DBT
         fileset_id = self.context.get('fileset_id', 'ENGESV')
@@ -342,22 +351,15 @@ class NoteSerializer(serializers.ModelSerializer):
                         'verse': verse.verse,
                         'text': ''
                     })
-            # Use ESV client if fileset is ENGESV_API
-            elif is_esv_fileset(fileset_id):
-                esv_client = get_default_esv_client()
-                parsed = esv_client.get_chapter_with_headings(
-                    dbt_book_id, chapter
+            else:
+                # Provider dispatch lives in the facade; the
+                # whole chapter is fetched once per
+                # (fileset, book, chapter) and memoized on the
+                # serializer context, so a page of notes on the
+                # same passage costs one upstream call.
+                parsed = self._chapter_payload(
+                    fileset_id, dbt_book_id, chapter
                 )
-                # A successful-but-empty ESV body is missing
-                # content, not a usable chapter — surface
-                # not_found instead of silent empty text.
-                if not parsed.get('verses'):
-                    raise PassageNotFoundError(
-                        f"No verses found for {dbt_book_id} "
-                        f"{chapter} in fileset_id={fileset_id}"
-                    )
-
-                # Extract verses in range
                 for verse in verses:
                     matching_verse = next(
                         (
@@ -379,140 +381,21 @@ class NoteSerializer(serializers.ModelSerializer):
                     verses_with_text.append(verse_data)
 
                 # Filter headings to only those relevant to
-                # this note's verses
+                # this note's verses (SWORD modules carry no
+                # headings metadata — ``headings`` is None).
                 headings = [
                     {
                         'before_verse': h.get('before_verse'),
                         'text': h.get('text', '')
                     }
-                    for h in parsed.get('headings', [])
+                    for h in (parsed.get('headings') or [])
                     if h.get('before_verse') in verse_numbers
                 ]
-            elif is_apibible_fileset(fileset_id):
-                # API.Bible filesets (e.g. ENGNIV_API) must fetch
-                # from api.scripture.api.bible — falling through
-                # to DBT would silently render ENGESV text
-                # labelled as the requested translation.
-                apibible_meta = get_apibible_meta(fileset_id)
-                parsed = get_default_apibible_client().get_chapter(
-                    apibible_meta['bible_id'], dbt_book_id, chapter
-                )
-                if not parsed.get('verses'):
-                    raise PassageNotFoundError(
-                        f"No verses found for {dbt_book_id} "
-                        f"{chapter} in fileset_id={fileset_id}"
-                    )
-
-                # Extract verses in range — same shape as the
-                # ESV branch's parsed result.
-                for verse in verses:
-                    matching_verse = next(
-                        (
-                            v for v in parsed['verses']
-                            if v['verse_start'] == verse.verse
-                        ),
-                        None
-                    )
-                    text = (
-                        matching_verse['verse_text']
-                        if matching_verse else ''
-                    )
-                    verse_data = {
-                        'book': book_name,
-                        'chapter': chapter,
-                        'verse': verse.verse,
-                        'text': text
-                    }
-                    verses_with_text.append(verse_data)
-
-                headings = [
-                    {
-                        'before_verse': h.get('before_verse'),
-                        'text': h.get('text', '')
-                    }
-                    for h in parsed.get('headings', [])
-                    if h.get('before_verse') in verse_numbers
-                ]
-                # Relay the FUMS ``meta`` block so the frontend
-                # can report API.Bible text deliveries.
-                if parsed.get('fums'):
-                    representation['meta'] = parsed['fums']
-            elif is_sword_fileset(fileset_id):
-                # Local SWORD module (e.g. LVSGLU8) — same
-                # provider dispatch as the passage endpoint.
-                # SWORD modules carry no headings metadata.
-                sword_client = get_default_sword_client()
-                sword_verses = sword_client.get_chapter_verses(
-                    fileset_id, dbt_book_id, chapter
-                )
-                for verse in verses:
-                    matching_verse = next(
-                        (
-                            v for v in sword_verses
-                            if v['verse_start'] == verse.verse
-                        ),
-                        None
-                    )
-                    verses_with_text.append({
-                        'book': book_name,
-                        'chapter': chapter,
-                        'verse': verse.verse,
-                        'text': (
-                            matching_verse['verse_text']
-                            if matching_verse else ''
-                        )
-                    })
-            else:
-                # Use DBT client for other filesets
-                kwargs = {
-                    "verse_start": first_verse_num,
-                    "verse_end": last_verse_num
-                }
-                dbt_client = get_default_dbt_client()
-                verse_text = dbt_client.get_verses(
-                    dbt_book_id, chapter,
-                    bible_id=fileset_id, **kwargs
-                )
-                # A successful-but-empty DBT body (or rows that
-                # all lack ``verse_text``) is missing content —
-                # surface not_found instead of silent empty text.
-                data_rows = (verse_text or {}).get('data') or []
-                if not any('verse_text' in v for v in data_rows):
-                    raise PassageNotFoundError(
-                        f"No verses found for {dbt_book_id} "
-                        f"{chapter} in fileset_id={fileset_id}"
-                    )
-
-                for verse in verses:
-                    matching_verse = next(
-                        (
-                            v for v in data_rows
-                            if v['verse_start'] == verse.verse
-                        ),
-                        None
-                    )
-                    text = (
-                        matching_verse['verse_text']
-                        if matching_verse else ''
-                    )
-                    verse_data = {
-                        'book': book_name,
-                        'chapter': chapter,
-                        'verse': verse.verse,
-                        'text': text
-                    }
-                    verses_with_text.append(verse_data)
-
-                # Get headings from DBT response if available
-                if 'headings' in verse_text:
-                    headings = [
-                        {
-                            'before_verse': h.get('before_verse'),
-                            'text': h.get('text', '')
-                        }
-                        for h in verse_text.get('headings', [])
-                        if h.get('before_verse') in verse_numbers
-                    ]
+                # Relay provider-mandated metadata — e.g.
+                # API.Bible's FUMS block, which the frontend
+                # must report per license terms.
+                if parsed.get('meta'):
+                    representation['meta'] = parsed['meta']
         except Exception as e:
             # Catch-all also covers response-shaping bugs; they
             # surface as provider_error rather than crashing GETs.

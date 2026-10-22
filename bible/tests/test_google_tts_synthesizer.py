@@ -1,4 +1,5 @@
 import re
+import unittest
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -164,9 +165,7 @@ def test_chapter_mode_segments_oversized_chapter_with_offsets(
 
 
 @patch("bible.services.google_tts.synthesizer.MP3", _FakeMP3)
-def test_chapter_mode_missing_mark_falls_back_to_previous_timestamp(
-    caplog,
-):
+def test_chapter_mode_missing_mark_falls_back_to_previous_timestamp():
     """If the voice drops a <mark> (partial SSML support), the verse
     keeps a sane timestamp instead of disappearing — and the drop is
     logged, since the fallback produces plausible-looking wrong
@@ -182,10 +181,21 @@ def test_chapter_mode_missing_mark_falls_back_to_previous_timestamp(
     tts = DropMarkTTS()
     synth = _chapter_synth(_verses(3), tts)
 
-    artifacts = synth.run("LVSGLU8", "JHN", 3, mode="chapter")
+    # assertLogs attaches to the named logger directly — pytest's
+    # caplog listens at the root logger and misses records from
+    # the production LOGGING config's propagate=False ``bible``
+    # logger.
+    with unittest.TestCase().assertLogs(
+        'bible.services.google_tts.synthesizer', level='WARNING'
+    ) as captured:
+        artifacts = synth.run(
+            "LVSGLU8", "JHN", 3, mode="chapter"
+        )
 
     data = artifacts.timestamps_payload["data"]
     assert [d["verse_start"] for d in data] == [1, 2, 3]
     # v2 inherits v1's timestamp; v3's real mark still wins.
     assert [d["timestamp"] for d in data] == [0.0, 0.0, 2.0]
-    assert "no timepoint for 1 mark(s)" in caplog.text
+    assert "no timepoint for 1 mark(s)" in "\n".join(
+        captured.output
+    )

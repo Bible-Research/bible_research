@@ -18,6 +18,26 @@ class PassageNotFoundError(ValueError):
     instead of a generic ``provider_error``. Subclasses
     ``ValueError`` for backward compatibility with callers that
     caught the previous exception type.
+
+    ``client_message`` optionally carries a fixed, safe message
+    the caller may surface in the response body (e.g. the SWORD
+    generated-audio miss explains *why* the fileset lacks the
+    chapter). ``None`` means the default coverage-miss message.
+    """
+
+    def __init__(self, message='', client_message=None):
+        super().__init__(message)
+        self.client_message = client_message
+
+
+class TimestampsNotGeneratedError(PassageNotFoundError):
+    """The audio exists but its timestamp sidecar does not yet.
+
+    Raised by the provider facade when a GCS ``_timestamps.json``
+    artifact or an API.Bible ``timecodes`` list is missing — the
+    timestamps endpoint maps it to its dedicated "not yet
+    generated" 404 while every other caller still sees a plain
+    ``PassageNotFoundError``.
     """
 
 

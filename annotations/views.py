@@ -589,6 +589,12 @@ class NoteViewSet(viewsets.ModelViewSet):
         final_queryset = self._apply_ordering(
             queryset, ordering_param
         )
+        # NoteSerializer expands ``tag`` and iterates ``verses``
+        # per note — eager-load both relations so a page of
+        # notes costs two queries, not N+1.
+        final_queryset = final_queryset.select_related(
+            'tag'
+        ).prefetch_related('verses')
         logger.info(
             f"Returning notes with ordering: {ordering_param}"
         )

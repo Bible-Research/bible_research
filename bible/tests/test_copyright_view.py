@@ -53,7 +53,7 @@ SAMPLE_COPYRIGHT_DATA = [
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_get_copyright_success(mock_get_client, client):
     """Test successful retrieval of copyright info."""
     mock_dbt_instance = mock_get_client.return_value
@@ -111,7 +111,7 @@ def test_get_copyright_invalid_bible_id(client, bible_id):
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_get_copyright_dbt_exception(
     mock_get_client, client
 ):
@@ -129,7 +129,7 @@ def test_get_copyright_dbt_exception(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_get_copyright_rate_limited(mock_get_client, client):
     """An upstream 429 maps to HTTP 429 + rate_limited."""
     mock_get_client.return_value.get_copyright.side_effect = (
@@ -146,7 +146,7 @@ def test_get_copyright_rate_limited(mock_get_client, client):
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_provider_404_returns_not_found(mock_get_client, client):
     """An upstream 404 maps to HTTP 404 + not_found."""
     mock_get_client.return_value.get_copyright.side_effect = (
@@ -160,7 +160,7 @@ def test_provider_404_returns_not_found(mock_get_client, client):
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_get_copyright_error_does_not_leak_credentials(
     mock_get_client, client
 ):
@@ -184,7 +184,7 @@ def test_get_copyright_error_does_not_leak_credentials(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_apibible_client')
+@patch('bible.services.providers.get_default_apibible_client')
 def test_apibible_branch_returns_copyright(
     mock_get_client, client
 ):
@@ -211,7 +211,7 @@ def test_apibible_branch_returns_copyright(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_apibible_client')
+@patch('bible.services.providers.get_default_apibible_client')
 def test_apibible_branch_missing_statement_defaults(
     mock_get_client, client
 ):
@@ -229,24 +229,84 @@ def test_apibible_branch_missing_statement_defaults(
     assert entry['copyright_description'] == ''
 
 
+# --- Non-DBT registry routing (plan: bible/copyright #1) ------
+#
+# ESV/SWORD ids — and their registry abbrs — used to fall
+# through to the DBT call and 404 upstream. They now answer
+# from registry ``license`` metadata via the provider facade.
+
+
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
-def test_sword_and_esv_ids_fall_through_to_dbt(
+@patch('bible.services.providers.get_default_dbt_client')
+def test_esv_id_answers_from_registry_license(
     mock_get_client, client
 ):
-    """Only API.Bible ids are special-cased: a SWORD id
-    (``LVSGLU8``) and an ESV id (``ENGESV_API``) both fall
-    through to the DBT ``get_copyright`` call."""
-    mock_get_client.return_value.get_copyright.return_value = []
+    """``ENGESV_API`` returns the ESV registry license — DBT
+    is never called for non-DBT filesets."""
+    response = client.get(
+        COPYRIGHT_URL, {'bible_id': 'ENGESV_API'}
+    )
 
-    for bible_id in ('LVSGLU8', 'ENGESV_API'):
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()['data'] == [{
+        'id': 'ENGESV_API',
+        'type': 'text_plain',
+        'size': 'C',
+        'copyright': 'Copyright Crossway. See api.esv.org.',
+        'copyright_date': '',
+        'copyright_description': (
+            'Copyright Crossway. See api.esv.org.'
+        ),
+    }]
+    mock_get_client.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+def test_sword_id_and_abbr_answer_from_registry_license(
+    mock_get_client, client
+):
+    """``LVSGLU8`` and its abbr ``GLU8`` return the SWORD
+    registry license without touching DBT."""
+    expected = [{
+        'type': 'text_plain',
+        'size': 'C',
+        'copyright': 'Public Domain',
+        'copyright_date': '',
+        'copyright_description': 'Public Domain',
+    }]
+
+    for bible_id in ('LVSGLU8', 'GLU8', 'LVSGLU8C1DA'):
         response = client.get(
             COPYRIGHT_URL, {'bible_id': bible_id}
         )
         assert response.status_code == status.HTTP_200_OK
-        assert response.json()['data'] == []
+        entry = response.json()['data'][0]
+        assert entry['id'] == bible_id
+        assert {
+            k: v for k, v in entry.items() if k != 'id'
+        } == expected[0]
 
-    get_copyright = mock_get_client.return_value.get_copyright
-    assert [c.args[0] for c in get_copyright.call_args_list] == [
-        'LVSGLU8', 'ENGESV_API',
-    ]
+    mock_get_client.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_apibible_client')
+def test_apibible_abbr_canonicalizes_to_text_bible(
+    mock_get_client, client
+):
+    """The ``NIV`` abbr canonicalizes through
+    ``canonical_apibible_fileset_id`` and hits the same live
+    copyright fetch as ``ENGNIV_API``."""
+    mock_get_client.return_value.get_bible.return_value = {
+        'copyrightStatement': 'Copyright Biblica',
+    }
+
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'NIV'})
+
+    assert response.status_code == status.HTTP_200_OK
+    entry = response.json()['data'][0]
+    assert entry['id'] == 'NIV'
+    assert entry['copyright'] == 'Copyright Biblica'
+    mock_get_client.return_value.get_bible \
+        .assert_called_once_with(APINIV_BIBLE_ID)
