@@ -142,12 +142,16 @@ bible_research/
 
 The project uses two special accounts:
 
-1. **Guest User** (for anonymous access)
+1. **Guest User** (legacy, locked)
    - Username: `guest`
    - Email: `guest@example.com`
-   - Purpose: Default user for unauthenticated requests
+   - Purpose: Owns rows created before device
+     auto-provisioning was removed; not used for new requests
+   - Locked: unusable password — cannot log in or mint a
+     `/api/token/` token
    - Read-only: API writes (POST/PUT/PATCH/DELETE)
-     authenticated as `guest` return 403
+     authenticated as `guest` (via a previously issued token)
+     return 403
 
 2. **Test User** (for development)
    - Username: `testuser`
@@ -215,20 +219,19 @@ The project uses two special accounts:
 - **Unauthenticated users**: See public notes only; `list` on
   tags returns `[]`, and a tag can be retrieved only when it
   carries at least one public note
-- **Shared `guest` account**: Read-only — reads allowed, writes
+- **Legacy `guest` account**: Read-only — reads allowed, writes
   rejected with 403 (`GuestReadOnly` in
-  `bible_research/permissions.py`)
+  `bible_research/permissions.py`). `guest` is reachable only
+  via a token issued before the account was locked.
 - **Note visibility**: Controlled by `public` boolean field
-- **Device auto-provisioning**: `DeviceAndCountryMiddleware`
-  auto-authenticates anonymous requests as a per-device user —
-  except for `/admin` and safe-method reads (`GET`/`HEAD`/
-  `OPTIONS`) on `/api/v1/bible`, `/api/v1/notes` and
-  `/api/v1/tags`, which stay truly anonymous. Non-safe methods
-  (e.g. `POST /api/v1/notes/`) still auto-provision so existing
-  clients can write without an explicit login. Because anonymous
-  callers never get a user on these paths, every read view under
-  them must opt out of the `IsAuthenticated` default — the
-  `bible` views do so via `permission_classes = [AllowAny]`.
+- **No auto-provisioning**: `DeviceAndCountryMiddleware` has
+  been removed — anonymous requests are real `AnonymousUser`s
+  everywhere and every write endpoint requires authentication
+  (anonymous writes return 401). Any read endpoint that must
+  stay open to anonymous callers opts out of the
+  `IsAuthenticated` default itself — e.g. the `bible` views and
+  `GET /api/v1/comments/counts/` carry
+  `permission_classes = [AllowAny]`.
 
 ---
 
@@ -765,11 +768,10 @@ Authorization: Token <your-token>
 
 Anonymous callers (no `Authorization` header) may read
 public notes; all other note operations require
-authentication (401/403 otherwise). Safe-method reads on
-`/api/v1/notes` are exempt from `DeviceAndCountryMiddleware`
-auto-provisioning, so these requests arrive as a real
-`AnonymousUser` — while `POST`/`PUT`/`PATCH`/`DELETE` still
-auto-provision a per-device user that retains write access.
+authentication (401/403 otherwise). There is no device
+auto-provisioning anymore — anonymous requests arrive as a
+real `AnonymousUser` on every endpoint, and anonymous
+`POST`/`PUT`/`PATCH`/`DELETE` are rejected with 401.
 Note payloads include a read-only `is_owner` boolean: `true`
 only when the request user is authenticated and owns the
 note, always `false` for anonymous readers — the frontend
@@ -1063,10 +1065,11 @@ surface as a `409 position_conflict`.
 - `409 {"error": "position_conflict", "constraint":
   "unique_tag_position_per_tag", ...}` — position collision,
   same contract as `notes/reorder/`.
-- `403` when the requester is authenticated as the shared
+- `401` for anonymous callers — all writes require
+  authentication.
+- `403` when the requester is authenticated as the legacy
   `guest` account — `guest` is read-only, so all writes
-  (including `notes/move/`) are rejected. Device-provisioned
-  users can still move the notes they own.
+  (including `notes/move/`) are rejected.
 
 ### Comments
 
@@ -1363,12 +1366,15 @@ curl http://localhost:8000/api/v1/notes/ \
 1. **Unauthenticated Users**:
    - Can access Bible passages
    - Can view public notes
-   - Can view guest user's tags
-   - Cannot create/modify content
+   - Can retrieve a tag that carries at least one public note
+   - Can read public-note comment counts
+     (`GET /api/v1/comments/counts/`)
+   - Cannot create/modify content — every write returns 401
 
-2. **Shared Guest User** (`guest`):
-   - Fallback account the device middleware authenticates
-     requests as when it cannot provision a per-device user
+2. **Legacy Guest User** (`guest`):
+   - Locked account that owns rows created before device
+     auto-provisioning was removed; reachable only via a
+     previously issued token
    - Can read guest-owned tags/notes/comments and public
      content
    - Cannot write — every POST/PUT/PATCH/DELETE returns 403
@@ -1385,10 +1391,11 @@ curl http://localhost:8000/api/v1/notes/ \
    - Access to Django admin panel
    - Same API permissions as regular users
 
-### Guest User Behavior
+### Anonymous Behavior
 
 When no authenticated user is available:
-- Tags: Guest user's tags are shown
+- Tags: `list` returns `[]`; `retrieve` works only for tags
+  carrying at least one public note
 - Notes: Only public notes are visible. Note reads (`GET
   /api/v1/notes/`, `GET /api/v1/notes/{id}/`,
   `GET /api/v1/notes/order-index/`) are open to anonymous
@@ -1396,8 +1403,9 @@ When no authenticated user is available:
   (`POST`/`PUT`/`PATCH`/`DELETE`, `reorder/`, `move/`,
   `bulk/`, `linked/`) require authentication and return
   401/403 for anonymous callers.
-- Creation: Rejected — requests authenticated as the shared
-  `guest` account are read-only (writes return 403)
+- Creation: Rejected — anonymous writes return 401. Writes
+  authenticated as the legacy `guest` account (via an old
+  token) return 403 (`GuestReadOnly`)
 
 ---
 

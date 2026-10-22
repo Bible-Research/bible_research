@@ -89,21 +89,27 @@ can contain request URLs with credentials.
 
 ## Auth quirks
 
-- `bible_research/authentication.py`: DRF `TokenAuthentication`
-  (`Authorization: Token …`) plus `BearerTokenAuthentication`
-  (`Authorization: Bearer …`) and a CSRF-exempt session auth.
-- `DeviceAndCountryMiddleware` auto-provisions/authenticates users
-  from device + language headers and falls back to a `guest` user —
-  anonymous requests are not necessarily unauthenticated. Exception:
-  safe-method reads (`GET`/`HEAD`/`OPTIONS`) on `/api/v1/bible`,
-  `/api/v1/notes`, `/api/v1/tags` stay truly anonymous (public
-  content, issue #9).
-- The shared `guest` account is read-only:
+- Token auth only: `bible_research/authentication.py` holds DRF
+  `TokenAuthentication` (`Authorization: Token …`) plus
+  `BearerTokenAuthentication` (`Authorization: Bearer …`). The
+  DRF API no longer accepts cookie sessions (the old CSRF-exempt
+  session auth was deleted); Django session auth still exists for
+  `/admin` only.
+- No auto-provisioning: anonymous requests arrive as a real
+  `AnonymousUser` — `DeviceAndCountryMiddleware` and its
+  header-derived per-device `User` rows are gone. Every write
+  endpoint requires `IsAuthenticated` explicitly, so anonymous
+  writes return 401 and `/me/` 401s for anonymous callers.
+- The legacy `guest` account is read-only:
   `bible_research/permissions.py` `GuestReadOnly` (wired into
   `DEFAULT_PERMISSION_CLASSES` plus the image/reading-position
   views that override permissions) rejects its writes with 403.
-- Serializers scope tag/note querysets to `request.user`, else to the
-  `guest` user.
+  It exists only to own rows created before provisioning was
+  removed and is reachable only via a previously issued token.
+- Serializers scope tag/note querysets to `request.user`;
+  anonymous callers get `.none()`. `GET
+  /api/v1/comments/counts/` carries `permission_classes =
+  [AllowAny]` so share pages can count public-note comments.
 
 ## Databases
 
@@ -151,7 +157,7 @@ values; uniqueness collisions are handled in `annotations/views.py`.
 - Validate input in serializer `validate_*` methods; enforce
   ownership in `perform_update`/`perform_destroy` via
   `PermissionDenied`; `perform_create` assigns the request user
-  or falls back to `guest`.
+  only — anonymous writes 401 via `IsAuthenticated`.
 - Never: modify applied migrations, raw SQL in app code (use the
   ORM — ad-hoc read-only investigation is the exception),
   circular imports (use `get_user_model()`), secrets in code
@@ -176,9 +182,8 @@ Test user accounts: `testuser`, `guest` — create via
 `python scripts/create_test_user.py` if a local DB lacks them
 (pytest's in-memory DB creates what it needs per test).
 
-Known pre-existing failures on `main` (not regressions):
-`test_note_serializer`, `test_single_query_assertion` — both
-`@expectedFailure`.
+Known pre-existing failure on `main` (not a regression):
+`test_single_query_assertion` — `@expectedFailure`.
 
 Known pinned prod bugs (FIXME-marked tests). Each pins current
 buggy behavior pending a product decision — these are latent
