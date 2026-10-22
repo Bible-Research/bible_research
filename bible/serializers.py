@@ -429,8 +429,24 @@ class BiblePassageSerializer(serializers.Serializer):
                 'format': 'text',
                 'verses': selected,
             }
+        except PassageNotFoundError:
+            # Raised by every provider branch for "the fileset
+            # lacks this book/chapter/selection" — one stable
+            # coverage-miss code so clients can fall back to
+            # another fileset. Same shape as the per-provider
+            # early returns above.
+            return _book_not_in_fileset_body(
+                book_id, book_name, chapter, fileset_id
+            )
         except Exception as e:
             logger.exception(f"Error fetching Bible passage: {e}")
+            # An upstream HTTP 404 that escaped a provider branch
+            # (e.g. an API.Bible HTTPError) is also a coverage
+            # miss — normalize to book_not_in_fileset.
+            if _is_http_404(e) or getattr(e, 'status', None) == 404:
+                return _book_not_in_fileset_body(
+                    book_id, book_name, chapter, fileset_id
+                )
             return {
                 'book': book_id,
                 'book_name': book_name,

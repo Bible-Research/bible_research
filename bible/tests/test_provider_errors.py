@@ -164,9 +164,12 @@ class ProviderErrorSerializerTests(TestCase):
         )
 
     @patch('bible.serializers.get_default_esv_client')
-    def test_esv_empty_verses_returns_not_found(self, mock_get):
+    def test_esv_empty_verses_returns_book_not_in_fileset(
+        self, mock_get
+    ):
         """A successful-but-empty ESV body parses to no verses —
-        missing content, not a silent empty chapter."""
+        a coverage miss like every other provider branch, so it
+        carries the unified ``book_not_in_fileset`` code."""
         mock_client = MagicMock()
         mock_client.get_chapter_with_headings.return_value = {
             'verses': [],
@@ -180,7 +183,56 @@ class ProviderErrorSerializerTests(TestCase):
         )
 
         self.assertNotIn('verses', result)
-        self.assertEqual(result['error_code'], 'not_found')
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
+
+    @patch('bible.serializers.get_default_apibible_client')
+    def test_apibible_404_returns_book_not_in_fileset(
+        self, mock_get
+    ):
+        """An API.Bible upstream 404 (uncovered chapter) is the
+        same coverage miss as a DBT 404 — ``book_not_in_fileset``
+        so the frontend fallback keys on one code."""
+        mock_client = MagicMock()
+        mock_client.get_chapter.side_effect = _http_error(404)
+        mock_get.return_value = mock_client
+
+        data = _passage_data(fileset_id='ENGNIV_API')
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertNotIn('verses', result)
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
+
+    @patch('bible.serializers.get_default_apibible_client')
+    def test_apibible_empty_chapter_returns_book_not_in_fileset(
+        self, mock_get
+    ):
+        """API.Bible's own ``PassageNotFoundError`` (no usable
+        verse content) also normalizes to
+        ``book_not_in_fileset``."""
+        from bible.utils.provider_errors import (
+            PassageNotFoundError,
+        )
+        mock_client = MagicMock()
+        mock_client.get_chapter.side_effect = PassageNotFoundError(
+            'No verses found for JHN 3'
+        )
+        mock_get.return_value = mock_client
+
+        data = _passage_data(fileset_id='ENGNIV_API')
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertNotIn('verses', result)
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
 
     @patch('bible.serializers.get_default_sword_client')
     def test_sword_missing_chapter_returns_book_not_in_fileset(
@@ -282,3 +334,44 @@ class ProviderErrorViewTests(TestCase):
         )
         self.assertNotIn('SECRET', response.data['error'])
         self.assertNotIn('key=', response.data['error'])
+
+
+class FakeGcsError(Exception):
+    """Mimics ``google.api_core`` exceptions — the HTTP status
+    lives on ``exc.code``, not ``exc.status``/``exc.response``."""
+
+    def __init__(self, code):
+        super().__init__(f'code={code}')
+        self.code = code
+
+
+class ExcCodeStatusTests(TestCase):
+    """``upstream_status_code`` learns ``exc.code`` so GCS
+    failures classify like any other upstream HTTP status."""
+
+    def test_code_429_maps_to_rate_limited(self):
+        from bible.utils.provider_errors import (
+            provider_error_fields,
+        )
+        fields = provider_error_fields(FakeGcsError(429))
+        self.assertEqual(fields['error_code'], 'rate_limited')
+
+    def test_code_404_maps_to_not_found(self):
+        from bible.utils.provider_errors import (
+            provider_error_fields,
+        )
+        fields = provider_error_fields(FakeGcsError(404))
+        self.assertEqual(fields['error_code'], 'not_found')
+
+    def test_non_int_code_is_not_an_http_status(self):
+        """A gRPC-style enum ``code`` must not classify as an
+        HTTP status."""
+        from bible.utils.provider_errors import (
+            provider_error_fields,
+        )
+
+        class GrpcStyleError(Exception):
+            code = 'NOT_FOUND'
+
+        fields = provider_error_fields(GrpcStyleError('x'))
+        self.assertEqual(fields['error_code'], 'provider_error')

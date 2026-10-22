@@ -103,6 +103,101 @@ def test_missing_fileset_id_param(client):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    'params,code',
+    [
+        ({'fileset_id': 'ENGESV'}, 'missing_parameter'),
+        ({'query': 'love'}, 'missing_parameter'),
+        (
+            {'query': 'a' * 201, 'fileset_id': 'ENGESV'},
+            'invalid_parameter',
+        ),
+        (
+            {'query': 'love', 'fileset_id': 'ENGESV',
+             'group_by': 'verse'},
+            'invalid_parameter',
+        ),
+        (
+            {'query': 'love', 'fileset_id': 'ENGESV',
+             'limit': 'abc'},
+            'invalid_parameter',
+        ),
+        (
+            {'query': 'love', 'fileset_id': 'ENGESV',
+             'page': '0'},
+            'invalid_parameter',
+        ),
+    ],
+    ids=[
+        'missing-query', 'missing-fileset', 'overlong-query',
+        'bad-group_by', 'bad-limit', 'bad-page',
+    ],
+)
+def test_search_400s_carry_error_code(client, params, code):
+    """Every hand-rolled 400 emits the error/error_code
+    contract (S6) — search view item."""
+    response = client.get(SEARCH_URL, params)
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    body = response.json()
+    assert body['error']
+    assert body['error_code'] == code
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    'fileset_id',
+    ['evil/../../x', 'id with space', 'a' * 41, "bad'id"],
+    ids=['path-traversal', 'spaces', 'overlong', 'quote'],
+)
+def test_invalid_fileset_id_rejected_before_routing(
+    client, fileset_id
+):
+    """Garbage fileset ids must 400 at the view boundary —
+    before they can reach the DBT branch or an upstream URL
+    path (S12)."""
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': fileset_id,
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert (
+        response.json()['error_code'] == 'invalid_parameter'
+    )
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+def test_search_scoped_throttle(mock_get_client, client):
+    """BibleSearchView carries the tighter ``search`` throttle —
+    grouped mode fans out to ~30 upstream calls per request, so
+    the generous global anon rate is replaced by a tighter
+    scope. The third request inside the window 429s."""
+    from django.core.cache import cache
+    from bible.views import SearchRateThrottle
+
+    mock_get_client.return_value.search.return_value = {
+        'verses': {'data': []},
+        'meta': {'pagination': {'total': 0}},
+    }
+
+    # Throttle history lives in the process-wide locmem cache
+    # shared across tests — clear before counting.
+    cache.clear()
+    with patch.dict(
+        SearchRateThrottle.THROTTLE_RATES, {'search': '2/min'}
+    ):
+        params = {'query': 'love', 'fileset_id': 'ENGESV'}
+        for _ in range(2):
+            response = client.get(SEARCH_URL, params)
+            assert response.status_code == status.HTTP_200_OK
+        response = client.get(SEARCH_URL, params)
+    assert (
+        response.status_code
+        == status.HTTP_429_TOO_MANY_REQUESTS
+    )
+
+
+@pytest.mark.django_db
 def test_non_integer_limit_400(client):
     """``limit=abc`` → 400 before any provider call."""
     response = client.get(SEARCH_URL, {

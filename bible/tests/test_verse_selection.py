@@ -103,9 +103,13 @@ class VerseSelectionSerializerTests(TestCase):
         )
 
     @patch('bible.serializers.get_default_dbt_client')
-    def test_dbt_out_of_range_verse_returns_not_found(
+    def test_dbt_out_of_range_verse_returns_book_not_in_fileset(
         self, mock_get
     ):
+        """A verse selector outside the chapter's verses is a
+        coverage miss — the fileset lacks those verses — so it
+        carries the unified ``book_not_in_fileset`` code the
+        frontend fallback keys on (S6 normalization)."""
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
             1, 2, 3
@@ -118,7 +122,9 @@ class VerseSelectionSerializerTests(TestCase):
         )
 
         self.assertNotIn('verses', result)
-        self.assertEqual(result['error_code'], 'not_found')
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
 
     @patch('bible.serializers.get_default_esv_client')
     def test_esv_narrows_upstream_and_filters(self, mock_get):
@@ -258,7 +264,7 @@ class VerseSelectionSerializerTests(TestCase):
         )
 
     @patch('bible.serializers.get_default_apibible_client')
-    def test_apibible_out_of_range_verse_returns_not_found(
+    def test_apibible_out_of_range_verse_returns_not_in_fileset(
         self, mock_get
     ):
         mock_client = MagicMock()
@@ -279,7 +285,9 @@ class VerseSelectionSerializerTests(TestCase):
         )
 
         self.assertNotIn('verses', result)
-        self.assertEqual(result['error_code'], 'not_found')
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
 
 
 class ESVClientVerseRangeTests(TestCase):
@@ -401,8 +409,11 @@ class VerseSelectionViewTests(TestCase):
         response = self._get('John 3:99')
 
         self.assertEqual(response.status_code, 404)
+        # Out-of-range selectors are coverage misses — the
+        # unified ``book_not_in_fileset`` code lets clients fall
+        # back to another fileset deterministically.
         self.assertEqual(
-            response.data['error_code'], 'not_found'
+            response.data['error_code'], 'book_not_in_fileset'
         )
 
     def test_invalid_verse_selector_returns_400(self):

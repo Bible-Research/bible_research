@@ -1577,17 +1577,18 @@ class NoteImageViewSet(viewsets.GenericViewSet):
         return [IsAuthenticated(), GuestReadOnly()]
 
     def _get_note(self):
+        """Return the parent Note when the requester may see it,
+        else raise 404 — inaccessible notes are indistinguishable
+        from nonexistent ones (no existence oracle)."""
         return get_object_or_404(
-            Note, pk=self.kwargs['note_pk']
+            get_accessible_notes_qs(self.request.user),
+            pk=self.kwargs['note_pk'],
         )
 
     def list(self, request, note_pk=None):
+        # 404 when the note does not exist or is a private
+        # note owned by someone else — never leak existence.
         note = self._get_note()
-        accessible = get_accessible_notes_qs(request.user)
-        if not accessible.filter(pk=note.pk).exists():
-            raise PermissionDenied(
-                "You do not have access to this note."
-            )
         images = Image.objects.filter(note=note)
         serializer = ImageSerializer(
             images, many=True, context={'request': request}
@@ -1678,21 +1679,24 @@ class CommentImageViewSet(viewsets.GenericViewSet):
         return [IsAuthenticated(), GuestReadOnly()]
 
     def _get_comment(self):
+        """Return the parent Comment when the requester may see
+        its note, else raise 404 — comments on inaccessible
+        (private foreign) notes are indistinguishable from
+        nonexistent ones (no existence oracle)."""
         return get_object_or_404(
-            Comment,
+            Comment.objects.filter(
+                note__in=get_accessible_notes_qs(
+                    self.request.user
+                ),
+            ),
             pk=self.kwargs['comment_pk'],
             note_id=self.kwargs['note_pk'],
         )
 
     def list(self, request, note_pk=None, comment_pk=None):
+        # 404 when the note/comment does not exist or lives on a
+        # private note owned by someone else.
         comment = self._get_comment()
-        accessible = get_accessible_notes_qs(request.user)
-        if not accessible.filter(
-            pk=comment.note_id
-        ).exists():
-            raise PermissionDenied(
-                "You do not have access to this comment."
-            )
         if comment.is_deleted:
             # CommentSerializer redacts deleted comments to
             # ``images: []`` — the nested route must honor the

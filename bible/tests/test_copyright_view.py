@@ -88,7 +88,26 @@ def test_get_copyright_missing_bible_id(client):
     response = client.get(COPYRIGHT_URL)
 
     assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert 'error' in response.json()
+    body = response.json()
+    assert 'error' in body
+    assert body['error_code'] == 'missing_parameter'
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    'bible_id',
+    ['evil/../../x', 'id with space', 'a' * 65, "bad'id"],
+    ids=['path-traversal', 'spaces', 'overlong', 'quote'],
+)
+def test_get_copyright_invalid_bible_id(client, bible_id):
+    """A bible_id outside the id charset 400s before any
+    upstream URL is built (S12 / copyright #4)."""
+    response = client.get(COPYRIGHT_URL, {'bible_id': bible_id})
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert (
+        response.json()['error_code'] == 'invalid_parameter'
+    )
 
 
 @pytest.mark.django_db

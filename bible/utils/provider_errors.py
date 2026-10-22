@@ -1,7 +1,8 @@
 """Helpers for describing upstream Bible provider failures.
 
-Both the DBT OpenAPI client (``ApiException.status``) and the
+The DBT OpenAPI client (``ApiException.status``), the
 ``requests``-based clients (``HTTPError.response.status_code``)
+and the ``google.api_core`` GCS exceptions (``exc.code``) all
 carry the upstream HTTP status, so a single helper can classify
 failures from any provider.
 """
@@ -30,7 +31,18 @@ def upstream_status_code(exc: Exception) -> Optional[int]:
     if isinstance(status, int):
         return status
     response = getattr(exc, 'response', None)
-    return getattr(response, 'status_code', None)
+    status_code = getattr(response, 'status_code', None)
+    if isinstance(status_code, int):
+        return status_code
+    # google.api_core exceptions expose the HTTP status as
+    # ``.code`` — an int for HTTP failures (e.g. a GCS
+    # TooManyRequests carries 429). gRPC-sourced errors expose a
+    # StatusCode enum instead, which is intentionally not
+    # classified as an upstream HTTP status.
+    code = getattr(exc, 'code', None)
+    if isinstance(code, int):
+        return code
+    return None
 
 
 def provider_error_fields(exc: Exception) -> Dict[str, str]:
