@@ -157,7 +157,7 @@ values; uniqueness collisions are handled in `annotations/views.py`.
 - Validate input in serializer `validate_*` methods; enforce
   ownership in `perform_update`/`perform_destroy` via
   `PermissionDenied`; `perform_create` assigns the request user
-  or falls back to `guest`.
+  only — anonymous writes 401 via `IsAuthenticated`.
 - Never: modify applied migrations, raw SQL in app code (use the
   ORM — ad-hoc read-only investigation is the exception),
   circular imports (use `get_user_model()`), secrets in code

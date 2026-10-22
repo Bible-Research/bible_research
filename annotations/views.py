@@ -124,7 +124,7 @@ class TagViewSet(viewsets.ModelViewSet):
         # Reads are open: get_queryset scopes anonymous
         # requests to tags carrying at least one public note.
         # Writes always require authentication and are denied
-        # for the shared read-only 'guest' account.
+        # for the legacy read-only 'guest' account.
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
         return [IsAuthenticated(), GuestReadOnly()]
@@ -312,7 +312,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         # Reads are open: get_queryset scopes anonymous
         # requests to public notes only. Writes and the
         # other actions always require authentication
-        # (issue #47) and are denied for the shared
+        # (issue #47) and are denied for the legacy
         # read-only 'guest' account.
         if self.action in ('list', 'retrieve', 'order_index'):
             return [AllowAny()]
@@ -1323,7 +1323,7 @@ class CommentViewSet(viewsets.ModelViewSet):
         # Reads are open: visibility is enforced by
         # get_accessible_notes_qs (anon may see public notes).
         # Writes always require authentication and are denied
-        # for the shared read-only 'guest' account.
+        # for the legacy read-only 'guest' account.
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
         return [IsAuthenticated(), GuestReadOnly()]
@@ -1571,7 +1571,7 @@ class NoteImageViewSet(viewsets.GenericViewSet):
         # Reads are open: visibility is enforced by
         # get_accessible_notes_qs (anon may see public notes).
         # Writes always require authentication and are denied
-        # for the shared read-only 'guest' account.
+        # for the legacy read-only 'guest' account.
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
         return [IsAuthenticated(), GuestReadOnly()]
