@@ -200,7 +200,7 @@ class NoteIsolationTest(TestCase):
         # would otherwise hit the DBT provider; the serializer
         # degrades to empty text on any exception.
         with patch(
-            'annotations.serializers.get_default_dbt_client',
+            'bible.services.providers.get_default_dbt_client',
             side_effect=ValueError('DBT disabled in tests'),
         ):
             for ordering, keys in expected.items():

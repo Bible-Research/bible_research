@@ -163,17 +163,17 @@ class ReadingPositionApiTest(TestCase):
         self.assertIn('last_accessed', detail.json())
 
     def test_unauthenticated_write_denied(self):
-        """POST with no credentials is rejected — observed 403:
-        DRF coerces NotAuthenticated to 403 because the first
-        test-default authenticator (SessionAuthentication)
-        advertises no WWW-Authenticate header."""
+        """POST with no credentials is rejected with 401 —
+        the production-like test settings' Token/Bearer
+        authenticators advertise WWW-Authenticate, so
+        NotAuthenticated stays a 401 rather than a 403."""
         client = APIClient()
         resp = client.post(
             self.URL,
             {'book': 'John', 'chapter': 3, 'verse': 16},
             format='json',
         )
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 401)
 
     def test_case_variant_books_upsert_one_row(self):
         """'John' and 'john' canonicalize to the same stored

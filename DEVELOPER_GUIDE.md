@@ -34,11 +34,49 @@ frontend repository will consume this API.
 ## Architecture
 
 ### Technology Stack
-- **Framework**: Django 4.2.6
+- **Framework**: Django 5.2
 - **API**: Django REST Framework
 - **Database**: PostgreSQL (production) / SQLite (development)
-- **External API**: Digital Bible Platform (DBT) API v4
-- **Authentication**: Token-based (DRF TokenAuthentication)
+- **External APIs**: DBT API v4, ESV API (api.esv.org),
+  API.Bible (api.scripture.api.bible), local SWORD modules
+- **Authentication**: Token-based (DRF TokenAuthentication
+  plus a Bearer alias)
+
+### Provider routing
+
+Every request that reaches a Bible provider is dispatched by a
+single facade — `bible/services/providers.py` — instead of each
+view/serializer re-implementing the
+`is_esv → is_apibible → is_sword → else DBT` chain. Callers ask
+`provider_for(fileset_id)` for a provider object and invoke its
+uniform capability surface:
+
+- `get_chapter(book_id, chapter)` — normalized chapter payload
+  (`verses`/`headings`/`meta`) used by note enrichment;
+- `get_passage(book_id, chapter, response_format, verse_start,
+  verse_end)` — the `/api/v1/bible/` response payload
+  (`get_passage_body` in the same module wraps it with the
+  response shaping + `error`/`error_code` mapping);
+- `get_audio`, `get_timestamps`, `search`, `search_grouped`,
+  `get_copyright`, `translation_listing`.
+
+Coverage misses raise `PassageNotFoundError` (subclassed by
+`TimestampsNotGeneratedError` for the "audio exists but its
+timestamp sidecar does not" case) and surface as the stable
+`book_not_in_fileset`/`not_found` codes; every other failure is
+classified by `bible/utils/provider_errors.py` — raw exception
+text never reaches a response body. Serializers shape data
+only: `BiblePassageSerializer` is the request-validation
+boundary and delegates to `get_passage_body`, and
+`NoteSerializer` fetches each `(fileset_id, book, chapter)`
+once per page through a context-shared cache instead of one
+provider call per note.
+
+Non-DBT copyright ids resolve through the same facade: ESV and
+SWORD filesets (and abbrs like `GLU8`) answer from registry
+license metadata, API.Bible filesets fetch the live statement
+from the matching text/audio bible, and everything else
+proxies DBT.
 
 ### Project Structure
 ```
@@ -46,10 +84,17 @@ bible_research/
 ├── bible/                  # Bible data and retrieval
 │   ├── models.py          # Verse model
 │   ├── views.py           # Bible passage endpoints
-│   ├── serializers.py     # Bible data serialization
-│   ├── services/          # External API clients
-│   │   └── dbt/          # DBT API client
-│   └── utils/            # Helper functions (book mappings)
+│   ├── serializers.py     # Request-validation boundary only
+│   ├── services/          # Provider clients and facade
+│   │   ├── providers.py   # fileset_id routing facade
+│   │   ├── dbt/          # DBT API client
+│   │   ├── esv/          # ESV API client + registry
+│   │   ├── apibible/     # API.Bible client + registry
+│   │   ├── sword/        # local SWORD module client + registry
+│   │   ├── google_tts/   # generated-audio helpers
+│   │   └── storage/      # GCS artifact helpers
+│   └── utils/            # Helper functions (book mappings,
+│                         # provider error normalization)
 ├── annotations/           # User notes and tags
 │   ├── models.py         # Tag, Note, NoteVerse models
 │   ├── views.py          # CRUD endpoints for tags/notes
@@ -846,9 +891,13 @@ uses it to decide whether a shared note is editable.
 - `fileset_id` (optional): Bible translation used to enrich
   each note's `verses[].text` — same provider routing as the
   passage endpoint (`ENGESV_API` → ESV API, SWORD ids like
-  `LVSGLU8` → local module, anything else → DBT).
-  Defaults to `ENGESV` (DBT). SWORD translations return no
-  `headings`.
+  `LVSGLU8` → local module, `ENGNIV_API`/`NIV` → API.Bible,
+  anything else → DBT) via `provider_for(fileset_id)`.
+  Enrichment is batched: the whole chapter is fetched once per
+  `(fileset_id, book, chapter)` per page through a serializer
+  context cache, so a page of notes on one passage costs one
+  upstream call. Defaults to `ENGESV` (DBT). SWORD
+  translations return no `headings`.
 - `ordering` (optional): Sort order
   - `custom` (default): Custom order ascending
   - `-custom`: Custom order descending
@@ -1563,6 +1612,20 @@ tail -f logs/django.log
 ---
 
 ## Testing
+
+The pytest suite runs against the real
+`bible_research.settings` module — `conftest.py` imports it and
+overrides only the test-required deltas (SQLite in-memory
+database, dummy provider keys, generous throttle rates), so
+tests exercise the production `REST_FRAMEWORK`
+authentication/permission stack and `MIDDLEWARE` chain.
+`config.yaml` is not required: under pytest, `settings.py`
+treats a missing config file as empty instead of raising.
+
+```bash
+python -m pytest -q                # full suite
+python -m pytest annotations/ -q   # one app
+```
 
 ### Test User Setup
 

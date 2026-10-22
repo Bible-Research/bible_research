@@ -371,14 +371,18 @@ class NoteImageAPITest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.data), 1)
 
-    def test_unauthenticated_upload_returns_403(self):
+    def test_unauthenticated_upload_returns_401(self):
+        """401 under the production-like test settings —
+        token/bearer authenticators advertise
+        WWW-Authenticate, so DRF keeps NotAuthenticated
+        as a 401 rather than coercing to 403."""
         with _mock_bucket():
             resp = self.client.post(
                 self._upload_url(),
                 {"file": _make_file()},
                 format="multipart",
             )
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 401)
 
     def test_upload_without_file_returns_400(self):
         self.client.force_authenticate(user=self.owner)

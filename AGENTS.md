@@ -25,15 +25,29 @@ All API routes live under `/api/v1/` (see `bible_research/urls.py`).
 ## Provider routing (core business logic)
 
 Every passage/audio request carries a `fileset_id` that selects the
-provider. Routing happens in `bible/services/translation_service.py`:
+provider. All routing goes through the facade in
+`bible/services/providers.py` — `provider_for(fileset_id)` returns
+the provider object and callers use its uniform surface
+(`get_chapter`, `get_passage`, `get_audio`, `get_timestamps`,
+`search`, `search_grouped`, `get_copyright`,
+`translation_listing`). `get_passage_body()` in the same module is
+the `/api/v1/bible/` fetch+shape path the view calls; the
+serializer only validates input. Dispatch order:
 
 1. ESV filesets (`is_esv_fileset` in `bible/services/esv/registry.py`)
    → ESV API via `bible/services/esv/client.py`.
-2. SWORD filesets (`bible/services/sword/registry.py`) → local SWORD
-   modules via pysword (`bible/services/sword/client.py`).
-3. API.Bible filesets (`bible/services/apibible/registry.py`) →
+2. API.Bible filesets (`bible/services/apibible/registry.py`) →
    api.scripture.api.bible via `bible/services/apibible/client.py`.
+3. SWORD filesets (`bible/services/sword/registry.py`) → local SWORD
+   modules via pysword (`bible/services/sword/client.py`).
 4. Everything else → DBT API v4 via `bible/services/dbt/client.py`.
+
+Copyright routing uses the same facade: ESV/SWORD ids (and abbrs)
+answer from registry `license` metadata, API.Bible ids fetch the
+live statement (audio fileset ids read the audio bible's entry),
+other ids proxy DBT. Note enrichment batches by
+(fileset, book, chapter) through a serializer-context cache —
+one upstream call per chapter per page, not per note.
 
 Known fileset ids: `ENGKJV` (KJV), `ENGESV_API` (ESV), `LVSGLU8`
 (Latvian Glück text), `LVSGLU8C1DA` (Latvian Glück generated audio,

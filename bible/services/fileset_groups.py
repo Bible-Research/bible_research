@@ -61,8 +61,7 @@ skipped so options never advertise a dead testament map.
 """
 import re
 
-from .esv.registry import is_esv_fileset
-from .sword.registry import is_sword_fileset
+from .providers import provider_for
 
 OPUS16_SUFFIX = '-opus16'
 
@@ -233,14 +232,15 @@ def group_filesets(translation):
         if fs_type not in AUDIO_TYPES:
             continue
 
-        if is_sword_fileset(member['base_id']):
-            # SWORD audio is generated TTS served from our own
-            # storage, not a DBT codec variant.
-            member['codec'] = 'generated'
-            pending.append(('single', member, 'generated'))
-        elif is_esv_fileset(member['base_id']):
-            member['codec'] = 'api'
-            pending.append(('single', member, 'audio'))
+        provider = provider_for(member['base_id'])
+        if provider.audio_codec is not None:
+            # Non-DBT audio (SWORD generated TTS, ESV API audio)
+            # is not a DBT codec variant — the provider facade
+            # owns the codec/kind metadata.
+            member['codec'] = provider.audio_codec
+            pending.append(
+                ('single', member, provider.audio_kind)
+            )
         elif member['digit'] is not None:
             key = (fs_type, member['digit'])
             if key not in audio_groups:

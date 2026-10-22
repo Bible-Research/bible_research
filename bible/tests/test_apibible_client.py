@@ -616,7 +616,7 @@ class ApiBibleSerializerRoutingTests(TestCase):
             "response_format": response_format,
         }
 
-    @patch("bible.serializers.get_default_apibible_client")
+    @patch("bible.services.providers.get_default_apibible_client")
     def test_text_response_includes_verses_headings_fums(
         self, mock_get
     ):
@@ -650,7 +650,7 @@ class ApiBibleSerializerRoutingTests(TestCase):
             BIBLE_ID, "JHN", 3
         )
 
-    @patch("bible.serializers.get_default_apibible_client")
+    @patch("bible.services.providers.get_default_apibible_client")
     def test_audio_fileset_returns_audio_url(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_chapter_audio.return_value = {
@@ -677,7 +677,7 @@ class ApiBibleSerializerRoutingTests(TestCase):
             AUDIO_BIBLE_ID, "JHN", 3
         )
 
-    @patch("bible.serializers.get_default_apibible_client")
+    @patch("bible.services.providers.get_default_apibible_client")
     def test_provider_failure_uses_error_contract(
         self, mock_get
     ):
@@ -707,7 +707,7 @@ class ApiBibleTranslationsEndpointTests(TestCase):
         self.client.force_authenticate(user=self.user)
 
     @patch(
-        "bible.services.translation_service."
+        "bible.services.providers."
         "get_default_dbt_client"
     )
     def test_translations_endpoint_includes_niv(
@@ -791,7 +791,7 @@ class ApiBibleTimestampViewTests(TestCase):
     def setUp(self):
         self.factory = APIRequestFactory()
 
-    @patch("bible.views.get_default_apibible_client")
+    @patch("bible.services.providers.get_default_apibible_client")
     def test_string_timecode_fields_are_coerced(self, mock_get):
         """API.Bible returns verse/timestamp as strings — the
         endpoint must emit real int/float values."""
@@ -825,7 +825,7 @@ class ApiBibleTimestampViewTests(TestCase):
             AUDIO_BIBLE_ID, "JHN", 3
         )
 
-    @patch("bible.views.get_default_apibible_client")
+    @patch("bible.services.providers.get_default_apibible_client")
     def test_non_numeric_chapter_is_400(self, mock_get):
         """chapter=abc is a client error — 400, not a 502
         provider_error from a ValueError downstream."""
@@ -840,7 +840,7 @@ class ApiBibleTimestampViewTests(TestCase):
         self.assertIn("chapter", resp.data["error"])
         mock_get.assert_not_called()
 
-    @patch("bible.views.get_default_apibible_client")
+    @patch("bible.services.providers.get_default_apibible_client")
     def test_non_positive_chapter_is_400(self, mock_get):
         request = self.factory.get("/fake-url/", {
             "fileset_id": "ENGNIVC1DA",
@@ -861,7 +861,7 @@ class ApiBibleSearchViewTests(TestCase):
     def setUp(self):
         self.factory = APIRequestFactory()
 
-    @patch("bible.views.get_default_apibible_client")
+    @patch("bible.services.providers.get_default_apibible_client")
     def test_non_positive_page_is_400_no_upstream_call(
         self, mock_get
     ):
@@ -878,7 +878,7 @@ class ApiBibleSearchViewTests(TestCase):
         self.assertIn("page", resp.data["error"])
         mock_get.assert_not_called()
 
-    @patch("bible.views.get_default_apibible_client")
+    @patch("bible.services.providers.get_default_apibible_client")
     def test_non_positive_limit_is_400(self, mock_get):
         request = self.factory.get("/fake-url/", {
             "query": "love",
