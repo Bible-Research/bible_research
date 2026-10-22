@@ -158,6 +158,44 @@ class RegisterUserTest(TestCase):
         )
         self.assertIn('username', response.data)
 
+    def test_register_numeric_only_password_400(self):
+        """AUTH_PASSWORD_VALIDATORS now actually run: a purely
+        numeric password fails NumericPasswordValidator even
+        though it satisfies min_length=8."""
+        response = self._register(
+            password='12345678', password_confirm='12345678'
+        )
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('password', response.data)
+        self.assertFalse(User.objects.filter(username='newuser'))
+
+    def test_register_common_password_400(self):
+        """``password1`` is on the common-password list — it
+        passed before validate_password was wired in."""
+        response = self._register(
+            password='password1', password_confirm='password1'
+        )
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('password', response.data)
+
+    def test_register_password_similar_to_username_400(self):
+        """UserAttributeSimilarityValidator gets a real user
+        instance so a password matching the username fails."""
+        response = self._register(
+            password='newuser123', password_confirm='newuser123'
+        )
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('password', response.data)
+
     def test_register_email_optional(self):
         """Email may be omitted entirely; register returns 201."""
         response = self.client.post(
@@ -174,6 +212,18 @@ class RegisterUserTest(TestCase):
             response.status_code, status.HTTP_201_CREATED
         )
         self.assertEqual(response.data['user']['email'], '')
+
+    def test_register_json_array_body_400_not_500(self):
+        """A top-level JSON array body makes request.data a
+        list — the logger's getattr guard must defer to the
+        serializer's 400 instead of AttributeError-ing."""
+        response = self.client.post(
+            REGISTER_URL, ['not', 'a', 'dict'], format='json'
+        )
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
 
 
 class CurrentUserTest(TestCase):
