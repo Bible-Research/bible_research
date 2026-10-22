@@ -6,7 +6,7 @@ from rest_framework.permissions import BasePermission, SAFE_METHODS
 
 class GuestReadOnly(BasePermission):
     """
-    The shared 'guest' account may read but never write.
+    The legacy 'guest' account may read but never write.
 
     'guest' is a legacy account: the device auto-provisioning
     middleware that used to fall back to it has been removed, so

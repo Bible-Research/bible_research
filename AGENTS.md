@@ -182,9 +182,8 @@ Test user accounts: `testuser`, `guest` — create via
 `python scripts/create_test_user.py` if a local DB lacks them
 (pytest's in-memory DB creates what it needs per test).
 
-Known pre-existing failures on `main` (not regressions):
-`test_note_serializer`, `test_single_query_assertion` — both
-`@expectedFailure`.
+Known pre-existing failure on `main` (not a regression):
+`test_single_query_assertion` — `@expectedFailure`.
 
 Known pinned prod bugs (FIXME-marked tests). Each pins current
 buggy behavior pending a product decision — these are latent
