@@ -72,6 +72,74 @@ def test_get_timestamps_missing_params(factory):
 
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert 'error' in response.data
+    assert (
+        response.data['error_code'] == 'missing_parameter'
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    'fileset_id',
+    ['evil/../../x', 'id with space', 'a' * 41, "bad'id"],
+    ids=['path-traversal', 'spaces', 'overlong', 'quote'],
+)
+def test_get_timestamps_invalid_fileset_id(factory, fileset_id):
+    """Garbage fileset ids 400 at the view boundary — before
+    provider routing or upstream URL interpolation (S12)."""
+    request = factory.get('/fake-url/', {
+        'fileset_id': fileset_id,
+        'book': 'John',
+        'chapter': '1',
+    })
+    response = AudioTimestampView.as_view()(request)
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert (
+        response.data['error_code'] == 'invalid_parameter'
+    )
+
+
+@pytest.mark.django_db
+def test_get_timestamps_invalid_book_charset(factory):
+    """A ``book`` value outside the name charset 400s before the
+    ``get_dbt_book_id`` lookup."""
+    request = factory.get('/fake-url/', {
+        'fileset_id': 'ENGESVN2DA',
+        'book': 'John;drop table',
+        'chapter': '1',
+    })
+    response = AudioTimestampView.as_view()(request)
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert (
+        response.data['error_code'] == 'invalid_parameter'
+    )
+
+
+@pytest.mark.django_db
+def test_global_anon_throttle_applies(factory):
+    """The global ``AnonRateThrottle`` covers every view without
+    its own ``throttle_classes`` — the baseline guard for
+    anonymous traffic (S2)."""
+    from django.core.cache import cache
+    from rest_framework.throttling import AnonRateThrottle
+
+    cache.clear()
+    view = AudioTimestampView.as_view()
+    with patch.dict(
+        AnonRateThrottle.THROTTLE_RATES, {'anon': '2/min'}
+    ):
+        for _ in range(2):
+            response = view(factory.get('/fake-url/', {}))
+            assert (
+                response.status_code
+                == status.HTTP_400_BAD_REQUEST
+            )
+        response = view(factory.get('/fake-url/', {}))
+    assert (
+        response.status_code
+        == status.HTTP_429_TOO_MANY_REQUESTS
+    )
 
 
 @pytest.mark.django_db

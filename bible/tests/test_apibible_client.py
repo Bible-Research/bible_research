@@ -175,6 +175,15 @@ class ApiBibleRegistryTests(TestCase):
             "ENGNIV_API",
         )
 
+    def test_abbr_canonicalizes_like_sword_registry(self):
+        """The listing abbr resolves to the registry key, mirroring
+        how SWORD's ``GLU8`` resolves to ``LVSGLU8``."""
+        self.assertEqual(
+            canonical_apibible_fileset_id("NIV"),
+            "ENGNIV_API",
+        )
+        self.assertTrue(is_apibible_fileset("niv"))
+
     def test_get_apibible_meta(self):
         meta = get_apibible_meta("ENGNIVC1DA")
         self.assertEqual(meta["abbr"], "NIV")

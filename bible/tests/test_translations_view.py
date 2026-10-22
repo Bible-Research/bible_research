@@ -110,6 +110,26 @@ def test_language_iso_case_passed_through(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    'language_iso',
+    ['e', 'english', 'en1', 'en;x', 'e n'],
+    ids=['too-short', 'too-long', 'digit', 'semicolon', 'space'],
+)
+def test_invalid_language_iso_rejected(client, language_iso):
+    """``language_iso`` must match ``^[a-zA-Z]{2,3}$`` — anything
+    else is garbage that would be forwarded to the DBT filter,
+    so it 400s before the service is called (translations #4)."""
+    response = client.get(
+        TRANSLATIONS_URL, {'language_iso': language_iso}
+    )
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    body = response.json()
+    assert body['error']
+    assert body['error_code'] == 'invalid_parameter'
+
+
+@pytest.mark.django_db
 @patch('bible.views.TranslationService.get_live_translations')
 def test_response_field_mapping(mock_translations, client):
     """Each result item is reshaped to the public field set —

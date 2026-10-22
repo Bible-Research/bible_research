@@ -80,12 +80,20 @@ Token login: `POST /api/token/`.
 Provider failures surface as `error` + `error_code` fields built by
 `bible/utils/provider_errors.py`: `rate_limited` → HTTP 429,
 `not_found` (missing passage, upstream 404, or
-`PassageNotFoundError`) → HTTP 404, anything else →
+`PassageNotFoundError`) → HTTP 404, `book_not_in_fileset`
+(every provider's "fileset lacks this book/chapter" coverage
+miss on the passage endpoint) → HTTP 404, anything else →
 `provider_error` → HTTP 502 (see `bible/views.py`). Note
 serialization degrades the same way — verse refs kept, `text`
-empty. Keep field names stable; the React app branches on
-`error_code`. Never embed `str(exc)` in `error` — exception text
-can contain request URLs with credentials.
+empty. Client-input 400/404s in `bible/views.py` are built by
+`bible/utils/error_responses.py` (`bad_request`/`not_found`,
+codes `missing_parameter`/`invalid_parameter`), and routing ids
+(`fileset_id`, `bible_id`, `language_iso`, `book`) are
+charset-validated at the view boundary via
+`bible/utils/request_params.py`. Keep field names stable; the
+React app branches on `error_code`. Never embed `str(exc)` in
+`error` — exception text can contain request URLs with
+credentials.
 
 ## Auth quirks
 
@@ -204,25 +212,18 @@ code bugs, not test failures:
   `tag_id` literally and never resolves the `untagged`
   sentinel, returning an empty list for untagged notes
   (views.py:1019 vs :590-592).
-- `annotations/test_images.py:947`
-  (`test_note_images_list_private_foreign_403`) —
-  `NoteImageViewSet._get_note` is unscoped: GET images on a
-  foreign PRIVATE note returns 403, revealing that the note
-  exists (vs comments' deliberate 404 at views.py:1344-1353).
+- ~~`annotations/test_images.py`
+  (`test_note_images_list_private_foreign_403`)~~ — resolved:
+  `NoteImageViewSet._get_note` and `CommentImageViewSet.
+  _get_comment` now resolve parents through
+  `get_accessible_notes_qs`, so inaccessible and nonexistent
+  parents both 404 (the test asserts 404 as
+  `test_note_images_list_private_foreign_404`).
 - `annotations/test_images.py:1033`
   (`test_cascade_delete_orphans_gcs_blob`) — row-level CASCADE
   delete of a note/comment leaves orphaned GCS blobs; no
   `post_delete` receiver calls `delete_original`
   (models.py:303-318).
-- `bible/tests/test_timestamp_view.py:228`
-  (`test_gcs_not_found_returns_404`) —
-  `gcs_exceptions.NotFound` → 404 returns a bare `{"error"}`
-  body with no `error_code` (views.py:398-407), breaking the
-  error/error_code contract.
-- `bible/tests/test_timestamp_view.py:270`
-  (`test_apibible_empty_timecodes_returns_404`) — API.Bible
-  empty timecodes → 404 likewise returns bare `{"error"}`
-  without `error_code` (views.py:430-439).
 
 ## Housekeeping
 

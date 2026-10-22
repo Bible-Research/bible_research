@@ -7,10 +7,26 @@ from google.api_core import exceptions as gcs_exceptions
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
 from bible.utils.bible_books import get_dbt_book_id
-from bible.utils.provider_errors import provider_error_fields
+from bible.utils.error_responses import (
+    MISSING_PARAMETER,
+    bad_request,
+    not_found,
+)
+from bible.utils.provider_errors import (
+    PassageNotFoundError,
+    provider_error_fields,
+)
+from bible.utils.request_params import (
+    is_valid_bible_id,
+    is_valid_book_id_list,
+    is_valid_book_name,
+    is_valid_fileset_id,
+    is_valid_language_iso,
+)
 from bible.services.apibible.registry import (
     get_apibible_meta,
     is_apibible_fileset,
@@ -161,6 +177,19 @@ def _apibible_timecode(item):
     }
 
 
+class SearchRateThrottle(UserRateThrottle):
+    """Scoped throttle for ``BibleSearchView``.
+
+    Search is the most expensive anonymous endpoint — grouped
+    mode fans out to ~30 upstream provider calls per request —
+    so it gets a tighter scope than the generous global
+    ``anon`` rate. ``UserRateThrottle.get_cache_key`` already
+    covers both callers: authenticated key on their pk,
+    anonymous on the (proxy-aware) client IP.
+    """
+    scope = 'search'
+
+
 def provider_error_response(exc):
     """Build an error ``Response`` for an upstream provider failure.
 
@@ -205,7 +234,11 @@ class BiblePassageView(APIView):
         response_format = request.query_params.get(
             'response_format', 'text'
         )
-        fileset_id = request.query_params.get('fileset_id', 'ENGESV')
+        # An explicit empty ``?fileset_id=`` falls back to the
+        # default rather than validating as garbage.
+        fileset_id = (
+            request.query_params.get('fileset_id') or 'ENGESV'
+        )
 
         logger.info(
             f"BiblePassageView.get called with passage: {passage}, "
@@ -214,12 +247,10 @@ class BiblePassageView(APIView):
 
         if not passage:
             logger.warning("Request missing required 'passage' parameter")
-            return Response(
-                {
-                    "error": "Passage parameter is required. "
-                             "Example: ?passage=John+3"
-                },
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "Passage parameter is required. "
+                "Example: ?passage=John+3",
+                code=MISSING_PARAMETER,
             )
 
         if len(passage) > _MAX_PASSAGE_LENGTH:
@@ -227,23 +258,28 @@ class BiblePassageView(APIView):
                 "Passage parameter too long: %d chars",
                 len(passage),
             )
-            return Response(
-                {
-                    "error": (
-                        f"Passage parameter is too long "
-                        f"(max {_MAX_PASSAGE_LENGTH} characters)."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                f"Passage parameter is too long "
+                f"(max {_MAX_PASSAGE_LENGTH} characters)."
             )
 
         if response_format not in ['text', 'audio']:
             logger.warning(
                 f"Invalid response_format: {response_format}"
             )
-            return Response(
-                {"error": "Invalid format. Use 'text' or 'audio'"},
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "Invalid format. Use 'text' or 'audio'"
+            )
+
+        # ``fileset_id`` selects the provider and is interpolated
+        # into upstream URL paths on the DBT branch — reject
+        # anything outside the id charset before routing.
+        if not is_valid_fileset_id(fileset_id):
+            logger.warning(
+                "Invalid fileset_id charset: %r", fileset_id
+            )
+            return bad_request(
+                "fileset_id contains invalid characters."
             )
 
         try:
@@ -365,23 +401,38 @@ class BiblePassageView(APIView):
             logger.error(
                 f"Serializer validation failed: {serializer.errors}"
             )
-            return Response(
-                serializer.errors,
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "Invalid request parameters."
             )
 
-        except Exception as e:
+        except PassageNotFoundError:
+            # ``PassageNotFoundError`` subclasses ValueError, so
+            # it must be caught before the generic handler: a
+            # provider "no such passage" is a 404, and its text
+            # must never land in a ``bad_request`` body if
+            # provider calls move into this try block.
+            return not_found("Passage not found.")
+        except ValueError as e:
+            # Every ValueError reaching this handler carries one
+            # of the fixed client-input messages raised above or
+            # inside ``_parse_chapter_part`` — provider failures
+            # are classified inside the serializer or caught
+            # above — so the text holds no upstream URLs or
+            # credentials.
+            return bad_request(str(e))
+        except Exception:
             logger.exception(
-                f"Error processing Bible passage request: {passage} - {e}"
+                "Unexpected error processing passage request: %s",
+                passage,
             )
-            # Provider failures never reach this handler — they
-            # are classified inside the serializer and returned
-            # above. Only client-input errors (bad passage
-            # format, unknown book, invalid chapter) land here,
-            # so embedding str(e) in the 400 body is safe.
             return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
+                {
+                    "error": (
+                        "Unexpected error processing the passage."
+                    ),
+                    "error_code": "internal_error",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
@@ -396,13 +447,21 @@ class AudioTimestampView(APIView):
         chapter = request.query_params.get('chapter')
 
         if not all([fileset_id, book, chapter]):
-            return Response(
-                {
-                    "error":
-                    "fileset_id, book, and chapter "
-                    "are required."
-                },
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "fileset_id, book, and chapter are required.",
+                code=MISSING_PARAMETER,
+            )
+
+        # ``fileset_id`` selects the provider and ``book`` is
+        # resolved to a book id interpolated upstream — validate
+        # both charsets before routing.
+        if not is_valid_fileset_id(fileset_id):
+            return bad_request(
+                "fileset_id contains invalid characters."
+            )
+        if not is_valid_book_name(book):
+            return bad_request(
+                "book contains invalid characters."
             )
 
         # A non-numeric chapter is a client error — reject with
@@ -413,9 +472,8 @@ class AudioTimestampView(APIView):
         except (TypeError, ValueError):
             chapter_num = 0
         if chapter_num < 1:
-            return Response(
-                {"error": "chapter must be a positive integer."},
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "chapter must be a positive integer."
             )
 
         try:
@@ -423,10 +481,7 @@ class AudioTimestampView(APIView):
             # (e.g. "John" -> "JHN")
             book_id = get_dbt_book_id(book)
             if not book_id:
-                return Response(
-                    {"error": f"Unknown book: {book}"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return bad_request(f"Unknown book: {book}")
 
             if is_sword_fileset(fileset_id):
                 canon = canonical_sword_fileset_id(fileset_id)
@@ -441,15 +496,9 @@ class AudioTimestampView(APIView):
                         mode=audio_mode,
                     )
                 except gcs_exceptions.NotFound:
-                    return Response(
-                        {
-                            "error": (
-                                "Timestamps not yet generated for "
-                                "this chapter."
-                            ),
-                            "error_code": "not_found",
-                        },
-                        status=status.HTTP_404_NOT_FOUND,
+                    return not_found(
+                        "Timestamps not yet generated for "
+                        "this chapter."
                     )
                 except Exception as exc:  # noqa: BLE001
                     # Auth / network / malformed-JSON errors are not
@@ -474,15 +523,9 @@ class AudioTimestampView(APIView):
                 )
                 timecodes = audio.get("timecodes") or []
                 if not timecodes:
-                    return Response(
-                        {
-                            "error": (
-                                "Timestamps not yet generated for "
-                                "this chapter."
-                            ),
-                            "error_code": "not_found",
-                        },
-                        status=status.HTTP_404_NOT_FOUND,
+                    return not_found(
+                        "Timestamps not yet generated for "
+                        "this chapter."
                     )
                 return Response({
                     "data": [
@@ -523,9 +566,15 @@ class CopyrightView(APIView):
         bible_id = request.query_params.get('bible_id')
 
         if not bible_id:
-            return Response(
-                {"error": "bible_id is required."},
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "bible_id is required.",
+                code=MISSING_PARAMETER,
+            )
+        # ``bible_id`` is interpolated into upstream URL paths
+        # on the DBT branch — validate the charset first.
+        if not is_valid_bible_id(bible_id):
+            return bad_request(
+                "bible_id contains invalid characters."
             )
 
         try:
@@ -679,6 +728,11 @@ class BibleSearchView(APIView):
     """
 
     permission_classes = [AllowAny]
+    # Replaces the global anon throttle: grouped mode fans out to
+    # ~30 upstream calls per request, so search gets a tighter
+    # scope covering both anonymous (per-IP) and authenticated
+    # (per-user) callers.
+    throttle_classes = [SearchRateThrottle]
 
     def get(self, request, format=None):
         query = request.query_params.get('query')
@@ -689,24 +743,25 @@ class BibleSearchView(APIView):
         # turns the local scan into a whole-Bible crawl.
         query = (query or '').strip()
         if not query:
-            return Response(
-                {"error": "query parameter is required."},
-                status=status.HTTP_400_BAD_REQUEST,
+            return bad_request(
+                "query parameter is required.",
+                code=MISSING_PARAMETER,
             )
         if len(query) > _MAX_SEARCH_QUERY_LENGTH:
-            return Response(
-                {
-                    "error": (
-                        f"query must be at most "
-                        f"{_MAX_SEARCH_QUERY_LENGTH} characters."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+            return bad_request(
+                f"query must be at most "
+                f"{_MAX_SEARCH_QUERY_LENGTH} characters."
             )
         if not fileset_id:
-            return Response(
-                {"error": "fileset_id parameter is required."},
-                status=status.HTTP_400_BAD_REQUEST,
+            return bad_request(
+                "fileset_id parameter is required.",
+                code=MISSING_PARAMETER,
+            )
+        # ``fileset_id`` selects the provider and reaches
+        # upstream URL paths on the DBT/API.Bible branches.
+        if not is_valid_fileset_id(fileset_id):
+            return bad_request(
+                "fileset_id contains invalid characters."
             )
 
         # ``group_by`` is validated and dispatched before
@@ -714,13 +769,17 @@ class BibleSearchView(APIView):
         # in grouped mode, so e.g. ``page=abc`` must not 400.
         group_by = request.query_params.get('group_by')
         if group_by and group_by != 'book':
-            return Response(
-                {"error": "group_by must be 'book'."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return bad_request("group_by must be 'book'.")
 
         sort_by = request.query_params.get('sort_by')
         books = request.query_params.get('books')
+        # ``books`` is a comma-separated USFM id list forwarded
+        # to providers — reject anything else.
+        if books and not is_valid_book_id_list(books):
+            return bad_request(
+                "books must be comma-separated 3-letter "
+                "book ids (e.g. JHN,ROM)."
+            )
 
         try:
             if group_by == 'book':
@@ -733,31 +792,23 @@ class BibleSearchView(APIView):
                     request.query_params.get('limit', 15)
                 )
             except (TypeError, ValueError):
-                return Response(
-                    {"error": "limit must be an integer."},
-                    status=status.HTTP_400_BAD_REQUEST,
+                return bad_request(
+                    "limit must be an integer."
                 )
             try:
                 page = int(
                     request.query_params.get('page', 1)
                 )
             except (TypeError, ValueError):
-                return Response(
-                    {"error": "page must be an integer."},
-                    status=status.HTTP_400_BAD_REQUEST,
+                return bad_request(
+                    "page must be an integer."
                 )
             # Non-positive pagination params are client errors —
             # 400 instead of sending e.g. a negative ``offset``
             # to API.Bible.
             if limit < 1 or page < 1:
-                return Response(
-                    {
-                        "error": (
-                            "limit and page must be "
-                            "positive integers."
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
+                return bad_request(
+                    "limit and page must be positive integers."
                 )
 
             if is_esv_fileset(fileset_id):
@@ -976,6 +1027,12 @@ class TranslationListView(APIView):
             f"TranslationListView.get called with "
             f"language_iso: {language_iso or 'all'}"
         )
+        # ISO codes are 2-3 letters; anything else is garbage
+        # that would be forwarded to the DBT language filter.
+        if language_iso and not is_valid_language_iso(language_iso):
+            return bad_request(
+                "language_iso must be a 2-3 letter ISO code."
+            )
 
         try:
             translations = TranslationService.get_live_translations(
@@ -1051,18 +1108,16 @@ class LanguageListView(APIView):
                 try:
                     page = int(page)
                 except (TypeError, ValueError):
-                    return Response(
-                        {"error": "page must be an integer."},
-                        status=status.HTTP_400_BAD_REQUEST,
+                    return bad_request(
+                        "page must be an integer."
                     )
             limit = request.query_params.get('limit')
             if limit is not None:
                 try:
                     limit = int(limit)
                 except (TypeError, ValueError):
-                    return Response(
-                        {"error": "limit must be an integer."},
-                        status=status.HTTP_400_BAD_REQUEST,
+                    return bad_request(
+                        "limit must be an integer."
                     )
             # Non-positive pagination params are client errors —
             # 400 instead of sending e.g. a negative ``page`` to
@@ -1071,14 +1126,8 @@ class LanguageListView(APIView):
                 (page is not None and page < 1)
                 or (limit is not None and limit < 1)
             ):
-                return Response(
-                    {
-                        "error": (
-                            "limit and page must be "
-                            "positive integers."
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
+                return bad_request(
+                    "limit and page must be positive integers."
                 )
 
             dbt_client = get_default_dbt_client()

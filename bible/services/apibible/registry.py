@@ -28,11 +28,12 @@ APIBIBLE_TRANSLATIONS = {
 
 
 def canonical_apibible_fileset_id(fileset_id: str) -> "str | None":
-    """Return the registry key for a text or audio fileset id.
+    """Return the registry key for a text fileset id, audio
+    fileset id, or listing abbr.
 
     ``ENGNIVC1DA`` (audio) canonicalizes to ``ENGNIV_API`` the
     same way ``LVSGLU8C1DA`` canonicalizes to ``LVSGLU8`` for
-    SWORD.
+    SWORD, and the abbr ``NIV`` resolves like SWORD's ``GLU8``.
     """
     if not fileset_id:
         return None
@@ -40,6 +41,10 @@ def canonical_apibible_fileset_id(fileset_id: str) -> "str | None":
     if key in APIBIBLE_TRANSLATIONS:
         return key
     for fid, meta in APIBIBLE_TRANSLATIONS.items():
+        # Listing abbrs (e.g. NIV) resolve like the SWORD
+        # registry's abbr handling (GLU8 -> LVSGLU8).
+        if meta["abbr"].upper() == key:
+            return fid
         if meta.get("audio_fileset_id", "").upper() == key:
             return fid
     return None
