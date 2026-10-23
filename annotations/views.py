@@ -434,8 +434,18 @@ class TagViewSet(viewsets.ModelViewSet):
         # Detach cross-owner children before the CASCADE — the
         # API scopes parent_tag to the owner, so such links are
         # only creatable via admin/shell; without this guard the
-        # cascade would destroy a stranger's tag subtree.
-        Tag.objects.filter(parent_tag=instance).exclude(
+        # cascade would destroy a stranger's tag subtree. The
+        # check covers the whole same-owner subtree, not just
+        # direct children: subtree_tag_ids treats cross-owner
+        # links as a boundary, so a stranger's tag under a
+        # same-owner DESCENDANT would still be cascade-deleted
+        # without the deeper re-point.
+        subtree_ids = subtree_tag_ids(
+            instance, user=instance.user
+        )
+        Tag.objects.filter(
+            parent_tag_id__in=subtree_ids
+        ).exclude(
             user=instance.user
         ).update(parent_tag=instance.parent_tag)
         instance.delete()
@@ -1578,6 +1588,7 @@ class _BaseImageViewSet(viewsets.GenericViewSet):
     parent_model = None       # ORM class row-locked on upload
     parent_lookup = None      # Image FK name: 'note'/'comment'
     cap_setting = None        # settings attr holding the cap
+    cap_default = None        # cap fallback when settings lack it
     parent_label = 'parent'   # word used in cap error messages
 
     def get_permissions(self):
@@ -1627,7 +1638,9 @@ class _BaseImageViewSet(viewsets.GenericViewSet):
         file_obj = request.FILES.get('file')
         if not file_obj:
             raise ValidationError({'file': 'No file provided.'})
-        max_images = getattr(settings, self.cap_setting)
+        max_images = getattr(
+            settings, self.cap_setting, self.cap_default
+        )
         lookup = {self.parent_lookup: parent}
         # Cheap pre-check before the expensive GCS round-trip.
         # The authoritative check happens under a row lock below.
@@ -1644,6 +1657,11 @@ class _BaseImageViewSet(viewsets.GenericViewSet):
                 # both pass the cap check.
                 locked = self.parent_model.objects\
                     .select_for_update().get(pk=parent.pk)
+                # Re-run the pre-check on the locked row — a
+                # comment soft-deleted in the gap must not
+                # accrete an image (the tombstone contract
+                # redacts attachments).
+                self._check_upload_allowed(locked, user)
                 locked_lookup = {self.parent_lookup: locked}
                 if Image.objects.filter(
                     **locked_lookup
@@ -1686,6 +1704,7 @@ class NoteImageViewSet(_BaseImageViewSet):
     parent_model = Note
     parent_lookup = 'note'
     cap_setting = 'IMAGE_MAX_PER_NOTE'
+    cap_default = 10
     parent_label = 'note'
 
     def _get_parent(self):
@@ -1718,6 +1737,7 @@ class CommentImageViewSet(_BaseImageViewSet):
     parent_model = Comment
     parent_lookup = 'comment'
     cap_setting = 'IMAGE_MAX_PER_COMMENT'
+    cap_default = 5
     parent_label = 'comment'
 
     def _get_parent(self):
@@ -1850,7 +1870,7 @@ class ReadingPositionViewSet(viewsets.ModelViewSet):
         """Create or update the position row (upsert).
 
         The serializer's create() runs the
-        ``update_or_create``; it sets ``_row_created`` on itself
+        ``update_or_create``; it sets ``created_row`` on itself
         so ``create`` can pick 201 vs 200.
         """
         serializer.save()
@@ -1915,6 +1935,13 @@ class ReadingPositionViewSet(viewsets.ModelViewSet):
         same canonical lookup as create; unresolvable names are
         rejected with 400.
         """
+        if not isinstance(request.data, dict):
+            # A top-level JSON array/string body parses fine but
+            # carries no .get — answer 400 instead of letting
+            # AttributeError surface as a 500.
+            return _validation_error(
+                'Request body must be a JSON object.'
+            )
         books = request.data.get('books', [])
         if not isinstance(books, list):
             return _validation_error(

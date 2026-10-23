@@ -159,6 +159,16 @@ class ReadingPositionApiTest(TestCase):
         self.assertEqual(resp.json()['error'], 'validation_error')
         self.assertIn('array', resp.json()['message'])
 
+    def test_bulk_rejects_non_object_body(self):
+        """A top-level JSON array body parses into a list — the
+        view must 400 instead of AttributeError-ing on
+        ``request.data.get`` into a 500."""
+        resp = self.client.post(
+            self.BULK_URL, ['John'], format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['error'], 'validation_error')
+
     def test_bulk_rejects_over_100_books(self):
         """The books array is capped at 100 entries."""
         resp = self.client.post(
@@ -233,6 +243,30 @@ class ReadingPositionApiTest(TestCase):
                 user=self.user
             ).exists()
         )
+
+    def test_chapter_and_verse_required_on_create(self):
+        """POST must carry both coordinates — omitting either is
+        a 400, not a silent 1:1. PATCH stays partial-friendly:
+        required=True is skipped under partial=True."""
+        for body in (
+            {'book': 'John'},
+            {'book': 'John', 'chapter': 3},
+            {'book': 'John', 'verse': 16},
+        ):
+            resp = self.client.post(self.URL, body, format='json')
+            self.assertEqual(
+                resp.status_code, 400, f'body={body}'
+            )
+        position = self._position(self.user, 'John')
+        resp = self.client.patch(
+            f'{self.URL}{position.id}/',
+            {'chapter': 7},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        position.refresh_from_db()
+        self.assertEqual(position.chapter, 7)
+        self.assertEqual(position.verse, 1)
 
     def test_case_variant_books_upsert_one_row(self):
         """'John' and 'john' canonicalize to the same stored

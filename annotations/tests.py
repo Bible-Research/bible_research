@@ -3392,3 +3392,47 @@ class TagDeleteViewTest(TestCase):
         self.assertEqual(resp.json()['note_count'], 1)
         self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
         self.assertTrue(Tag.objects.filter(id=child.id).exists())
+
+    def test_delete_reparents_foreign_child_tag(self):
+        """A foreign tag parented DIRECTLY onto the deleted tag
+        (only creatable via admin/shell — the API scopes
+        parent_tag to the owner) is detached to the deleted
+        tag's parent instead of being cascade-deleted."""
+        User = get_user_model()
+        stranger = User.objects.create_user(
+            username='tagdel_stranger', password='pass',
+        )
+        foreign_child = Tag.objects.create(
+            user=stranger,
+            name='ForeignChild',
+            parent_tag=self.tag,
+        )
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 204)
+        foreign_child.refresh_from_db()
+        self.assertIsNone(foreign_child.parent_tag)
+
+    def test_delete_reparents_foreign_tag_under_descendant(self):
+        """A foreign tag attached to a same-owner DESCENDANT
+        also survives — the detach covers the whole same-owner
+        subtree, not just the deleted tag's direct children."""
+        User = get_user_model()
+        stranger = User.objects.create_user(
+            username='tagdel_stranger', password='pass',
+        )
+        child = Tag.objects.create(
+            user=self.user,
+            name='ChildTag',
+            parent_tag=self.tag,
+        )
+        foreign_grandchild = Tag.objects.create(
+            user=stranger,
+            name='ForeignGrandchild',
+            parent_tag=child,
+        )
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Tag.objects.filter(id=self.tag.id).exists())
+        self.assertFalse(Tag.objects.filter(id=child.id).exists())
+        foreign_grandchild.refresh_from_db()
+        self.assertIsNone(foreign_grandchild.parent_tag)

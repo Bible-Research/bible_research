@@ -965,10 +965,11 @@ class ReadingPositionSerializer(serializers.ModelSerializer):
 
     # Chapters/verses are 1-indexed — 0 or negative values are
     # meaningless coordinates, so reject them with 400 instead
-    # of storing them. required=False (no default) so a PATCH
-    # naming only one field does not reset the other to 1.
-    chapter = serializers.IntegerField(min_value=1, required=False)
-    verse = serializers.IntegerField(min_value=1, required=False)
+    # of storing them. Both stay required on POST/PUT (the
+    # model's default=1 would otherwise auto-optional them);
+    # PATCH is unaffected — partial=True skips required checks.
+    chapter = serializers.IntegerField(min_value=1)
+    verse = serializers.IntegerField(min_value=1)
 
     class Meta:
         model = ReadingPosition
