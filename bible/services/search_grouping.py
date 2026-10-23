@@ -332,7 +332,7 @@ def scan_sword_matches(
     needle = query.lower()
     matches = []
     truncated = False
-    for book_id, chapter in chapters:
+    for idx, (book_id, chapter) in enumerate(chapters):
         try:
             verses = client.get_chapter_verses(
                 fileset_id, book_id, chapter
@@ -368,7 +368,10 @@ def scan_sword_matches(
                     'verse_text': text,
                 })
         if max_matches is not None and len(matches) >= max_matches:
-            truncated = True
+            # Only flag truncation when chapters remain unscanned
+            # — reaching the cap on the final chapter means the
+            # whole module was scanned and the total is exact.
+            truncated = idx < len(chapters) - 1
             matches = matches[:max_matches]
             break
     return matches, truncated

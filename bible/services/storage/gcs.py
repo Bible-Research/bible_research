@@ -155,8 +155,14 @@ def upload_chapter_artifacts(
         BytesIO(mp3_bytes), content_type="audio/mpeg"
     )
 
-    # Overwriting an existing artifact (re-generation) must
-    # invalidate any cached download from read_timestamps_json.
+    # Overwriting an existing artifact (re-generation) should
+    # drop any cached download from read_timestamps_json. Note
+    # this only reaches same-process readers: the cache is
+    # process-local locmem and the sole caller is the Cloud Run
+    # generation job, a different process/host from the App
+    # Engine service — so a re-generated chapter can keep
+    # serving the stale entry until the TTL expires or the
+    # service restarts.
     cache.delete(
         _timestamps_cache_key(
             fileset_id, book_id, chapter, voice_name, mode,
@@ -169,10 +175,14 @@ def upload_chapter_artifacts(
     )
 
 
-# The ``_timestamps.json`` artifact is immutable once generated:
-# the monthly job only writes chapters that lack artifacts (see
-# ``list_completed_chapters``), and ``upload_chapter_artifacts``
-# invalidates the entry on the rare overwrite. Caching removes a
+# The ``_timestamps.json`` artifact is nominally immutable once
+# generated: the monthly job only writes chapters that lack
+# artifacts (see ``list_completed_chapters``). On the rare
+# overwrite ``upload_chapter_artifacts`` deletes the locmem
+# entry in *its own* process only — the writer runs in the
+# Cloud Run job, not the App Engine serving process, so a
+# re-generated chapter may serve stale JSON until the TTL
+# below expires (or the service restarts). Caching removes a
 # GCS download per timestamps request — and per passage-audio
 # request, which reads the same object (S7).
 TIMESTAMPS_CACHE_TTL_SECONDS = 24 * 60 * 60

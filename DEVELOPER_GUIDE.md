@@ -96,9 +96,13 @@ DRF throttling and these provider-data caches:
   with `Cache-Control: public, max-age=86400`.
 - `read_timestamps_json` (GCS `_timestamps.json` sidecars) —
   cached per `(fileset, voice, book, chapter, mode)` for 24 h;
-  the artifact is immutable (the generator only writes chapters
-  that lack one, and overwrites invalidate the entry). The
-  timestamps endpoint and the passage audio path share this
+  the artifact is nominally immutable (the generator only
+  writes chapters that lack one). On overwrite the writer
+  deletes the cache entry in its own process only — the
+  generator runs as a Cloud Run job, separate from the App
+  Engine serving process, so a re-generated chapter can serve
+  stale data until the TTL expires or the service restarts.
+  The timestamps endpoint and the passage audio path share this
   cache. Misses are never cached, so a chapter becomes
   available as soon as its artifact is generated.
 - Signed audio URLs (`gcs.signed_audio_url`) live in a bounded

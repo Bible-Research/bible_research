@@ -94,7 +94,9 @@ class TranslationService:
         rows plus the ``ENGESV_API`` registry entry, both
         ``abbr:ESV``) must produce one row — not two — so its
         filesets fold into the existing entry, deduped by fileset
-        ``id``. Entries without a counterpart append as new rows.
+        ``(id, type)`` — the same id can legitimately appear as
+        both text and audio. Entries without a counterpart
+        append as new rows.
         """
         merged = list(processed)
         by_abbr = {}
