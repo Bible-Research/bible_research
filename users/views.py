@@ -1,6 +1,12 @@
 import logging
 
+from drf_spectacular.utils import (
+    extend_schema,
+    OpenApiResponse,
+    OpenApiExample
+)
 from rest_framework import status
+from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.decorators import (
     api_view,
@@ -9,21 +15,14 @@ from rest_framework.decorators import (
 )
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.authtoken.models import Token
 from rest_framework.throttling import SimpleRateThrottle
-from django.contrib.auth import get_user_model
-from drf_spectacular.utils import (
-    extend_schema,
-    OpenApiResponse,
-    OpenApiExample
-)
+from rest_framework.views import APIView
 
 from .serializers import (
     UserRegistrationSerializer,
     UserSerializer
 )
 
-User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
@@ -174,14 +173,12 @@ def register_user(request):
     ),
     tags=['Users']
 )
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def current_user(request):
-    """
-    Get the current authenticated user's information.
-    """
-    logger.info(
-        f"Current user request for: {request.user.username}"
-    )
-    serializer = UserSerializer(request.user)
-    return Response(serializer.data)
+class CurrentUserView(APIView):
+    """Return the current authenticated user's information."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Serialize the request's user with UserSerializer."""
+        serializer = UserSerializer(request.user)
+        return Response(serializer.data)

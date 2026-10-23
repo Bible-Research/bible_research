@@ -3,10 +3,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework import status
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.test import APIClient
-
-from users.views import current_user
 
 User = get_user_model()
 
@@ -78,21 +75,13 @@ class RegisterUserTest(TestCase):
             response.status_code, status.HTTP_201_CREATED
         )
 
-        # The pytest settings define no REST_FRAMEWORK defaults,
-        # so the @api_view-wrapped view knows only Session +
-        # Basic auth; patch in TokenAuthentication so the issued
-        # token is really exercised through the request.
-        with patch.object(
-            current_user.cls,
-            'authentication_classes',
-            [TokenAuthentication],
-        ):
-            me = self.client.get(
-                ME_URL,
-                HTTP_AUTHORIZATION=(
-                    'Token ' + response.data['token']
-                ),
-            )
+        # The pytest settings mirror production, so the issued
+        # token is exercised through the real
+        # TokenAuthentication/BearerTokenAuthentication stack.
+        me = self.client.get(
+            ME_URL,
+            HTTP_AUTHORIZATION='Token ' + response.data['token'],
+        )
 
         self.assertEqual(me.status_code, status.HTTP_200_OK)
         self.assertEqual(me.data['username'], 'newuser')
