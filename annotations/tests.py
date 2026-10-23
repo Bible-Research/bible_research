@@ -521,7 +521,9 @@ class CommentViewSetTest(TestCase):
         self.assertEqual(data['images'], [])
 
     def test_patch_cannot_undelete_comment(self):
-        """PATCH cannot clear is_deleted; delete stays final."""
+        """PATCH on a deleted comment is rejected outright —
+        tombstones are immutable, so is_deleted can neither be
+        cleared nor the content quietly rewritten."""
         comment = Comment.objects.create(
             user=self.user,
             note=self.note,
@@ -533,10 +535,80 @@ class CommentViewSetTest(TestCase):
             {'is_deleted': False},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.json()['is_deleted'])
+        self.assertEqual(resp.status_code, 400)
         comment.refresh_from_db()
         self.assertTrue(comment.is_deleted)
+
+    def test_reply_to_deleted_parent_400(self):
+        """Replies to a soft-deleted comment are rejected —
+        a reply would hang off a '[deleted]' stub."""
+        root = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='',
+            is_deleted=True,
+        )
+        resp = self.client.post(
+            self.base_url,
+            {
+                'content': 'Reply to tombstone',
+                'parent_comment': root.id,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('parent_comment', resp.json())
+
+    def test_comment_content_over_10000_400(self):
+        """content is capped at 10000 chars — longer payloads
+        are rejected, not truncated."""
+        resp = self.client.post(
+            self.base_url,
+            {'content': 'x' * 10001},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('content', resp.json())
+
+    def test_note_owner_can_delete_others_comment(self):
+        """The owner of the parent note may delete a comment
+        someone else left on it (moderation, mirrors
+        ImageDestroyView's note-owner rule)."""
+        comment = Comment.objects.create(
+            user=self.other_user,
+            note=self.note,
+            content='Comment on your note',
+        )
+        # The owner deletes — the note is private so the
+        # author check alone would have 403'd.
+        resp = self.client.delete(
+            f'{self.base_url}{comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 204)
+        comment.refresh_from_db()
+        self.assertTrue(comment.is_deleted)
+
+    def test_comment_on_foreign_note_still_author_only(self):
+        """On someone else's note, a third user (not author,
+        not note owner) still cannot delete."""
+        comment = Comment.objects.create(
+            user=self.other_user,
+            note=self.note,
+            content='Comment on your note',
+        )
+        third = get_user_model().objects.create_user(
+            username='third_user',
+            email='third@example.com',
+            password='pass',
+        )
+        self.client.force_authenticate(user=third)
+        resp = self.client.delete(
+            f'{self.base_url}{comment.id}/'
+        )
+        # The note is private — a third user can't even see it.
+        self.assertEqual(resp.status_code, 404)
+        comment.refresh_from_db()
+        self.assertFalse(comment.is_deleted)
 
     def test_patch_cannot_reparent_comment(self):
         """PATCH cannot re-point parent_comment (400)."""
@@ -1112,6 +1184,23 @@ class BulkNoteCreateTest(TestCase):
             Note.objects.filter(tag=self.tag).count(), 0
         )
 
+    def test_bulk_create_over_100_notes_400(self):
+        """The notes list is capped at 100 per request — an
+        unbounded payload would write thousands of rows."""
+        payload = {
+            'tag_id': self.tag.id,
+            'notes': [
+                {'note_text': f'note {i}'} for i in range(101)
+            ],
+        }
+        resp = self.client.post(
+            self.URL, payload, format='json'
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            Note.objects.filter(tag=self.tag).count(), 0
+        )
+
 
 class NoteCreateViewTest(TestCase):
     """Tests for POST /api/v1/notes/ (single note create)."""
@@ -1161,6 +1250,21 @@ class NoteCreateViewTest(TestCase):
         self.assertEqual(note.note_text, 'A note on John 3:16')
         self.assertEqual(note.verses.count(), 1)
         self.assertEqual(note.verses.first().verse, 16)
+
+    def test_create_ignores_client_tag_position(self):
+        """tag_position is read-only on write: a client-supplied
+        value is ignored (ordering is owned by reorder/move)."""
+        payload = {
+            'note_text': 'position attempt',
+            'tag': self.tag.id,
+            'tag_position': 42.0,
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        note = Note.objects.get(user=self.user)
+        # Falls back to the model default (unix timestamp), not
+        # the supplied 42.0.
+        self.assertNotEqual(note.tag_position, 42.0)
 
     def test_failed_verse_resolution_leaves_no_orphan(self):
         """A non-existent verse reference returns 400 and leaves
@@ -2031,16 +2135,24 @@ class ReadingPositionViewSetTest(TestCase):
         self.url = '/api/v1/reading-positions/'
 
     def test_create_position_valid_book(self):
-        """POST with a valid book name upserts a position."""
+        """POST with a valid book name upserts a position —
+        201 on first create, 200 on repeat upsert."""
         resp = self.client.post(
             self.url,
             {'book': 'John', 'chapter': 3, 'verse': 16},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.json()['book'], 'John')
         self.assertEqual(resp.json()['chapter'], 3)
         self.assertEqual(resp.json()['verse'], 16)
+        resp = self.client.post(
+            self.url,
+            {'book': 'John', 'chapter': 4, 'verse': 1},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['chapter'], 4)
 
     def test_create_position_invalid_book(self):
         """POST with an unknown book name returns 400."""
@@ -3280,3 +3392,47 @@ class TagDeleteViewTest(TestCase):
         self.assertEqual(resp.json()['note_count'], 1)
         self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
         self.assertTrue(Tag.objects.filter(id=child.id).exists())
+
+    def test_delete_reparents_foreign_child_tag(self):
+        """A foreign tag parented DIRECTLY onto the deleted tag
+        (only creatable via admin/shell — the API scopes
+        parent_tag to the owner) is detached to the deleted
+        tag's parent instead of being cascade-deleted."""
+        User = get_user_model()
+        stranger = User.objects.create_user(
+            username='tagdel_stranger', password='pass',
+        )
+        foreign_child = Tag.objects.create(
+            user=stranger,
+            name='ForeignChild',
+            parent_tag=self.tag,
+        )
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 204)
+        foreign_child.refresh_from_db()
+        self.assertIsNone(foreign_child.parent_tag)
+
+    def test_delete_reparents_foreign_tag_under_descendant(self):
+        """A foreign tag attached to a same-owner DESCENDANT
+        also survives — the detach covers the whole same-owner
+        subtree, not just the deleted tag's direct children."""
+        User = get_user_model()
+        stranger = User.objects.create_user(
+            username='tagdel_stranger', password='pass',
+        )
+        child = Tag.objects.create(
+            user=self.user,
+            name='ChildTag',
+            parent_tag=self.tag,
+        )
+        foreign_grandchild = Tag.objects.create(
+            user=stranger,
+            name='ForeignGrandchild',
+            parent_tag=child,
+        )
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Tag.objects.filter(id=self.tag.id).exists())
+        self.assertFalse(Tag.objects.filter(id=child.id).exists())
+        foreign_grandchild.refresh_from_db()
+        self.assertIsNone(foreign_grandchild.parent_tag)

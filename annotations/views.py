@@ -12,10 +12,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.conf import settings
 from django.db import models, transaction, IntegrityError
+from django.db.utils import OperationalError
 from django.db.models import Count, Q, F, Min, Prefetch
 from django.shortcuts import get_object_or_404
 
 from bible.models import Verse
+from bible.utils.bible_books import (
+    get_book_name_from_id,
+    get_dbt_book_id,
+)
 from bible_research.permissions import GuestReadOnly
 
 from .models import (
@@ -30,12 +35,15 @@ from .pagination import NotesPagination
 from .serializers import (
     TagSerializer,
     NoteSerializer,
+    NoteMoveSerializer,
+    NoteReorderSerializer,
     LinkedNotesRequestSerializer,
     BulkNoteCreateSerializer,
     CommentSerializer,
     ImageSerializer,
     ReadingPositionSerializer,
     build_comment_tree,
+    subtree_tag_ids,
 )
 from .services.image_storage import upload_original, delete_original
 
@@ -67,6 +75,85 @@ def get_accessible_notes_qs(user):
     return Note.objects.filter(public=True)
 
 
+def _canonical_note_order(queryset):
+    """Order *queryset* by the canonical 'custom' ordering:
+    tag_position ASC (nulls last), then created_at DESC."""
+    return queryset.order_by(
+        F('tag_position').asc(nulls_last=True),
+        '-created_at',
+    )
+
+
+def _flatten_errors(errors):
+    """Flatten a serializer ``errors`` structure into a single
+    human-readable message string."""
+    if isinstance(errors, dict):
+        parts = []
+        for field, msgs in errors.items():
+            text = _flatten_errors(msgs)
+            if field == 'non_field_errors':
+                parts.append(text)
+            else:
+                parts.append(f'{field}: {text}')
+        return '; '.join(parts)
+    if isinstance(errors, (list, tuple)):
+        return '; '.join(
+            _flatten_errors(item) for item in errors
+        )
+    return str(errors)
+
+
+def _validation_error(message):
+    """Return a 400 in the annotations contract shape —
+    ``{'error': 'validation_error', 'message'}`` — which the
+    frontend branches on. Never embed ``str(exc)`` in it."""
+    return Response(
+        {
+            'error': 'validation_error',
+            'message': message,
+        },
+        status=drf_status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def _serializer_error(errors):
+    """Return a 400 in the annotations contract shape with a
+    serializer's ``errors`` flattened into ``message``."""
+    return _validation_error(_flatten_errors(errors))
+
+
+def _position_conflict_response():
+    """Return the 409 'position_conflict' body emitted by
+    reorder/move when unique_tag_position_per_tag trips."""
+    return Response(
+        {
+            'error': 'position_conflict',
+            'message': (
+                'Position conflict: the computed position is '
+                'already occupied by another note in this tag. '
+                'Please refresh and try again.'
+            ),
+            'constraint': 'unique_tag_position_per_tag',
+        },
+        status=drf_status.HTTP_409_CONFLICT,
+    )
+
+
+def _db_error_response():
+    """Return the generic 409 body for non-position
+    IntegrityError/OperationalError (e.g. deadlock) failures."""
+    return Response(
+        {
+            'error': 'database_error',
+            'message': (
+                'A database constraint was violated. '
+                'Please try again.'
+            ),
+        },
+        status=drf_status.HTTP_409_CONFLICT,
+    )
+
+
 def _park_notes_for_renumber(notes, tag_id, extra_floor=None):
     """
     Assign every note a temporary tag_position parked below
@@ -79,6 +166,12 @@ def _park_notes_for_renumber(notes, tag_id, extra_floor=None):
     write in phase two (e.g. reorder's minimum requested
     position); temps park below it too so client-requested
     finals can never land inside the temp range.
+
+    Temps step down one representable float at a time via
+    ``math.nextafter`` — ``base - idx - 1`` silently collapses
+    to ``base`` once |base| reaches ~2**52, making the
+    "temporary" positions non-unique and tripping the
+    constraint as a misleading 409.
     """
     lowest = Note.objects.filter(tag_id=tag_id).aggregate(
         lowest=Min('tag_position')
@@ -86,8 +179,14 @@ def _park_notes_for_renumber(notes, tag_id, extra_floor=None):
     base = min(0, lowest) if lowest is not None else 0
     if extra_floor is not None:
         base = min(base, extra_floor)
-    for idx, note in enumerate(notes):
-        note.tag_position = base - idx - 1
+    if not math.isfinite(base):
+        # A NaN/inf tag_position already in the DB (Postgres
+        # persists them) must not poison the temp range.
+        base = 0.0
+    pos = base
+    for note in notes:
+        pos = math.nextafter(pos, -math.inf)
+        note.tag_position = pos
 
 
 def _is_tag_position_conflict(exc):
@@ -146,14 +245,9 @@ class TagViewSet(viewsets.ModelViewSet):
 
         # For authenticated users, return their own tags
         if user.is_authenticated:
-            queryset = Tag.objects.filter(
+            return Tag.objects.filter(
                 user=user
             ).order_by('name')
-            logger.debug(
-                f"Returning {queryset.count()} tags "
-                f"for user {user.username}"
-            )
-            return queryset
 
         # Anonymous retrieve exposes a tag only when at least
         # one of its notes is public, so share pages can render
@@ -163,6 +257,34 @@ class TagViewSet(viewsets.ModelViewSet):
                 notes__public=True
             ).distinct()
         return Tag.objects.none()
+
+    @staticmethod
+    def _duplicate_tag_error(exc):
+        """Map a name-uniqueness IntegrityError to a 400.
+
+        The serializer validates duplicates application-side;
+        this only fires when a concurrent request wins the race
+        between the check and the INSERT (or when the
+        ``unique_top_level_tag_name_per_user`` constraint exists
+        at the DB level).
+        """
+        error_msg = str(exc).lower()
+        is_name_conflict = (
+            'unique_top_level_tag_name_per_user' in error_msg
+            or 'annotations_tag_user_id_name' in error_msg
+            or (
+                'unique constraint failed' in error_msg
+                and 'user_id' in error_msg
+                and 'name' in error_msg
+            )
+        )
+        if is_name_conflict:
+            raise ValidationError({
+                'name': (
+                    'You already have a tag with this name.'
+                )
+            })
+        raise exc
 
     def perform_create(self, serializer):
         """
@@ -175,24 +297,46 @@ class TagViewSet(viewsets.ModelViewSet):
         # IsAuthenticated (get_permissions) guarantees a real
         # user here — anonymous callers can no longer reach
         # create.
+        try:
+            serializer.save(user=user)
+        except IntegrityError as exc:
+            self._duplicate_tag_error(exc)
         logger.info(
-            f"Creating tag '{tag_name}' "
+            f"Created tag '{tag_name}' "
             f"for user {user.username}"
         )
-        serializer.save(user=user)
 
     def perform_update(self, serializer):
         """
         Ensures that a user can only update their own tags.
+        Raises PermissionDenied if a user attempts to update
+        another user's tag — the queryset scoping normally
+        404s first; this is the explicit ownership barrier in
+        case scoping ever widens.
         """
         instance = serializer.instance
         user = self.request.user
+        if not user.is_authenticated:
+            raise PermissionDenied("Authentication required.")
+        if instance.user != user:
+            logger.warning(
+                f"Permission denied: User {user.username} "
+                f"attempted to update tag ID: {instance.id} "
+                f"owned by "
+                f"{instance.user.username if instance.user else 'nobody'}"
+            )
+            raise PermissionDenied(
+                "You do not have permission "
+                "to update this tag."
+            )
+        try:
+            serializer.save()
+        except IntegrityError as exc:
+            self._duplicate_tag_error(exc)
         logger.info(
-            f"Updating tag '{instance.name}' (ID: {instance.id}) "
-            f"by user: "
-            f"{user.username if user.is_authenticated else 'Anonymous'}"
+            f"Updated tag '{instance.name}' (ID: {instance.id}) "
+            f"by user: {user.username}"
         )
-        serializer.save()
 
     @extend_schema(
         parameters=[
@@ -226,61 +370,84 @@ class TagViewSet(viewsets.ModelViewSet):
             request.query_params.get('delete_notes', '').lower()
             == 'true'
         )
-        note_count = Note.objects.filter(
-            tag_id__in=self._subtree_tag_ids(instance)
-        ).count()
-        if note_count and not delete_notes:
-            logger.warning(
-                f"Refusing to delete tag '{instance.name}' "
-                f"(ID: {instance.id}): {note_count} note(s) "
-                f"still attached"
+        with transaction.atomic():
+            # Lock the tag row: Postgres FK checks take
+            # FOR KEY SHARE on the referenced parent, so a
+            # concurrent note INSERT into this subtree waits for
+            # the count-then-delete below instead of slipping
+            # past the 409 guard.
+            instance = Tag.objects.select_for_update().get(
+                pk=instance.pk
             )
-            return Response(
-                {
-                    'error': 'tag_has_notes',
-                    'message': (
-                        f'This tag still has {note_count} '
-                        f'note(s). Delete or move the notes '
-                        f'first, or retry with '
-                        f'?delete_notes=true to delete the tag '
-                        f'together with its notes.'
-                    ),
-                    'note_count': note_count,
-                },
-                status=drf_status.HTTP_409_CONFLICT,
-            )
-        self.perform_destroy(instance)
+            note_count = Note.objects.filter(
+                tag_id__in=subtree_tag_ids(
+                    instance, user=instance.user
+                )
+            ).count()
+            if note_count and not delete_notes:
+                logger.warning(
+                    f"Refusing to delete tag '{instance.name}' "
+                    f"(ID: {instance.id}): {note_count} note(s) "
+                    f"still attached"
+                )
+                return Response(
+                    {
+                        'error': 'tag_has_notes',
+                        'message': (
+                            f'This tag still has {note_count} '
+                            f'note(s). Delete or move the notes '
+                            f'first, or retry with '
+                            f'?delete_notes=true to delete the '
+                            f'tag together with its notes.'
+                        ),
+                        'note_count': note_count,
+                    },
+                    status=drf_status.HTTP_409_CONFLICT,
+                )
+            self.perform_destroy(instance)
         return Response(status=drf_status.HTTP_204_NO_CONTENT)
-
-    @staticmethod
-    def _subtree_tag_ids(tag):
-        """
-        Return the ids of *tag* plus all of its descendant tags
-        via parent_tag chains, so the blast radius of a cascade
-        delete can be measured before it happens.
-        """
-        tag_ids = {tag.id}
-        frontier = [tag.id]
-        while frontier:
-            children = set(
-                Tag.objects.filter(
-                    parent_tag_id__in=frontier
-                ).values_list('id', flat=True)
-            )
-            frontier = list(children - tag_ids)
-            tag_ids |= children
-        return tag_ids
 
     def perform_destroy(self, instance):
         """
         Ensures that a user can only delete their own tags.
+        Raises PermissionDenied if a user attempts to delete
+        another user's tag — mirrors NoteViewSet.
         """
         user = self.request.user
+        if not user.is_authenticated:
+            raise PermissionDenied("Authentication required.")
+        if instance.user != user:
+            logger.warning(
+                f"Permission denied: User {user.username} "
+                f"attempted to delete tag ID: {instance.id} "
+                f"owned by "
+                f"{instance.user.username if instance.user else 'nobody'}"
+            )
+            raise PermissionDenied(
+                "You do not have permission "
+                "to delete this tag."
+            )
         logger.info(
             f"Deleting tag '{instance.name}' (ID: {instance.id}) "
-            f"by user: "
-            f"{user.username if user.is_authenticated else 'Anonymous'}"
+            f"by user: {user.username}"
         )
+        # Detach cross-owner children before the CASCADE — the
+        # API scopes parent_tag to the owner, so such links are
+        # only creatable via admin/shell; without this guard the
+        # cascade would destroy a stranger's tag subtree. The
+        # check covers the whole same-owner subtree, not just
+        # direct children: subtree_tag_ids treats cross-owner
+        # links as a boundary, so a stranger's tag under a
+        # same-owner DESCENDANT would still be cascade-deleted
+        # without the deeper re-point.
+        subtree_ids = subtree_tag_ids(
+            instance, user=instance.user
+        )
+        Tag.objects.filter(
+            parent_tag_id__in=subtree_ids
+        ).exclude(
+            user=instance.user
+        ).update(parent_tag=instance.parent_tag)
         instance.delete()
         logger.debug(
             f"Tag '{instance.name}' "
@@ -334,14 +501,14 @@ class NoteViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.is_authenticated:
             note_text = serializer.validated_data.get(
-                'text',
+                'note_text',
                 'N/A'
             )[:50]
+            serializer.save(user=user)
             logger.info(
-                f"Creating note for user {user.username}: "
+                f"Created note for user {user.username}: "
                 f"{note_text}..."
             )
-            serializer.save(user=user)
         else:
             logger.warning(
                 "Unauthenticated user attempted "
@@ -378,11 +545,11 @@ class NoteViewSet(viewsets.ModelViewSet):
                 "You do not have permission "
                 "to update this note."
             )
+        serializer.save()
         logger.debug(
             f"Note ID: {instance.id} "
             f"successfully updated"
         )
-        serializer.save()
 
     def perform_destroy(self, instance):
         """
@@ -410,11 +577,11 @@ class NoteViewSet(viewsets.ModelViewSet):
                 "You do not have permission "
                 "to delete this note."
             )
+        instance.delete()
         logger.debug(
             f"Note ID: {instance.id} "
             f"successfully deleted"
         )
-        instance.delete()
 
     def _apply_ordering(self, queryset, ordering_param):
         """
@@ -461,10 +628,7 @@ class NoteViewSet(viewsets.ModelViewSet):
                 )
 
         elif ordering_param == 'custom':
-            return queryset.order_by(
-                F('tag_position').asc(nulls_last=True),
-                '-created_at'
-            )
+            return _canonical_note_order(queryset)
 
         elif ordering_param == '-custom':
             return queryset.order_by(
@@ -480,10 +644,7 @@ class NoteViewSet(viewsets.ModelViewSet):
 
         else:
             # Default to custom ordering
-            return queryset.order_by(
-                F('tag_position').asc(nulls_last=True),
-                '-created_at'
-            )
+            return _canonical_note_order(queryset)
 
     def get_queryset(self):
         """
@@ -738,142 +899,17 @@ class NoteViewSet(viewsets.ModelViewSet):
         The database enforces unique positions per tag via
         the 'unique_tag_position_per_tag' constraint.
         """
-        # Non-dict JSON bodies (array/scalar) get no fields
-        # and fall through to the usual 400s.
-        data = (
-            request.data if isinstance(request.data, dict) else {}
-        )
-        tag_id = data.get('tag_id')
-        updates = data.get('updates', [])
-
-        if not tag_id:
-            return Response(
-                {
-                    'error': 'validation_error',
-                    'message': 'tag_id is required.',
-                },
-                status=drf_status.HTTP_400_BAD_REQUEST,
-            )
-
-        if not isinstance(updates, list) or not updates:
-            return Response(
-                {
-                    'error': 'validation_error',
-                    'message': 'updates array is required.',
-                },
-                status=drf_status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Enforce maximum of 100 notes per reorder request
-        if len(updates) > 100:
-            return Response(
-                {
-                    'error': 'validation_error',
-                    'message': (
-                        f'Cannot reorder more than 100 notes '
-                        f'at once. Received {len(updates)} notes.'
-                    ),
-                },
-                status=drf_status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Validate update structure
-        note_ids = []
-        position_map = {}
-
-        for idx, update in enumerate(updates):
-            if not isinstance(update, dict):
-                return Response(
-                    {
-                        'error': 'validation_error',
-                        'message': (
-                            f'Update at index {idx} must be an '
-                            f'object with note_id and position.'
-                        ),
-                    },
-                    status=drf_status.HTTP_400_BAD_REQUEST,
-                )
-
-            note_id = update.get('note_id')
-            position = update.get('position')
-
-            if not isinstance(note_id, str) or not note_id:
-                return Response(
-                    {
-                        'error': 'validation_error',
-                        'message': (
-                            f'Update at index {idx} needs a '
-                            f'non-empty string note_id.'
-                        ),
-                    },
-                    status=drf_status.HTTP_400_BAD_REQUEST,
-                )
-
-            if position is None:
-                return Response(
-                    {
-                        'error': 'validation_error',
-                        'message': (
-                            f'Update at index {idx} is missing '
-                            f'position.'
-                        ),
-                    },
-                    status=drf_status.HTTP_400_BAD_REQUEST,
-                )
-
-            # Check for duplicate note_ids in request
-            if note_id in position_map:
-                return Response(
-                    {
-                        'error': 'validation_error',
-                        'message': (
-                            f'Duplicate note_id in request: '
-                            f'{note_id}'
-                        ),
-                    },
-                    status=drf_status.HTTP_400_BAD_REQUEST,
-                )
-
-            try:
-                position_map[note_id] = float(position)
-            except (TypeError, ValueError, OverflowError):
-                return Response(
-                    {
-                        'error': 'validation_error',
-                        'message': (
-                            f'Update at index {idx} has a '
-                            f'non-numeric position.'
-                        ),
-                    },
-                    status=drf_status.HTTP_400_BAD_REQUEST,
-                )
-            # 'nan'/'inf' strings and JSON NaN/Infinity literals
-            # survive float(); Postgres happily persists NaN and
-            # SQLite turns it into a misleading IntegrityError.
-            if not math.isfinite(position_map[note_id]):
-                return Response(
-                    {
-                        'error': 'validation_error',
-                        'message': (
-                            f'Update at index {idx} has a '
-                            f'non-finite position.'
-                        ),
-                    },
-                    status=drf_status.HTTP_400_BAD_REQUEST,
-                )
-
-            note_ids.append(note_id)
-
-        # Check for duplicate positions in request
+        serializer = NoteReorderSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _serializer_error(serializer.errors)
+        tag_id = serializer.validated_data['tag_id']
+        updates = serializer.validated_data['updates']
+        position_map = {
+            update['note_id']: update['position']
+            for update in updates
+        }
+        note_ids = list(position_map)
         positions = list(position_map.values())
-        if len(positions) != len(set(positions)):
-            return Response(
-                {
-                    'error': 'validation_error',
-                    'message': 'Duplicate positions in request.',
-                },
-                status=drf_status.HTTP_400_BAD_REQUEST,
-            )
 
         user = request.user
         # Defense-in-depth (mirrors move/): filtering on an
@@ -895,16 +931,10 @@ class NoteViewSet(viewsets.ModelViewSet):
                 if len(notes) != len(note_ids):
                     found = {n.id for n in notes}
                     missing = set(note_ids) - found
-                    return Response(
-                        {
-                            'error': 'validation_error',
-                            'message': (
-                                f'Notes not found or do not '
-                                f'belong to tag {tag_id}: '
-                                f'{missing}'
-                            ),
-                        },
-                        status=drf_status.HTTP_400_BAD_REQUEST,
+                    return _validation_error(
+                        f'Notes not found or do not '
+                        f'belong to tag {tag_id}: '
+                        f'{missing}'
                     )
 
                 # Two-phase update to avoid constraint violations
@@ -933,34 +963,15 @@ class NoteViewSet(viewsets.ModelViewSet):
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
             if _is_tag_position_conflict(e):
-                return Response(
-                    {
-                        'error': 'position_conflict',
-                        'message': (
-                            'Position conflict: one or more '
-                            'positions are already occupied by '
-                            'other notes in this tag. Please '
-                            'refresh and try again.'
-                        ),
-                        'constraint': 'unique_tag_position_per_tag',
-                    },
-                    status=drf_status.HTTP_409_CONFLICT,
-                )
-            else:
-                # Generic integrity error
-                logger.error(
-                    f'Unexpected IntegrityError in reorder: {e}'
-                )
-                return Response(
-                    {
-                        'error': 'database_error',
-                        'message': (
-                            'A database constraint was violated. '
-                            'Please try again.'
-                        ),
-                    },
-                    status=drf_status.HTTP_409_CONFLICT,
-                )
+                return _position_conflict_response()
+            logger.error(
+                f'Unexpected IntegrityError in reorder: {e}'
+            )
+            return _db_error_response()
+        except OperationalError:
+            # e.g. a deadlock aborting the transaction — retryable.
+            logger.error('OperationalError (deadlock?) in reorder')
+            return _db_error_response()
 
     @extend_schema(
         parameters=[
@@ -999,24 +1010,27 @@ class NoteViewSet(viewsets.ModelViewSet):
         """
         tag_id = request.query_params.get('tag_id')
         if not tag_id:
-            return Response(
-                {
-                    'error': 'validation_error',
-                    'message': 'tag_id query parameter is required.',
-                },
-                status=drf_status.HTTP_400_BAD_REQUEST,
+            return _validation_error(
+                'tag_id query parameter is required.'
             )
 
+        notes_qs = get_accessible_notes_qs(request.user)
+        if tag_id == UNTAGGED_TAG_ID:
+            # Same sentinel semantics as GET /notes/ and
+            # /comments/counts/: 'untagged' resolves to notes
+            # with no tag — filtering the literal string would
+            # always return [].
+            notes_qs = notes_qs.filter(tag__isnull=True)
+        else:
+            notes_qs = notes_qs.filter(tag_id=tag_id)
+
         notes = (
-            get_accessible_notes_qs(request.user)
-            .filter(tag_id=tag_id)
-            # Avoid loading heavy note_text rows at scale; the
-            # verse prefetch runs as a separate query and is
-            # unaffected by .only().
-            .only('id', 'tag_position', 'created_at')
-            .order_by(
-                F('tag_position').asc(nulls_last=True),
-                '-created_at',
+            _canonical_note_order(
+                notes_qs
+                # Avoid loading heavy note_text rows at scale; the
+                # verse prefetch runs as a separate query and is
+                # unaffected by .only().
+                .only('id', 'tag_position', 'created_at')
             )
             .prefetch_related(
                 Prefetch(
@@ -1073,45 +1087,22 @@ class NoteViewSet(viewsets.ModelViewSet):
 
         Returns 200 {"note_id", "tag_position", "rebalanced"}.
         """
-        def _err(message):
-            return Response(
-                {
-                    'error': 'validation_error',
-                    'message': message,
-                },
-                status=drf_status.HTTP_400_BAD_REQUEST,
-            )
+        serializer = NoteMoveSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _serializer_error(serializer.errors)
+        data = serializer.validated_data
+        tag_id = data['tag_id']
+        note_id = data['note_id']
+        target_note_id = data['target_note_id']
+        placement = data['placement']
 
-        # Non-dict JSON bodies (array/scalar) get no fields
-        # and fall through to the usual 400s.
-        data = (
-            request.data if isinstance(request.data, dict) else {}
-        )
-        tag_id = data.get('tag_id')
-        note_id = data.get('note_id')
-        target_note_id = data.get('target_note_id')
-        placement = data.get('placement')
-
-        if not tag_id:
-            return _err('tag_id is required.')
-        if not note_id:
-            return _err('note_id is required.')
-        if not target_note_id:
-            return _err('target_note_id is required.')
-        # Unhashable/non-string ids would raise TypeError on the
-        # by_id lookup below instead of failing validation.
-        if not isinstance(note_id, str):
-            return _err('note_id must be a string.')
-        if not isinstance(target_note_id, str):
-            return _err('target_note_id must be a string.')
-        if placement not in ('after', 'before'):
-            return _err("placement must be 'after' or 'before'.")
-        if note_id == target_note_id:
-            return _err('note_id and target_note_id must differ.')
         if not request.user.is_authenticated:
             raise PermissionDenied('Authentication required.')
 
         user = request.user
+
+        def _err(message):
+            return _validation_error(message)
 
         try:
             with transaction.atomic():
@@ -1123,11 +1114,9 @@ class NoteViewSet(viewsets.ModelViewSet):
                 # own — a foreign public note anchor 400s, and
                 # foreign positions in a shared tag can 409.
                 notes = list(
-                    Note.objects.select_for_update()
-                    .filter(user=user, tag_id=tag_id)
-                    .order_by(
-                        F('tag_position').asc(nulls_last=True),
-                        '-created_at',
+                    _canonical_note_order(
+                        Note.objects.select_for_update()
+                        .filter(user=user, tag_id=tag_id)
                     )
                 )
                 by_id = {n.id: n for n in notes}
@@ -1248,33 +1237,15 @@ class NoteViewSet(viewsets.ModelViewSet):
             # Database rejected due to unique constraint
             # violation (unique_tag_position_per_tag)
             if _is_tag_position_conflict(e):
-                return Response(
-                    {
-                        'error': 'position_conflict',
-                        'message': (
-                            'Position conflict: the computed '
-                            'position is already occupied by '
-                            'another note in this tag. Please '
-                            'refresh and try again.'
-                        ),
-                        'constraint': 'unique_tag_position_per_tag',
-                    },
-                    status=drf_status.HTTP_409_CONFLICT,
-                )
-            else:
-                logger.error(
-                    f'Unexpected IntegrityError in move: {e}'
-                )
-                return Response(
-                    {
-                        'error': 'database_error',
-                        'message': (
-                            'A database constraint was violated. '
-                            'Please try again.'
-                        ),
-                    },
-                    status=drf_status.HTTP_409_CONFLICT,
-                )
+                return _position_conflict_response()
+            logger.error(
+                f'Unexpected IntegrityError in move: {e}'
+            )
+            return _db_error_response()
+        except OperationalError:
+            # e.g. a deadlock aborting the transaction — retryable.
+            logger.error('OperationalError (deadlock?) in move')
+            return _db_error_response()
 
 
 class CommentViewSet(viewsets.ModelViewSet):
@@ -1334,6 +1305,15 @@ class CommentViewSet(viewsets.ModelViewSet):
             return [AllowAny()]
         return [IsAuthenticated(), GuestReadOnly()]
 
+    def get_serializer_context(self):
+        """Expose the URL's note_pk so CommentSerializer can
+        scope parent_comment lookups to this note."""
+        context = super().get_serializer_context()
+        note_pk = self.kwargs.get('note_pk')
+        if note_pk is not None:
+            context['note_pk'] = note_pk
+        return context
+
     def _get_note(self):
         """
         Return the parent Note when the requester may see it,
@@ -1354,14 +1334,20 @@ class CommentViewSet(viewsets.ModelViewSet):
         detail routes 404 on other users' private notes.
         """
         note_pk = self.kwargs['note_pk']
-        return (
-            Comment.objects
-            .filter(
-                note_id=note_pk,
+        queryset = Comment.objects.filter(note_id=note_pk)
+        if self.action != 'list':
+            # list() resolves the note through _get_note() — the
+            # authoritative existence + accessibility check —
+            # before calling this, so embedding the
+            # accessible-notes subquery here too would only
+            # duplicate that work. Detail routes still need it.
+            queryset = queryset.filter(
                 note__in=get_accessible_notes_qs(
                     self.request.user
                 ),
             )
+        return (
+            queryset
             .select_related('user')
             .prefetch_related('images')
             .order_by('timestamp')
@@ -1381,6 +1367,13 @@ class CommentViewSet(viewsets.ModelViewSet):
         )
         return Response(tree)
 
+    def create(self, request, *args, **kwargs):
+        """404 inaccessible notes before serializer validation —
+        otherwise a 400-vs-404 split on parent_comment would
+        leak which comment ids exist on a private note."""
+        self._get_note()
+        return super().create(request, *args, **kwargs)
+
     def perform_create(self, serializer):
         """Inject request user and parent note on create."""
         note = self._get_note()
@@ -1392,7 +1385,12 @@ class CommentViewSet(viewsets.ModelViewSet):
         serializer.save(user=user, note=note)
 
     def perform_update(self, serializer):
-        """Allow only the comment author to update."""
+        """Allow only the comment author to update.
+
+        Deleted comments are tombstones — PATCH on one is
+        rejected outright so a stub can never be quietly
+        rewritten after removal.
+        """
         instance = serializer.instance
         user = self.request.user
         if instance.user != user:
@@ -1400,30 +1398,42 @@ class CommentViewSet(viewsets.ModelViewSet):
                 "You do not have permission "
                 "to edit this comment."
             )
+        if instance.is_deleted:
+            raise ValidationError(
+                "This comment has been deleted and "
+                "cannot be edited."
+            )
+        serializer.save()
         logger.info(
-            f"User {user.username} updating "
+            f"User {user.username} updated "
             f"comment {instance.id}"
         )
-        serializer.save()
 
     def perform_destroy(self, instance):
         """
         Soft-delete: mark as deleted and redact content.
         The row is retained so child replies remain intact.
+
+        The comment author OR the owner of the parent note may
+        delete — the note owner moderates discussion on their
+        own note (mirrors ImageDestroyView's note-owner rule).
         """
         user = self.request.user
-        if instance.user != user:
+        if (
+            instance.user != user
+            and instance.note.user != user
+        ):
             raise PermissionDenied(
                 "You do not have permission "
                 "to delete this comment."
             )
-        logger.info(
-            f"User {user.username} soft-deleting "
-            f"comment {instance.id}"
-        )
         instance.is_deleted = True
         instance.content = ''
         instance.save(update_fields=['is_deleted', 'content'])
+        logger.info(
+            f"User {user.username} soft-deleted "
+            f"comment {instance.id}"
+        )
 
 
 @extend_schema(
@@ -1558,7 +1568,128 @@ class CommentCountView(APIView):
         return Response({'counts': counts})
 
 
-class NoteImageViewSet(viewsets.GenericViewSet):
+class _BaseImageViewSet(viewsets.GenericViewSet):
+    """Shared machinery for image attachments on notes/comments.
+
+    Both parents expose the same route shape —
+    ``GET/POST …/images/`` — with the same upload flow:
+    parent resolution (404 for inaccessible/nonexistent),
+    an uploader-identity check, a per-parent image cap enforced
+    cheaply and again under a row lock, GCS upload, then a
+    rollback-deleting row insert. Subclasses supply only the
+    parent-specific bits via the class attributes and
+    ``_get_parent``/``_check_upload_allowed``.
+    """
+
+    serializer_class = ImageSerializer
+    parser_classes = [MultiPartParser]
+
+    # Subclass hooks:
+    parent_model = None       # ORM class row-locked on upload
+    parent_lookup = None      # Image FK name: 'note'/'comment'
+    cap_setting = None        # settings attr holding the cap
+    cap_default = None        # cap fallback when settings lack it
+    parent_label = 'parent'   # word used in cap error messages
+
+    def get_permissions(self):
+        # Reads are open: visibility is enforced by
+        # get_accessible_notes_qs (anon may see public notes).
+        # Writes always require authentication and are denied
+        # for the legacy read-only 'guest' account.
+        if self.action in ('list', 'retrieve'):
+            return [AllowAny()]
+        return [IsAuthenticated(), GuestReadOnly()]
+
+    def _get_parent(self):
+        """Return the parent object, or raise 404 when the
+        requester may not see it (no existence oracle)."""
+        raise NotImplementedError
+
+    def _check_upload_allowed(self, parent, user):
+        """Raise PermissionDenied/ValidationError when *user*
+        may not attach an image to *parent*."""
+        raise NotImplementedError
+
+    def _cap_error(self, max_images):
+        return ValidationError({
+            'file': (
+                f'Maximum {max_images} images '
+                f'per {self.parent_label}.'
+            )
+        })
+
+    def _images_response(self, request, parent):
+        images = Image.objects.filter(
+            **{self.parent_lookup: parent}
+        )
+        serializer = ImageSerializer(
+            images, many=True, context={'request': request}
+        )
+        return Response(serializer.data)
+
+    def list(self, request, **kwargs):
+        parent = self._get_parent()
+        return self._images_response(request, parent)
+
+    def create(self, request, **kwargs):
+        parent = self._get_parent()
+        user = request.user
+        self._check_upload_allowed(parent, user)
+        file_obj = request.FILES.get('file')
+        if not file_obj:
+            raise ValidationError({'file': 'No file provided.'})
+        max_images = getattr(
+            settings, self.cap_setting, self.cap_default
+        )
+        lookup = {self.parent_lookup: parent}
+        # Cheap pre-check before the expensive GCS round-trip.
+        # The authoritative check happens under a row lock below.
+        if Image.objects.filter(**lookup).count() >= max_images:
+            raise self._cap_error(max_images)
+
+        image_id = generate_image_id()
+        gs_uri, size_bytes, content_type = upload_original(
+            image_id, file_obj
+        )
+        try:
+            with transaction.atomic():
+                # Lock the parent row so concurrent uploads cannot
+                # both pass the cap check.
+                locked = self.parent_model.objects\
+                    .select_for_update().get(pk=parent.pk)
+                # Re-run the pre-check on the locked row — a
+                # comment soft-deleted in the gap must not
+                # accrete an image (the tombstone contract
+                # redacts attachments).
+                self._check_upload_allowed(locked, user)
+                locked_lookup = {self.parent_lookup: locked}
+                if Image.objects.filter(
+                    **locked_lookup
+                ).count() >= max_images:
+                    raise self._cap_error(max_images)
+                image = Image.objects.create(
+                    id=image_id,
+                    uploaded_by=user,
+                    storage_url=gs_uri,
+                    size_bytes=size_bytes,
+                    content_type=content_type,
+                    **locked_lookup,
+                )
+        except Exception:
+            delete_original(image_id, gs_uri)
+            raise
+        logger.info(
+            "User %s uploaded image %s to %s %s",
+            user.username, image.id,
+            self.parent_label, parent.id,
+        )
+        serializer = ImageSerializer(
+            image, context={'request': request}
+        )
+        return Response(serializer.data, status=201)
+
+
+class NoteImageViewSet(_BaseImageViewSet):
     """
     Image attachments scoped to a Note.
 
@@ -1570,19 +1701,13 @@ class NoteImageViewSet(viewsets.GenericViewSet):
     Read: same accessibility scope as get_accessible_notes_qs.
     """
 
-    serializer_class = ImageSerializer
-    parser_classes = [MultiPartParser]
+    parent_model = Note
+    parent_lookup = 'note'
+    cap_setting = 'IMAGE_MAX_PER_NOTE'
+    cap_default = 10
+    parent_label = 'note'
 
-    def get_permissions(self):
-        # Reads are open: visibility is enforced by
-        # get_accessible_notes_qs (anon may see public notes).
-        # Writes always require authentication and are denied
-        # for the legacy read-only 'guest' account.
-        if self.action in ('list', 'retrieve'):
-            return [AllowAny()]
-        return [IsAuthenticated(), GuestReadOnly()]
-
-    def _get_note(self):
+    def _get_parent(self):
         """Return the parent Note when the requester may see it,
         else raise 404 — inaccessible notes are indistinguishable
         from nonexistent ones (no existence oracle)."""
@@ -1591,81 +1716,14 @@ class NoteImageViewSet(viewsets.GenericViewSet):
             pk=self.kwargs['note_pk'],
         )
 
-    def list(self, request, note_pk=None):
-        # 404 when the note does not exist or is a private
-        # note owned by someone else — never leak existence.
-        note = self._get_note()
-        images = Image.objects.filter(note=note)
-        serializer = ImageSerializer(
-            images, many=True, context={'request': request}
-        )
-        return Response(serializer.data)
-
-    def create(self, request, note_pk=None):
-        note = self._get_note()
-        user = request.user
+    def _check_upload_allowed(self, note, user):
         if not user.is_authenticated or note.user != user:
             raise PermissionDenied(
                 "Only the note's owner may upload images."
             )
-        file_obj = request.FILES.get('file')
-        if not file_obj:
-            raise ValidationError({'file': 'No file provided.'})
-        max_images = getattr(
-            settings, 'IMAGE_MAX_PER_NOTE', 10
-        )
-        # Cheap pre-check before the expensive GCS round-trip.
-        # The authoritative check happens under a row lock below.
-        if Image.objects.filter(
-            note=note
-        ).count() >= max_images:
-            raise ValidationError(
-                {'file': (
-                    f'Maximum {max_images} images per note.'
-                )}
-            )
-
-        image_id = generate_image_id()
-        gs_uri, size_bytes, content_type = upload_original(
-            image_id, file_obj
-        )
-        try:
-            with transaction.atomic():
-                # Lock the parent row so concurrent uploads cannot
-                # both pass the cap check.
-                locked_note = Note.objects.select_for_update().get(
-                    pk=note.pk
-                )
-                if Image.objects.filter(
-                    note=locked_note
-                ).count() >= max_images:
-                    raise ValidationError(
-                        {'file': (
-                            f'Maximum {max_images} images per note.'
-                        )}
-                    )
-                image = Image.objects.create(
-                    id=image_id,
-                    note=locked_note,
-                    uploaded_by=user,
-                    storage_url=gs_uri,
-                    size_bytes=size_bytes,
-                    content_type=content_type,
-                )
-        except Exception:
-            delete_original(image_id, gs_uri)
-            raise
-        logger.info(
-            "User %s uploaded image %s to note %s",
-            user.username, image.id, note.id,
-        )
-        serializer = ImageSerializer(
-            image, context={'request': request}
-        )
-        return Response(serializer.data, status=201)
 
 
-class CommentImageViewSet(viewsets.GenericViewSet):
+class CommentImageViewSet(_BaseImageViewSet):
     """
     Image attachments scoped to a Comment.
 
@@ -1676,15 +1734,13 @@ class CommentImageViewSet(viewsets.GenericViewSet):
     Requester must be the comment's author.
     """
 
-    serializer_class = ImageSerializer
-    parser_classes = [MultiPartParser]
+    parent_model = Comment
+    parent_lookup = 'comment'
+    cap_setting = 'IMAGE_MAX_PER_COMMENT'
+    cap_default = 5
+    parent_label = 'comment'
 
-    def get_permissions(self):
-        if self.action in ('list', 'retrieve'):
-            return [AllowAny()]
-        return [IsAuthenticated(), GuestReadOnly()]
-
-    def _get_comment(self):
+    def _get_parent(self):
         """Return the parent Comment when the requester may see
         its note, else raise 404 — comments on inaccessible
         (private foreign) notes are indistinguishable from
@@ -1699,85 +1755,33 @@ class CommentImageViewSet(viewsets.GenericViewSet):
             note_id=self.kwargs['note_pk'],
         )
 
+    def _check_upload_allowed(self, comment, user):
+        if not user.is_authenticated or comment.user != user:
+            raise PermissionDenied(
+                "Only the comment's author may upload images."
+            )
+        if comment.is_deleted:
+            # A tombstone must not accrete attachments — the
+            # serializer redacts them anyway, so serving a new
+            # upload would violate the redaction contract.
+            raise ValidationError(
+                {'file': (
+                    'Cannot attach images to a '
+                    'deleted comment.'
+                )}
+            )
+
     def list(self, request, note_pk=None, comment_pk=None):
         # 404 when the note/comment does not exist or lives on a
         # private note owned by someone else.
-        comment = self._get_comment()
+        comment = self._get_parent()
         if comment.is_deleted:
             # CommentSerializer redacts deleted comments to
             # ``images: []`` — the nested route must honor the
             # same tombstone contract instead of serving the
             # signed URLs the redaction was meant to hide.
             return Response([])
-        images = Image.objects.filter(comment=comment)
-        serializer = ImageSerializer(
-            images, many=True, context={'request': request}
-        )
-        return Response(serializer.data)
-
-    def create(
-        self, request, note_pk=None, comment_pk=None
-    ):
-        comment = self._get_comment()
-        user = request.user
-        if not user.is_authenticated or comment.user != user:
-            raise PermissionDenied(
-                "Only the comment's author may upload images."
-            )
-        file_obj = request.FILES.get('file')
-        if not file_obj:
-            raise ValidationError({'file': 'No file provided.'})
-        max_images = getattr(
-            settings, 'IMAGE_MAX_PER_COMMENT', 5
-        )
-        if Image.objects.filter(
-            comment=comment
-        ).count() >= max_images:
-            raise ValidationError(
-                {'file': (
-                    f'Maximum {max_images} images per comment.'
-                )}
-            )
-
-        image_id = generate_image_id()
-        gs_uri, size_bytes, content_type = upload_original(
-            image_id, file_obj
-        )
-        try:
-            with transaction.atomic():
-                locked_comment = (
-                    Comment.objects.select_for_update().get(
-                        pk=comment.pk
-                    )
-                )
-                if Image.objects.filter(
-                    comment=locked_comment
-                ).count() >= max_images:
-                    raise ValidationError(
-                        {'file': (
-                            f'Maximum {max_images} images '
-                            f'per comment.'
-                        )}
-                    )
-                image = Image.objects.create(
-                    id=image_id,
-                    comment=locked_comment,
-                    uploaded_by=user,
-                    storage_url=gs_uri,
-                    size_bytes=size_bytes,
-                    content_type=content_type,
-                )
-        except Exception:
-            delete_original(image_id, gs_uri)
-            raise
-        logger.info(
-            "User %s uploaded image %s to comment %s",
-            user.username, image.id, comment.id,
-        )
-        serializer = ImageSerializer(
-            image, context={'request': request}
-        )
-        return Response(serializer.data, status=201)
+        return self._images_response(request, comment)
 
 
 class ImageDestroyView(APIView):
@@ -1788,41 +1792,35 @@ class ImageDestroyView(APIView):
     parent note may delete. For comment-attached images the
     parent note is reached through image.comment.note.
     Hard-delete: DB row removed and GCS object deleted
-    (best-effort).
+    (best-effort — the post_delete receiver on Image calls
+    delete_original for every removal path).
+
+    Images the requester may not delete return 404 —
+    indistinguishable from nonexistent — so the endpoint leaks
+    no existence oracle.
     """
 
     permission_classes = [IsAuthenticated, GuestReadOnly]
 
     def delete(self, request, image_pk):
-        image = get_object_or_404(Image, pk=image_pk)
         user = request.user
-
-        # Comment-attached images have note=NULL (XOR FK), so
-        # resolve the parent note through the comment.
-        parent_note = image.note
-        if parent_note is None and image.comment is not None:
-            parent_note = image.comment.note
-
-        is_uploader = image.uploaded_by == user
-        is_note_owner = (
-            parent_note is not None
-            and parent_note.user == user
-        )
-        is_comment_author = (
-            image.comment is not None
-            and image.comment.user == user
+        # One query resolves the row AND the delete permission:
+        # comment-attached images have note=NULL (XOR FK), so the
+        # parent note is reached through comment.note.
+        image = get_object_or_404(
+            Image.objects.select_related(
+                'note', 'comment', 'comment__note'
+            ).filter(
+                Q(uploaded_by=user)
+                | Q(note__user=user)
+                | Q(comment__user=user)
+                | Q(comment__note__user=user)
+            ),
+            pk=image_pk,
         )
 
-        if not (is_uploader or is_note_owner or is_comment_author):
-            raise PermissionDenied(
-                "You do not have permission to delete "
-                "this image."
-            )
-
-        storage_url = image.storage_url
         image_id = image.id
         image.delete()
-        delete_original(image_id, storage_url)
         logger.info(
             "User %s deleted image %s",
             user.username, image_id,
@@ -1840,7 +1838,17 @@ class ReadingPositionViewSet(viewsets.ModelViewSet):
     POST /api/v1/reading-positions/bulk/
     """
     serializer_class = ReadingPositionSerializer
-    permission_classes = [IsAuthenticated, GuestReadOnly]
+
+    def get_permissions(self):
+        # DEFAULT_PERMISSION_CLASSES already apply
+        # IsAuthenticated + GuestReadOnly. ``bulk`` is a READ
+        # implemented as POST (the book list belongs in a body,
+        # not a query string), so it exempts only GuestReadOnly
+        # — a legacy guest token may read positions the same
+        # way GET ?book= already allows.
+        if self.action == 'bulk':
+            return [IsAuthenticated()]
+        return super().get_permissions()
 
     def get_queryset(self):
         """Filter positions to current user only."""
@@ -1849,41 +1857,136 @@ class ReadingPositionViewSet(viewsets.ModelViewSet):
 
         book = self.request.query_params.get('book')
         if book:
+            book_id = get_dbt_book_id(book)
+            if book_id is not None:
+                # Canonicalize so stored names match the
+                # tolerant lookup used by create.
+                book = get_book_name_from_id(book_id)
             queryset = queryset.filter(book=book)
 
         return queryset
 
-    def create(self, request, *args, **kwargs):
-        """Upsert: create or update reading position."""
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        position = serializer.save()
+    def perform_create(self, serializer):
+        """Create or update the position row (upsert).
 
-        return Response(
-            self.get_serializer(position).data,
-            status=drf_status.HTTP_200_OK
+        The serializer's create() runs the
+        ``update_or_create``; it sets ``created_row`` on itself
+        so ``create`` can pick 201 vs 200.
+        """
+        serializer.save()
+        logger.info(
+            "User %s upserted reading position for '%s'",
+            self.request.user.username,
+            serializer.validated_data.get('book'),
         )
 
+    def create(self, request, *args, **kwargs):
+        """Upsert: 201 when a row is created, 200 on update."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(
+            self.get_serializer(serializer.instance).data,
+            status=(
+                drf_status.HTTP_201_CREATED
+                if serializer.created_row
+                else drf_status.HTTP_200_OK
+            ),
+        )
+
+    @extend_schema(
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'books': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': (
+                            'Book names (max 100); resolved '
+                            'with the same tolerant lookup as '
+                            'POST create (aliases, case, typos).'
+                        ),
+                    },
+                },
+                'required': ['books'],
+            },
+        },
+        responses={
+            200: {
+                'type': 'object',
+                'additionalProperties': {
+                    'type': 'object',
+                    'nullable': True,
+                    'properties': {
+                        'chapter': {'type': 'integer'},
+                        'verse': {'type': 'integer'},
+                    },
+                },
+            },
+        },
+    )
     @action(detail=False, methods=['post'])
     def bulk(self, request):
-        """Bulk fetch positions for multiple books."""
+        """Bulk-fetch positions for multiple books.
+
+        ``{"books": ["John", ...]}`` → ``{"John": {"chapter": N,
+        "verse": N} | null, ...}``. Book names go through the
+        same canonical lookup as create; unresolvable names are
+        rejected with 400.
+        """
+        if not isinstance(request.data, dict):
+            # A top-level JSON array/string body parses fine but
+            # carries no .get — answer 400 instead of letting
+            # AttributeError surface as a 500.
+            return _validation_error(
+                'Request body must be a JSON object.'
+            )
         books = request.data.get('books', [])
         if not isinstance(books, list):
-            return Response(
-                {'error': 'books must be an array'},
-                status=drf_status.HTTP_400_BAD_REQUEST
+            return _validation_error(
+                'books must be an array.'
             )
+        if len(books) > 100:
+            return _validation_error(
+                f'books may contain at most 100 entries. '
+                f'Received {len(books)}.'
+            )
+
+        # Resolve each requested name to the canonical stored
+        # form; the response map keys on the name the client
+        # actually sent so existing callers keep working.
+        resolved = []
+        for raw in books:
+            if not isinstance(raw, str) or not raw.strip():
+                return _validation_error(
+                    'books entries must be non-empty strings.'
+                )
+            book_id = get_dbt_book_id(raw)
+            if book_id is None:
+                return _validation_error(
+                    f'Invalid book name: {raw}'
+                )
+            resolved.append((raw, get_book_name_from_id(book_id)))
 
         positions = ReadingPosition.objects.filter(
             user=request.user,
-            book__in=books
+            book__in={canonical for _, canonical in resolved},
         )
+        by_book = {pos.book: pos for pos in positions}
 
-        result = {book: None for book in books}
-        for pos in positions:
-            result[pos.book] = {
-                'chapter': pos.chapter,
-                'verse': pos.verse
-            }
+        result = {raw: None for raw, _ in resolved}
+        for raw, canonical in resolved:
+            pos = by_book.get(canonical)
+            if pos is not None:
+                result[raw] = {
+                    'chapter': pos.chapter,
+                    'verse': pos.verse,
+                }
 
+        logger.info(
+            "User %s bulk-fetched %d reading positions",
+            request.user.username,
+            len(resolved),
+        )
         return Response(result)
