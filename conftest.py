@@ -91,14 +91,3 @@ def _isolated_locmem_cache():
     cache.clear()
     yield
     cache.clear()
-
-
-def prod_auth_stack(cls):
-    """Class decorator kept for backwards compatibility.
-
-    With the test suite running on the real production
-    ``REST_FRAMEWORK``/``MIDDLEWARE`` (see ``pytest_configure``),
-    the production auth stack is already the default — this is
-    now a no-op shim so existing decorated tests keep working.
-    """
-    return cls
