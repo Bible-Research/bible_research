@@ -1,5 +1,7 @@
+import json
+
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.urls import reverse
@@ -512,3 +514,173 @@ def test_gcs_payload_strips_size_fields(
         {'verse_start': 1, 'timestamp': 0.0},
         {'verse_start': 2, 'timestamp': 5.34},
     ]
+
+
+# --- timestamps JSON cache (S7 / timestamps #5) ------------------
+#
+# ``read_timestamps_json`` caches the immutable artifact payload in
+# the Django cache; both the timestamps endpoint and the passage
+# audio path share the entry. A cache hit must not reach GCS.
+
+
+def _gcs_blob_mock(payload):
+    """Mock ``get_default_client`` so ``blob.download_as_bytes``
+    returns ``payload`` encoded — returns (client_mock, blob)."""
+    blob = MagicMock()
+    blob.download_as_bytes.return_value = (
+        json.dumps(payload).encode()
+    )
+    client = MagicMock()
+    client.bucket.return_value.blob.return_value = blob
+    return client, blob
+
+
+@pytest.mark.django_db
+@patch('bible.services.storage.gcs.get_default_client')
+def test_timestamps_json_second_request_hits_cache(
+    mock_get_gcs, auth_client
+):
+    """Two identical requests download the artifact once — the
+    second response comes from the Django cache (S7).
+
+    The real ``get_tts_config`` registry resolves the voice —
+    no SWORD/GCS patching needed beyond the storage client."""
+    client_mock, blob = _gcs_blob_mock({
+        'data': [{'verse_start': 1, 'timestamp': 0.0}],
+    })
+    mock_get_gcs.return_value = client_mock
+    params = {
+        'fileset_id': 'LVSGLU8C1DA',
+        'book': 'John',
+        'chapter': '3',
+    }
+
+    first = auth_client.get(reverse('audio-timestamps'), params)
+    second = auth_client.get(reverse('audio-timestamps'), params)
+
+    assert first.status_code == status.HTTP_200_OK
+    assert second.json() == first.json()
+    blob.download_as_bytes.assert_called_once()
+
+
+@pytest.mark.django_db
+@patch('bible.services.storage.gcs.get_default_client')
+def test_timestamps_json_cache_key_covers_chapter_and_mode(
+    mock_get_gcs, auth_client
+):
+    """``chapter`` and ``mode`` are part of the cache key:
+    another chapter (or the C2DA chapter-mode fileset) is a
+    separate artifact download."""
+    client_mock, blob = _gcs_blob_mock({'data': []})
+    mock_get_gcs.return_value = client_mock
+
+    auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'LVSGLU8C1DA',
+            'book': 'John',
+            'chapter': '3',
+        },
+    )
+    auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'LVSGLU8C1DA',
+            'book': 'John',
+            'chapter': '4',
+        },
+    )
+    auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'LVSGLU8C2DA',
+            'book': 'John',
+            'chapter': '3',
+        },
+    )
+
+    assert blob.download_as_bytes.call_count == 3
+
+
+@pytest.mark.django_db
+@patch('bible.services.storage.gcs.get_default_client')
+def test_timestamps_json_miss_not_cached(
+    mock_get_gcs, auth_client
+):
+    """A missing artifact (NotFound) must not be cached — the
+    next request re-checks GCS so freshly generated chapters
+    appear immediately."""
+    client_mock, blob = _gcs_blob_mock({'data': []})
+    blob.download_as_bytes.side_effect = [
+        gcs_exceptions.NotFound('missing'),
+        b'{"data": [{"verse_start": 1, "timestamp": 0.0}]}',
+    ]
+    mock_get_gcs.return_value = client_mock
+    params = {
+        'fileset_id': 'LVSGLU8C1DA',
+        'book': 'John',
+        'chapter': '3',
+    }
+
+    missing = auth_client.get(
+        reverse('audio-timestamps'), params
+    )
+    generated = auth_client.get(
+        reverse('audio-timestamps'), params
+    )
+
+    assert missing.status_code == status.HTTP_404_NOT_FOUND
+    assert generated.status_code == status.HTTP_200_OK
+    assert blob.download_as_bytes.call_count == 2
+
+
+# --- API.Bible timecode filtering (timestamps #8) ----------------
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_apibible_client')
+def test_apibible_unparseable_timecodes_filtered(
+    mock_get_client, auth_client
+):
+    """Malformed timecodes are dropped instead of emitting
+    ``null`` verse/timestamp fields; a fully unparseable list
+    answers the same 'not yet generated' 404 as an empty one."""
+    mock_client = mock_get_client.return_value
+    mock_client.get_chapter_audio.return_value = {
+        'audio_url': 'https://x/JHN.3.mp3',
+        'timecodes': [
+            {'verseId': 'JHN.3.16', 'timestamp': '5.5'},
+            {'verseId': 'bogus', 'timestamp': '9'},
+            {'verseId': 'JHN.3.18', 'timestamp': 'not-a-float'},
+            {'verseId': 'JHN.3.19', 'timestamp': '12'},
+        ],
+    }
+
+    response = auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'ENGNIVC1DA',
+            'book': 'John',
+            'chapter': '3',
+        },
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()['data'] == [
+        {'verse_start': 16, 'timestamp': 5.5},
+        {'verse_start': 19, 'timestamp': 12.0},
+    ]
+
+    mock_client.get_chapter_audio.return_value = {
+        'timecodes': [{'verseId': 'bogus', 'timestamp': 'x'}],
+    }
+    response = auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'ENGNIVC1DA',
+            'book': 'John',
+            'chapter': '3',
+        },
+    )
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()['error_code'] == 'not_found'

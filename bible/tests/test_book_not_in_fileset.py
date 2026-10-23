@@ -286,7 +286,7 @@ def test_translations_response_includes_options(
     mock_translations, client
 ):
     """The translations endpoint exposes the grouped options."""
-    mock_translations.return_value = [{
+    mock_translations.return_value = ([{
         'abbr': 'GLU8',
         'name': 'Latvian Glück 8th edition',
         'language': 'Latvian',
@@ -298,7 +298,7 @@ def test_translations_response_includes_options(
         'audio_options': [
             {'id': 'GLU8:generated:1', 'kind': 'generated'}
         ],
-    }]
+    }], False)
 
     response = client.get(
         TRANSLATIONS_URL, {'language_iso': 'lvs'}
@@ -360,8 +360,11 @@ def test_service_groups_dbt_filesets(
     from bible.services.translation_service import (
         TranslationService,
     )
-    translations = TranslationService.get_live_translations('lvs')
+    translations, dbt_failed = (
+        TranslationService.get_live_translations('lvs')
+    )
 
+    assert not dbt_failed
     assert len(translations) == 1
     entry = translations[0]
     assert entry['filesets'] == [

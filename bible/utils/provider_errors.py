@@ -65,13 +65,21 @@ def upstream_status_code(exc: Exception) -> Optional[int]:
     return None
 
 
-def provider_error_fields(exc: Exception) -> Dict[str, str]:
+def provider_error_fields(
+    exc: Exception,
+    not_found_message: Optional[str] = None,
+) -> Dict[str, str]:
     """Build ``error``/``error_code`` fields for a provider failure.
 
     ``error_code`` is ``rate_limited`` for upstream HTTP 429,
     ``not_found`` when the passage does not exist upstream
     (``PassageNotFoundError`` or upstream HTTP 404), and
     ``provider_error`` for any other failure.
+
+    ``not_found_message`` overrides the "Passage not found" text
+    for endpoints whose lookup is not a passage (e.g.
+    ``copyright``) — it only rewords ``error``; the ``not_found``
+    code stays stable for the frontend.
 
     ``str(exc)`` is never embedded in ``error``: exception text can
     contain request URLs with credentials (e.g. DBT's ``?key=``
@@ -89,7 +97,10 @@ def provider_error_fields(exc: Exception) -> Dict[str, str]:
     if isinstance(exc, PassageNotFoundError) or status == 404:
         detail = f' (HTTP {status})' if status else ''
         return {
-            'error': f'Passage not found{detail}',
+            'error': (
+                f'{not_found_message or "Passage not found"}'
+                f'{detail}'
+            ),
             'error_code': 'not_found',
         }
     if status:

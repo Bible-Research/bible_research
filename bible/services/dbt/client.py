@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import requests
-from typing import Dict, Optional, Any
+from typing import Any, Dict, List, Optional
 from django.conf import settings
 
 # Set up logging
@@ -321,7 +321,7 @@ class DBTClient:
         self,
         bible_id: str,
         **kwargs
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """
         Get copyright info for a Bible.
 

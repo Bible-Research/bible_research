@@ -37,7 +37,15 @@ class TranslationService:
                 Defaults to None.
 
         Returns:
-            list: A list of translations without video and audio stream.
+            tuple: ``(translations, dbt_failed)`` — the processed
+                translation list without video/audio-stream
+                filesets, and a flag that is ``True`` when the
+                live DBT fetch failed and the list only contains
+                static registry entries. The view surfaces the
+                flag as ``degraded`` so a DBT outage degrades the
+                response instead of breaking it; a truly fatal
+                error (registry/processing failure) still
+                propagates to the view's 502 path.
         """
         logger.info(
             "Fetching live translations for language_iso: %s",
@@ -45,6 +53,7 @@ class TranslationService:
         )
 
         processed = []
+        dbt_failed = False
         try:
             translations = DbtProvider().translation_listing(
                 language_iso
@@ -56,6 +65,7 @@ class TranslationService:
             logger.debug("Raw translations from API: %s", translations)
             processed = cls._process_translations(translations)
         except Exception as e:
+            dbt_failed = True
             logger.error(
                 "DBT API Error fetching translations: %s", e, exc_info=True
             )
@@ -65,7 +75,7 @@ class TranslationService:
             registry_entries += provider_cls().translation_listing(
                 language_iso
             )
-        merged = processed + registry_entries
+        merged = cls._merge_by_abbr(processed, registry_entries)
         # Attach normalized option groups so clients can offer
         # version-level text/audio choices without parsing raw
         # fileset ids. ``filesets`` stays untouched for backwards
@@ -74,6 +84,50 @@ class TranslationService:
             options = group_filesets(entry)
             entry['text_options'] = options['text_options']
             entry['audio_options'] = options['audio_options']
+        return merged, dbt_failed
+
+    @staticmethod
+    def _merge_by_abbr(processed, registry_entries):
+        """Merge registry entries into the DBT list by ``abbr``.
+
+        A translation present in both sources (e.g. DBT's ESV
+        rows plus the ``ENGESV_API`` registry entry, both
+        ``abbr:ESV``) must produce one row — not two — so its
+        filesets fold into the existing entry, deduped by fileset
+        ``(id, type)`` — the same id can legitimately appear as
+        both text and audio. Entries without a counterpart
+        append as new rows.
+        """
+        merged = list(processed)
+        by_abbr = {}
+        for entry in merged:
+            abbr = entry.get('abbr')
+            if abbr:
+                by_abbr[abbr.upper()] = entry
+        for entry in registry_entries:
+            abbr = entry.get('abbr')
+            existing = by_abbr.get(abbr.upper()) if abbr else None
+            if existing is None:
+                merged.append(entry)
+                if abbr:
+                    by_abbr[abbr.upper()] = entry
+                continue
+            filesets = existing.setdefault('filesets', [])
+            # Dedupe on (id, type) — registry listings reuse one
+            # id across types (ENGESV_API is both text_plain and
+            # audio), so the id alone is not unique.
+            seen = {
+                (fs.get('id'), fs.get('type'))
+                for fs in filesets
+                if isinstance(fs, dict)
+            }
+            for fs in entry.get('filesets') or []:
+                if not isinstance(fs, dict):
+                    continue
+                key = (fs.get('id'), fs.get('type'))
+                if key not in seen:
+                    filesets.append(fs)
+                    seen.add(key)
         return merged
 
     @classmethod

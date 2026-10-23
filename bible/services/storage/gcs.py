@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import time
+from collections import OrderedDict
 from io import BytesIO
 from typing import Optional, Set, Tuple
 
@@ -15,6 +16,7 @@ from google.api_core import exceptions as _gax
 from google.auth.transport.requests import Request
 from google.cloud import storage
 from django.conf import settings
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -153,9 +155,49 @@ def upload_chapter_artifacts(
         BytesIO(mp3_bytes), content_type="audio/mpeg"
     )
 
+    # Overwriting an existing artifact (re-generation) should
+    # drop any cached download from read_timestamps_json. Note
+    # this only reaches same-process readers: the cache is
+    # process-local locmem and the sole caller is the Cloud Run
+    # generation job, a different process/host from the App
+    # Engine service — so a re-generated chapter can keep
+    # serving the stale entry until the TTL expires or the
+    # service restarts.
+    cache.delete(
+        _timestamps_cache_key(
+            fileset_id, book_id, chapter, voice_name, mode,
+        )
+    )
+
     logger.info(
         "Uploaded chapter artifacts: gs://%s/%s",
         bucket.name, audio_path,
+    )
+
+
+# The ``_timestamps.json`` artifact is nominally immutable once
+# generated: the monthly job only writes chapters that lack
+# artifacts (see ``list_completed_chapters``). On the rare
+# overwrite ``upload_chapter_artifacts`` deletes the locmem
+# entry in *its own* process only — the writer runs in the
+# Cloud Run job, not the App Engine serving process, so a
+# re-generated chapter may serve stale JSON until the TTL
+# below expires (or the service restarts). Caching removes a
+# GCS download per timestamps request — and per passage-audio
+# request, which reads the same object (S7).
+TIMESTAMPS_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+def _timestamps_cache_key(
+    fileset_id: str, book_id: str, chapter: int,
+    voice_name: str, mode: str,
+) -> str:
+    """Django-cache key covering every input that selects the
+    artifact — ``mode`` picks the ``audio/`` vs ``audio_chapter/``
+    prefix and ``voice_name`` the generation voice."""
+    return (
+        f"v1:timestamps:{fileset_id}:{voice_name}"
+        f":{book_id}:{int(chapter)}:{mode}"
     )
 
 
@@ -164,21 +206,39 @@ def read_timestamps_json(
     voice_name: str,
     mode: str = "verse",
 ) -> dict:
+    cache_key = _timestamps_cache_key(
+        fileset_id, book_id, chapter, voice_name, mode,
+    )
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
     _, json_path = chapter_object_paths(
         fileset_id, book_id, chapter, voice_name, mode=mode,
     )
     blob = _bucket().blob(json_path)
-    return json.loads(blob.download_as_bytes())
+    payload = json.loads(blob.download_as_bytes())
+    # Only successful reads are cached — a ``NotFound`` miss
+    # ("audio exists but timestamps not generated yet") must
+    # become visible as soon as the artifact is uploaded.
+    cache.set(
+        cache_key, payload, TIMESTAMPS_CACHE_TTL_SECONDS,
+    )
+    return payload
 
 
-# Cache of live signed URLs keyed by ``(fileset_id, book_id,
-# chapter, mode)``. Each value is ``(url, expires_at_monotonic)``.
-# Signing a URL does a round-trip to IAM's signBlob API, which is
-# measurable latency and rate-limited; caching for slightly less
-# than the TTL means clients that hit the same chapter repeatedly
-# pay that cost at most once per TTL window per process.
+# Bounded LRU cache of live signed URLs keyed by ``(fileset_id,
+# voice_name, book_id, chapter, mode)``. Each value is ``(url,
+# expires_at_monotonic)``. Signing a URL does a round-trip to
+# IAM's signBlob API, which is measurable latency and
+# rate-limited; caching for slightly less than the TTL means
+# clients that hit the same chapter repeatedly pay that cost at
+# most once per TTL window per process. The bound mirrors
+# ``annotations/services/image_storage.py``: evict the oldest
+# entry when full so memory cannot grow without bound on
+# long-running workers (S7).
 _SIGNED_URL_SAFETY_MARGIN_SECONDS = 60
-_signed_url_cache: dict = {}
+_SIGNED_URL_CACHE_MAX = 2048
+_signed_url_cache: OrderedDict = OrderedDict()
 _signed_url_cache_lock = threading.Lock()
 
 
@@ -207,6 +267,8 @@ def signed_audio_url(
     with _signed_url_cache_lock:
         cached = _signed_url_cache.get(cache_key)
         if cached is not None and cached[1] > now:
+            # Mark as most-recently-used.
+            _signed_url_cache.move_to_end(cache_key)
             return cached[0]
 
     audio_path, _ = chapter_object_paths(
@@ -234,6 +296,9 @@ def signed_audio_url(
     )
     with _signed_url_cache_lock:
         _signed_url_cache[cache_key] = (url, expires_at)
+        _signed_url_cache.move_to_end(cache_key)
+        while len(_signed_url_cache) > _SIGNED_URL_CACHE_MAX:
+            _signed_url_cache.popitem(last=False)
     return url
 
 
