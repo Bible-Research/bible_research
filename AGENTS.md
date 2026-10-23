@@ -164,6 +164,13 @@ notes and comments via nested routes. Positions use float
 `tag_position`/`position` fields — reordering writes fractional
 values; uniqueness collisions are handled in `annotations/views.py`.
 
+Pending human-run `makemigrations` (Meta declared, no migration
+file yet): `unique_top_level_tag_name_per_user` on Tag
+(`(user, name)` where `parent_tag IS NULL`),
+`unique_note_verse_link` on NoteVerse (`note, verse`),
+`unique_book_chapter_verse` on Verse (`book, chapter, verse`).
+Serializers enforce all three application-side.
+
 ## Code style & patterns
 
 - Imports ordered: stdlib → Django → third-party → local.
@@ -209,23 +216,23 @@ Known pre-existing failure on `main` (not a regression):
 
 Known pinned prod bugs (FIXME-marked tests). Each pins current
 buggy behavior pending a product decision — these are latent
-code bugs, not test failures:
+code bugs, not test failures: none outstanding. Recently
+resolved:
 
-- `annotations/test_reading_positions.py:179`
-  (`test_case_variant_books_create_separate_rows`) —
-  case-variant book names (`John` vs `john`) create duplicate
-  `ReadingPosition` rows (serializers.py:907 + case-sensitive
-  `unique_together`, models.py:460).
-- `annotations/test_tag_isolation.py:131`
-  (`test_duplicate_name_same_user`) — duplicate tag name with
-  NULL `parent_tag` silently creates a second row with 201
-  (`unique_together` at models.py:65 doesn't cover NULL
-  parent; no clean 400).
-- `annotations/test_note_isolation.py:231`
-  (`test_untagged_order_index`) — order-index endpoint filters
-  `tag_id` literally and never resolves the `untagged`
-  sentinel, returning an empty list for untagged notes
-  (views.py:1019 vs :590-592).
+- ~~`annotations/test_reading_positions.py`
+  (`test_case_variant_books_create_separate_rows`)~~ — book
+  names canonicalize through `get_dbt_book_id` +
+  `get_book_name_from_id` before storage; `book` is immutable
+  after create (serializer `update()` → 400).
+- ~~`annotations/test_tag_isolation.py`
+  (`test_duplicate_name_same_user`)~~ — `TagSerializer.validate`
+  enforces top-level (user, name) uniqueness → 400, backed by
+  the `unique_top_level_tag_name_per_user` conditional
+  constraint (pending its migration).
+- ~~`annotations/test_note_isolation.py`
+  (`test_untagged_order_index`)~~ — order-index resolves the
+  `untagged` sentinel to `tag__isnull=True`, matching list and
+  `/comments/counts/` semantics.
 - ~~`annotations/test_images.py`
   (`test_note_images_list_private_foreign_403`)~~ — resolved:
   `NoteImageViewSet._get_note` and `CommentImageViewSet.
@@ -233,11 +240,10 @@ code bugs, not test failures:
   `get_accessible_notes_qs`, so inaccessible and nonexistent
   parents both 404 (the test asserts 404 as
   `test_note_images_list_private_foreign_404`).
-- `annotations/test_images.py:1033`
-  (`test_cascade_delete_orphans_gcs_blob`) — row-level CASCADE
-  delete of a note/comment leaves orphaned GCS blobs; no
-  `post_delete` receiver calls `delete_original`
-  (models.py:303-318).
+- ~~`annotations/test_images.py`
+  (`test_cascade_delete_orphans_gcs_blob`)~~ — a `post_delete`
+  receiver on Image calls `delete_original`, so cascade
+  deletes (note/tag/user) no longer orphan GCS blobs.
 
 ## Housekeeping
 
