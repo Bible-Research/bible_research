@@ -5,7 +5,8 @@
 """
     Digital Bible Platform
 
-    Fast, easy, and free API access to video, audio, and text Bibles.  # noqa: E501
+    Fast, easy, and free API access to video, audio, and text
+    Bibles.
 
     The version of the OpenAPI document: 4.0.0-beta
     Contact: support@digitalbibleplatform.com
@@ -18,15 +19,12 @@ from __future__ import absolute_import
 __version__ = "1.0.0"
 
 # import apis into sdk package
-from openapi_client.api.annotations_api import AnnotationsApi
 from openapi_client.api.arclight_api import ArclightApi
-from openapi_client.api.audio_timing_api import AudioTimingApi
 from openapi_client.api.bible_verses_api import BibleVersesApi
 from openapi_client.api.bibles_api import BiblesApi
 from openapi_client.api.countries_api import CountriesApi
 from openapi_client.api.languages_api import LanguagesApi
 from openapi_client.api.library_text_api import LibraryTextApi
-from openapi_client.api.search_api import SearchApi
 
 # import ApiClient
 from openapi_client.api_client import ApiClient
@@ -71,7 +69,9 @@ from openapi_client.models.metadata import Metadata
 from openapi_client.models.note import Note
 from openapi_client.models.numeral_system import NumeralSystem
 from openapi_client.models.organization import Organization
-from openapi_client.models.organization_translation import OrganizationTranslation
+from openapi_client.models.organization_translation import (
+    OrganizationTranslation,
+)
 from openapi_client.models.pagination import Pagination
 from openapi_client.models.pagination_pagination import PaginationPagination
 from openapi_client.models.plan import Plan
@@ -85,24 +85,48 @@ from openapi_client.models.push_token import PushToken
 from openapi_client.models.resource import Resource
 from openapi_client.models.user import User
 from openapi_client.models.user_plan import UserPlan
-from openapi_client.models.v4_alphabets_all_response import V4AlphabetsAllResponse
-from openapi_client.models.v4_alphabets_all_response_data import V4AlphabetsAllResponseData
-from openapi_client.models.v4_alphabets_one_response import V4AlphabetsOneResponse
-from openapi_client.models.v4_alphabets_one_response_data import V4AlphabetsOneResponseData
+from openapi_client.models.v4_alphabets_all_response import (
+    V4AlphabetsAllResponse,
+)
+from openapi_client.models.v4_alphabets_all_response_data import (
+    V4AlphabetsAllResponseData,
+)
+from openapi_client.models.v4_alphabets_one_response import (
+    V4AlphabetsOneResponse,
+)
+from openapi_client.models.v4_alphabets_one_response_data import (
+    V4AlphabetsOneResponseData,
+)
 from openapi_client.models.v4_audio_timestamps import V4AudioTimestamps
-from openapi_client.models.v4_audio_timestamps_data import V4AudioTimestampsData
+from openapi_client.models.v4_audio_timestamps_data import (
+    V4AudioTimestampsData,
+)
 from openapi_client.models.v4_bible_all import V4BibleAll
 from openapi_client.models.v4_bible_all_data import V4BibleAllData
 from openapi_client.models.v4_bible_all_filesets import V4BibleAllFilesets
 from openapi_client.models.v4_bible_books import V4BibleBooks
 from openapi_client.models.v4_bible_books_data import V4BibleBooksData
-from openapi_client.models.v4_bible_fileset_chapter import V4BibleFilesetChapter
-from openapi_client.models.v4_bible_fileset_chapter_fileset import V4BibleFilesetChapterFileset
-from openapi_client.models.v4_bible_filesets_chapter import V4BibleFilesetsChapter
-from openapi_client.models.v4_bible_filesets_chapter_data import V4BibleFilesetsChapterData
-from openapi_client.models.v4_bible_filesets_copyright import V4BibleFilesetsCopyright
-from openapi_client.models.v4_bible_filesets_show import V4BibleFilesetsShow
-from openapi_client.models.v4_bible_filesets_show_data import V4BibleFilesetsShowData
+from openapi_client.models.v4_bible_fileset_chapter import (
+    V4BibleFilesetChapter,
+)
+from openapi_client.models.v4_bible_fileset_chapter_fileset import (
+    V4BibleFilesetChapterFileset,
+)
+from openapi_client.models.v4_bible_filesets_chapter import (
+    V4BibleFilesetsChapter,
+)
+from openapi_client.models.v4_bible_filesets_chapter_data import (
+    V4BibleFilesetsChapterData,
+)
+from openapi_client.models.v4_bible_filesets_copyright import (
+    V4BibleFilesetsCopyright,
+)
+from openapi_client.models.v4_bible_filesets_show import (
+    V4BibleFilesetsShow,
+)
+from openapi_client.models.v4_bible_filesets_show_data import (
+    V4BibleFilesetsShowData,
+)
 from openapi_client.models.v4_bible_verses_all import V4BibleVersesAll
 from openapi_client.models.v4_bible_verses_all_data import V4BibleVersesAllData
 from openapi_client.models.v4_bibles_defaults import V4BiblesDefaults
@@ -123,11 +147,15 @@ from openapi_client.models.v4_plan import V4Plan
 from openapi_client.models.v4_plan_detail import V4PlanDetail
 from openapi_client.models.v4_plan_detail_all_of import V4PlanDetailAllOf
 from openapi_client.models.v4_plan_index_detail import V4PlanIndexDetail
-from openapi_client.models.v4_plan_index_detail_all_of import V4PlanIndexDetailAllOf
+from openapi_client.models.v4_plan_index_detail_all_of import (
+    V4PlanIndexDetailAllOf,
+)
 from openapi_client.models.v4_plan_index_user import V4PlanIndexUser
 from openapi_client.models.v4_playlist import V4Playlist
 from openapi_client.models.v4_playlist_detail import V4PlaylistDetail
-from openapi_client.models.v4_playlist_detail_all_of import V4PlaylistDetailAllOf
+from openapi_client.models.v4_playlist_detail_all_of import (
+    V4PlaylistDetailAllOf,
+)
 from openapi_client.models.v4_playlist_index_user import V4PlaylistIndexUser
 from openapi_client.models.v4_text_search import V4TextSearch
 from openapi_client.models.video import Video

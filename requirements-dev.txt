@@ -1,0 +1,9 @@
+# Development dependencies — install with:
+#   pip install -r requirements-dev.txt
+# The -r line pulls in the pinned runtime stack as well.
+
+-r requirements.txt
+
+debugpy==1.8.20
+pytest==9.0.3
+pytest-django==4.12.0
