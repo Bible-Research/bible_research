@@ -18,8 +18,8 @@ def client():
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_search_hits_real_route(
     mock_get_client, mock_is_sword, client
 ):
@@ -72,7 +72,7 @@ def test_overlong_query_rejected(client):
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_query_is_stripped_before_provider_call(
     mock_get_esv_client, client
 ):
@@ -171,7 +171,7 @@ def test_invalid_fileset_id_rejected_before_routing(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_search_scoped_throttle(mock_get_client, client):
     """BibleSearchView carries the tighter ``search`` throttle —
     grouped mode fans out to ~30 upstream calls per request, so
@@ -246,8 +246,8 @@ def test_nonpositive_page_400(client):
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_search_proxies_with_params(
     mock_get_client, mock_is_sword, client
 ):
@@ -287,8 +287,8 @@ def test_dbt_search_proxies_with_params(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=True)
-@patch('bible.views.get_default_sword_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=True)
+@patch('bible.services.providers.get_default_sword_client')
 def test_sword_search_filters_by_query(
     mock_get_sword, mock_is_sword, client
 ):
@@ -323,8 +323,8 @@ def test_sword_search_filters_by_query(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=True)
-@patch('bible.views.get_default_sword_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=True)
+@patch('bible.services.providers.get_default_sword_client')
 def test_sword_books_filter_limits_scan(
     mock_get_sword, mock_is_sword, client
 ):
@@ -353,7 +353,7 @@ def test_sword_books_filter_limits_scan(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_search_with_engesv_api_fileset(
     mock_get_esv_client, client
 ):
@@ -412,7 +412,7 @@ def test_esv_search_with_engesv_api_fileset(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_search_handles_verse_ranges(
     mock_get_esv_client, client
 ):
@@ -445,7 +445,7 @@ def test_esv_search_handles_verse_ranges(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_search_handles_books_with_numbers(
     mock_get_esv_client, client
 ):
@@ -478,7 +478,7 @@ def test_esv_search_handles_books_with_numbers(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_search_handles_malformed_references(
     mock_get_esv_client, client
 ):
@@ -515,7 +515,7 @@ def test_esv_search_handles_malformed_references(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_apibible_client')
+@patch('bible.services.providers.get_default_apibible_client')
 def test_apibible_search_dispatches(
     mock_get_client, client
 ):
@@ -567,7 +567,7 @@ def test_apibible_search_dispatches(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_apibible_client')
+@patch('bible.services.providers.get_default_apibible_client')
 def test_apibible_search_empty_verses(
     mock_get_client, client
 ):
@@ -610,8 +610,8 @@ def test_invalid_group_by_rejected(client):
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_grouped_search_groups_by_book(
     mock_get_client, mock_is_sword, client
 ):
@@ -669,8 +669,8 @@ def test_dbt_grouped_search_groups_by_book(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_grouped_search_sets_truncated(
     mock_get_client, mock_is_sword, client
 ):
@@ -706,8 +706,8 @@ def test_dbt_grouped_search_sets_truncated(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_grouped_search_passes_books(
     mock_get_client, mock_is_sword, client
 ):
@@ -732,7 +732,7 @@ def test_dbt_grouped_search_passes_books(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_grouped_search_fetches_all_pages(
     mock_get_esv_client, client
 ):
@@ -788,7 +788,7 @@ def test_esv_grouped_search_fetches_all_pages(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_grouped_search_truncates_at_max_pages(
     mock_get_esv_client, client
 ):
@@ -816,8 +816,8 @@ def test_esv_grouped_search_truncates_at_max_pages(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=True)
-@patch('bible.views.get_default_sword_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=True)
+@patch('bible.services.providers.get_default_sword_client')
 def test_sword_grouped_search(
     mock_get_sword, mock_is_sword, client
 ):
@@ -853,8 +853,8 @@ def test_sword_grouped_search(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=True)
-@patch('bible.views.get_default_sword_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=True)
+@patch('bible.services.providers.get_default_sword_client')
 def test_sword_grouped_books_filter(
     mock_get_sword, mock_is_sword, client
 ):
@@ -881,8 +881,8 @@ def test_sword_grouped_books_filter(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_non_grouped_search_still_paginated(
     mock_get_client, mock_is_sword, client
 ):
@@ -917,8 +917,8 @@ def test_non_grouped_search_still_paginated(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_grouped_search_provider_error(
     mock_get_client, mock_is_sword, client
 ):
@@ -940,8 +940,8 @@ def test_grouped_search_provider_error(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_grouped_search_ignores_bad_page_param(
     mock_get_client, mock_is_sword, client
 ):
@@ -962,8 +962,8 @@ def test_grouped_search_ignores_bad_page_param(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_grouped_search_uses_reported_page_size(
     mock_get_client, mock_is_sword, client
 ):
@@ -1117,8 +1117,8 @@ class FakeProviderError(Exception):
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_search_provider_error_no_credential_leak(
     mock_get_client, mock_is_sword, client
 ):
@@ -1142,8 +1142,8 @@ def test_dbt_search_provider_error_no_credential_leak(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_search_rate_limited(
     mock_get_client, mock_is_sword, client
 ):
@@ -1165,8 +1165,8 @@ def test_dbt_search_rate_limited(
 
 
 @pytest.mark.django_db
-@patch('bible.views.is_sword_fileset', return_value=False)
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
 def test_provider_404_returns_not_found(
     mock_get_client, mock_is_sword, client
 ):
@@ -1185,7 +1185,7 @@ def test_provider_404_returns_not_found(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_search_failure_surfaces_provider_error(
     mock_get_esv_client, client
 ):

@@ -52,7 +52,7 @@ def _rate_limited_client():
 class ProviderErrorSerializerTests(TestCase):
     """Serializer must omit ``verses`` and include error fields."""
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_429_returns_rate_limited_fields(self, mock_get):
         mock_get.return_value = _rate_limited_client()
 
@@ -66,7 +66,7 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertEqual(result['error_code'], 'rate_limited')
         self.assertIn('429', result['error'])
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_other_failure_returns_provider_error(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.side_effect = FakeProviderError(500)
@@ -81,7 +81,7 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertEqual(result['error_code'], 'provider_error')
         self.assertIn('500', result['error'])
 
-    @patch('bible.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_esv_provider_429_returns_rate_limited(
         self, mock_get
     ):
@@ -99,7 +99,7 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertNotIn('verses', result)
         self.assertEqual(result['error_code'], 'rate_limited')
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_statusless_error_does_not_leak_details(
         self, mock_get
     ):
@@ -123,7 +123,7 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertNotIn('SECRET', result['error'])
         self.assertNotIn('url:', result['error'])
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_404_returns_book_not_in_fileset_fields(
         self, mock_get
     ):
@@ -143,7 +143,7 @@ class ProviderErrorSerializerTests(TestCase):
             result['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_empty_dbt_data_returns_book_not_in_fileset(
         self, mock_get
     ):
@@ -163,7 +163,7 @@ class ProviderErrorSerializerTests(TestCase):
             result['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_esv_empty_verses_returns_book_not_in_fileset(
         self, mock_get
     ):
@@ -187,7 +187,7 @@ class ProviderErrorSerializerTests(TestCase):
             result['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_apibible_client')
+    @patch('bible.services.providers.get_default_apibible_client')
     def test_apibible_404_returns_book_not_in_fileset(
         self, mock_get
     ):
@@ -208,7 +208,7 @@ class ProviderErrorSerializerTests(TestCase):
             result['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_apibible_client')
+    @patch('bible.services.providers.get_default_apibible_client')
     def test_apibible_empty_chapter_returns_book_not_in_fileset(
         self, mock_get
     ):
@@ -234,7 +234,7 @@ class ProviderErrorSerializerTests(TestCase):
             result['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_sword_client')
+    @patch('bible.services.providers.get_default_sword_client')
     def test_sword_missing_chapter_returns_book_not_in_fileset(
         self, mock_get
     ):
@@ -262,7 +262,7 @@ class ProviderErrorSerializerTests(TestCase):
 class ProviderErrorViewTests(TestCase):
     """The view must map provider failures to real HTTP statuses."""
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_view_returns_429_when_rate_limited(self, mock_get):
         mock_get.return_value = _rate_limited_client()
 
@@ -277,7 +277,7 @@ class ProviderErrorViewTests(TestCase):
             response.data['error_code'], 'rate_limited'
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_view_returns_502_for_other_failures(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.side_effect = FakeProviderError(503)
@@ -293,7 +293,7 @@ class ProviderErrorViewTests(TestCase):
             response.data['error_code'], 'provider_error'
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_view_returns_404_for_missing_passage(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.side_effect = FakeProviderError(404)
@@ -309,7 +309,7 @@ class ProviderErrorViewTests(TestCase):
             response.data['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_view_does_not_leak_credentials_in_error(
         self, mock_get
     ):

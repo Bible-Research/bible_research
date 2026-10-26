@@ -2,9 +2,11 @@
 Tests exercising the production auth/middleware stack.
 
 The class is decorated with ``prod_auth_stack`` (see the root
-conftest.py), which loads the prod MIDDLEWARE plus the prod
-REST_FRAMEWORK authentication and permission classes —
-Token/Bearer auth only. DeviceAndCountryMiddleware is gone:
+conftest.py), which is now a no-op shim kept for backwards
+compatibility — the test suite already runs on the real
+production MIDDLEWARE and REST_FRAMEWORK settings, so
+Token/Bearer auth is the default. DeviceAndCountryMiddleware
+is gone:
 anonymous requests reach the views as a real ``AnonymousUser``,
 no user rows are minted from headers, and unauthenticated
 writes are clean 401s.

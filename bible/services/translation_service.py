@@ -2,13 +2,24 @@
 
 import logging
 
-from .apibible.registry import get_apibible_translation_listing
-from .dbt.client import get_default_dbt_client
-from .esv.registry import get_esv_translation_listing
 from .fileset_groups import group_filesets
-from .sword.client import get_default_sword_client
+from .providers import (
+    ApiBibleProvider,
+    DbtProvider,
+    ESVProvider,
+    SwordProvider,
+)
 
 logger = logging.getLogger(__name__)
+
+# Registry providers whose listings merge into the translations
+# response alongside the live DBT ``/bibles`` list. Each answers
+# its own entries through the facade's ``translation_listing``.
+_REGISTRY_PROVIDERS = (
+    SwordProvider,
+    ESVProvider,
+    ApiBibleProvider,
+)
 
 
 class TranslationService:
@@ -32,17 +43,12 @@ class TranslationService:
             "Fetching live translations for language_iso: %s",
             language_iso,
         )
-        client = get_default_dbt_client()
-        params = {'limit': 500}
-        if language_iso:
-            params['language_code'] = language_iso.upper()
-
-        logger.debug("Requesting bibles with params: %s", params)
 
         processed = []
         try:
-            response = client.get_bibles(**params)
-            translations = response.get('data', [])
+            translations = DbtProvider().translation_listing(
+                language_iso
+            )
             logger.info(
                 "Received %d translations from DBT API.",
                 len(translations),
@@ -54,33 +60,12 @@ class TranslationService:
                 "DBT API Error fetching translations: %s", e, exc_info=True
             )
 
-        sword_entries = get_default_sword_client().get_translation_listing()
-        if language_iso:
-            needle = language_iso.lower()
-            sword_entries = [
-                e for e in sword_entries
-                if e['iso'].lower() == needle
-            ]
-
-        esv_entries = get_esv_translation_listing()
-        if language_iso:
-            needle = language_iso.lower()
-            esv_entries = [
-                e for e in esv_entries
-                if e['iso'].lower() == needle
-            ]
-
-        apibible_entries = get_apibible_translation_listing()
-        if language_iso:
-            needle = language_iso.lower()
-            apibible_entries = [
-                e for e in apibible_entries
-                if e['iso'].lower() == needle
-            ]
-        merged = (
-            processed + sword_entries + esv_entries
-            + apibible_entries
-        )
+        registry_entries = []
+        for provider_cls in _REGISTRY_PROVIDERS:
+            registry_entries += provider_cls().translation_listing(
+                language_iso
+            )
+        merged = processed + registry_entries
         # Attach normalized option groups so clients can offer
         # version-level text/audio choices without parsing raw
         # fileset ids. ``filesets`` stays untouched for backwards

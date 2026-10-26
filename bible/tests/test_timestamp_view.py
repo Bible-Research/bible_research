@@ -29,7 +29,7 @@ def factory():
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 @patch('bible.views.get_dbt_book_id')
 def test_get_timestamps_success(
     mock_get_dbt_book_id, mock_get_client, factory
@@ -143,7 +143,7 @@ def test_global_anon_throttle_applies(factory):
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 @patch('bible.views.get_dbt_book_id')
 def test_get_timestamps_dbt_exception(
     mock_get_dbt_book_id, mock_get_client, factory
@@ -169,7 +169,7 @@ def test_get_timestamps_dbt_exception(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 @patch('bible.views.get_dbt_book_id')
 def test_get_timestamps_rate_limited(
     mock_get_dbt_book_id, mock_get_client, factory
@@ -192,7 +192,7 @@ def test_get_timestamps_rate_limited(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 @patch('bible.views.get_dbt_book_id')
 def test_get_timestamps_error_does_not_leak_credentials(
     mock_get_dbt_book_id, mock_get_client, factory
@@ -221,7 +221,7 @@ def test_get_timestamps_error_does_not_leak_credentials(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_apibible_client')
+@patch('bible.services.providers.get_default_apibible_client')
 @patch('bible.views.get_dbt_book_id')
 def test_apibible_ranged_timecode_verse_ids(
     mock_get_dbt_book_id, mock_get_client, factory
@@ -285,8 +285,8 @@ def auth_client(db):
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_tts_config')
-@patch('bible.views.gcs.read_timestamps_json')
+@patch('bible.services.providers.get_tts_config')
+@patch('bible.services.providers.gcs.read_timestamps_json')
 def test_gcs_not_found_returns_404(
     mock_read_ts, mock_tts_config, auth_client
 ):
@@ -327,7 +327,7 @@ def test_gcs_not_found_returns_404(
     ],
     ids=['empty-timecodes', 'missing-timecodes'],
 )
-@patch('bible.views.get_default_apibible_client')
+@patch('bible.services.providers.get_default_apibible_client')
 def test_apibible_empty_timecodes_returns_404(
     mock_get_client, auth_client, audio_payload
 ):
@@ -360,7 +360,7 @@ def test_apibible_empty_timecodes_returns_404(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_null_data_returns_empty_list(
     mock_get_client, auth_client
 ):
@@ -385,7 +385,7 @@ def test_dbt_null_data_returns_empty_list(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_apibible_client')
+@patch('bible.services.providers.get_default_apibible_client')
 def test_apibible_timecodes_normalized(
     mock_get_client, auth_client
 ):
@@ -420,7 +420,7 @@ def test_apibible_timecodes_normalized(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_upstream_404_maps_to_not_found(
     mock_get_client, auth_client
 ):
@@ -447,8 +447,8 @@ def test_upstream_404_maps_to_not_found(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_tts_config')
-@patch('bible.views.gcs.read_timestamps_json')
+@patch('bible.services.providers.get_tts_config')
+@patch('bible.services.providers.gcs.read_timestamps_json')
 def test_read_timestamps_json_positional_args(
     mock_read_ts, mock_tts_config, auth_client
 ):
@@ -476,8 +476,8 @@ def test_read_timestamps_json_positional_args(
 
 
 @pytest.mark.django_db
-@patch('bible.views.get_tts_config')
-@patch('bible.views.gcs.read_timestamps_json')
+@patch('bible.services.providers.get_tts_config')
+@patch('bible.services.providers.gcs.read_timestamps_json')
 def test_gcs_payload_strips_size_fields(
     mock_read_ts, mock_tts_config, auth_client
 ):

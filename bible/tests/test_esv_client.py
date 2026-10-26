@@ -136,7 +136,7 @@ class ESVClientSessionTests(TestCase):
 class ESVSerializerRoutingTests(TestCase):
     @override_settings(ESV_KEY="test-key")
     @patch(
-        "bible.serializers.get_default_esv_client"
+        "bible.services.providers.get_default_esv_client"
     )
     def test_serializer_routes_esv_fileset(self, mock_get):
         mock_client = MagicMock()
@@ -170,7 +170,7 @@ class ESVSerializerRoutingTests(TestCase):
 
     @override_settings(ESV_KEY="test-key")
     @patch(
-        "bible.serializers.get_default_esv_client"
+        "bible.services.providers.get_default_esv_client"
     )
     def test_serializer_returns_esv_audio_url(
         self, mock_get
@@ -273,7 +273,7 @@ class ESVTranslationsEndpointTests(TestCase):
         self.client.force_authenticate(user=self.user)
 
     @patch(
-        "bible.services.translation_service."
+        "bible.services.providers."
         "get_default_dbt_client"
     )
     def test_translations_endpoint_includes_esv(
@@ -354,7 +354,7 @@ class ParsePassageHeadingsTests(TestCase):
 class ESVSerializerHeadingsTests(TestCase):
     @override_settings(ESV_KEY="test-key")
     @patch(
-        "bible.serializers.get_default_esv_client"
+        "bible.services.providers.get_default_esv_client"
     )
     def test_serializer_returns_headings_for_esv(
         self, mock_get
@@ -463,8 +463,11 @@ class ESVClientSearchTests(TestCase):
 
         self.assertIn("API Error", str(context.exception))
 
+    @override_settings(ESV_KEY=None)
     def test_search_requires_api_key(self):
-        """Search method should raise ValueError if no API key is set."""
+        """Search method should raise ValueError if no API key
+        is set — neither an explicit key nor a configured
+        ``ESV_KEY`` (the pytest conftest provides a dummy)."""
         with self.assertRaises(ValueError) as context:
             ESVClient(api_key=None)
 

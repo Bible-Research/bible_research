@@ -46,7 +46,7 @@ class VerseSelectionSerializerTests(TestCase):
     """The serializer filters provider output to the requested
     verses for every provider."""
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_dbt_single_verse(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -64,7 +64,7 @@ class VerseSelectionSerializerTests(TestCase):
             [{'verse': 16, 'text': 'text 16'}],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_dbt_verse_range(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -82,7 +82,7 @@ class VerseSelectionSerializerTests(TestCase):
             [16, 17, 18],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_dbt_discontiguous_selection(self, mock_get):
         """'John 3:16,18' returns exactly verses 16 and 18 even
         when the provider returns the contiguous range."""
@@ -102,7 +102,7 @@ class VerseSelectionSerializerTests(TestCase):
             [16, 18],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_dbt_out_of_range_verse_returns_book_not_in_fileset(
         self, mock_get
     ):
@@ -126,7 +126,7 @@ class VerseSelectionSerializerTests(TestCase):
             result['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_esv_narrows_upstream_and_filters(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_chapter_with_headings.return_value = {
@@ -161,7 +161,7 @@ class VerseSelectionSerializerTests(TestCase):
             [{'before_verse': 17, 'text': 'In-range heading'}],
         )
 
-    @patch('bible.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_esv_chapter_only_call_unchanged(self, mock_get):
         """Without a verse selector the ESV client is called
         exactly as before (no verse kwargs)."""
@@ -183,7 +183,7 @@ class VerseSelectionSerializerTests(TestCase):
             .assert_called_once_with('JHN', 3)
         self.assertEqual(len(result['verses']), 1)
 
-    @patch('bible.serializers.get_default_sword_client')
+    @patch('bible.services.providers.get_default_sword_client')
     def test_sword_narrows_and_filters(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_chapter_verses.return_value = [
@@ -208,7 +208,7 @@ class VerseSelectionSerializerTests(TestCase):
             [16, 17],
         )
 
-    @patch('bible.serializers.get_default_sword_client')
+    @patch('bible.services.providers.get_default_sword_client')
     def test_sword_chapter_only_call_unchanged(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_chapter_verses.return_value = [
@@ -226,7 +226,7 @@ class VerseSelectionSerializerTests(TestCase):
         )
         self.assertEqual(len(result['verses']), 1)
 
-    @patch('bible.serializers.get_default_apibible_client')
+    @patch('bible.services.providers.get_default_apibible_client')
     def test_apibible_filters_to_requested_verses(self, mock_get):
         """'John 3:16' on NIV must return only verse 16 — the
         API.Bible branch used to ignore the selector and return
@@ -263,7 +263,7 @@ class VerseSelectionSerializerTests(TestCase):
             APINIV_BIBLE_ID, 'JHN', 3,
         )
 
-    @patch('bible.serializers.get_default_apibible_client')
+    @patch('bible.services.providers.get_default_apibible_client')
     def test_apibible_out_of_range_verse_returns_not_in_fileset(
         self, mock_get
     ):
@@ -342,7 +342,7 @@ class VerseSelectionViewTests(TestCase):
             {'passage': passage, 'fileset_id': fileset_id},
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_single_verse_request(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -358,7 +358,7 @@ class VerseSelectionViewTests(TestCase):
             [{'verse': 16, 'text': 'text 16'}],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_verse_range_request(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -374,7 +374,7 @@ class VerseSelectionViewTests(TestCase):
             [16, 17, 18],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_multi_select_request(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -390,7 +390,7 @@ class VerseSelectionViewTests(TestCase):
             [16, 17, 18, 20],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_chapter_only_request_unchanged(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(1, 2)
@@ -404,7 +404,7 @@ class VerseSelectionViewTests(TestCase):
             [1, 2],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_out_of_range_verse_returns_404(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(1, 2)
@@ -450,7 +450,7 @@ class VerseSelectionViewTests(TestCase):
         """The cap sits above the longest canonical chapter
         (Psalms 119:176) — a 'John 3:1-200' selector parses."""
         with patch(
-            'bible.serializers.get_default_dbt_client'
+            'bible.services.providers.get_default_dbt_client'
         ) as mock_get:
             mock_client = MagicMock()
             mock_client.get_verses.return_value = _dbt_rows(

@@ -190,13 +190,18 @@ else:
     # --- Local Development ---
     import yaml
     CONFIG_FILE = BASE_DIR / 'config.yaml'
-    if not CONFIG_FILE.exists():
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, 'r') as f:
+            config = yaml.safe_load(f)
+    elif 'pytest' in sys.modules:
+        # pytest runs against production-like settings with no
+        # secrets file: conftest overrides DATABASES (SQLite
+        # in-memory) and the provider keys with test values.
+        config = {}
+    else:
         raise FileNotFoundError(
             'config.yaml not found. Please create it from config_template.yaml'
         )
-
-    with open(CONFIG_FILE, 'r') as f:
-        config = yaml.safe_load(f)
 
     SECRET_KEY = config.get('SECRET_KEY')
     DBT_KEY = config.get('DBT_KEY')
