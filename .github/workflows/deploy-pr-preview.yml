@@ -24,9 +24,12 @@ name: Deploy PR Preview (Cloud Run)
 # delete them with ``gcloud run services delete`` when done.
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, closed]
+  # PR previews disabled to avoid Artifact Registry image buildup.
+  # Uncomment the pull_request block below to re-enable automatic
+  # private previews; workflow_dispatch still deploys one manually.
+  # pull_request:
+  #   branches: [main]
+  #   types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 permissions:
