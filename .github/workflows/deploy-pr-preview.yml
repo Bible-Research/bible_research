@@ -1,17 +1,32 @@
 name: Deploy PR Preview (Cloud Run)
 
 # Builds the repo Dockerfile on every pull request to main and deploys
-# it to a scale-to-zero Cloud Run staging service
-# (bible-research-staging). The app gets its entire .env config from
+# it to an ephemeral, private Cloud Run preview service
+# (bible-research-pr-<num>). The app gets its entire .env config from
 # the consolidated ``env-file`` secret injected as the DOTENV env var,
 # so no Secret Manager API call happens at startup.
 #
+# Cost/abuse posture:
+#   - ``--no-allow-unauthenticated``: unauthenticated requests are
+#     rejected by Google's edge with 403 before any container starts,
+#     so the public URL cannot be abused into spend.
+#   - --min-instances=0: the preview idles at zero.
+#   - The preview service is deleted when the PR closes (merged or
+#     not) by the ``cleanup`` job below.
+#
+# To browse a preview, run:
+#   gcloud run services proxy bible-research-pr-<num> \
+#     --region=europe-west3 --project=bible-research-489314
+# and open http://localhost:8080 (requires roles/run.invoker).
+#
 # Can also be triggered manually via workflow_dispatch to redeploy the
-# currently checked-out ref.
+# currently checked-out ref; manual previews are NOT auto-deleted —
+# delete them with ``gcloud run services delete`` when done.
 
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 permissions:
@@ -19,7 +34,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: staging-deploy
+  group: staging-deploy-${{ github.event.pull_request.number || 'manual' }}
   cancel-in-progress: false
 
 env:
@@ -31,13 +46,14 @@ env:
   # Runtime SA: reuses the App Engine default SA, which already has
   # secretAccessor + the GCS bucket access audio/image features need.
   RUNTIME_SA: bible-research-489314@appspot.gserviceaccount.com
-  STAGING_SERVICE: bible-research-staging
+  STAGING_SERVICE: bible-research-pr-${{ github.event.pull_request.number || 'staging' }}
   IMAGE_REPO: audio-generator
   IMAGE_NAME: bible-research
   IMAGE_TAG: pr-${{ github.event.pull_request.number || github.sha }}
 
 jobs:
   deploy-staging:
+    if: github.event_name == 'workflow_dispatch' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -70,7 +86,7 @@ jobs:
           docker push "${IMAGE}"
           echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
 
-      - name: Deploy to Cloud Run staging (scale to zero)
+      - name: Deploy to Cloud Run preview (private, scale to zero)
         run: |
           set -euo pipefail
           gcloud run deploy "${STAGING_SERVICE}" \
@@ -78,7 +94,7 @@ jobs:
             --region="${GCP_REGION}" \
             --project="${GCP_PROJECT_ID}" \
             --platform=managed \
-            --allow-unauthenticated \
+            --no-allow-unauthenticated \
             --min-instances=0 \
             --max-instances=1 \
             --memory=1Gi \
@@ -88,9 +104,63 @@ jobs:
             --set-env-vars="GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}" \
             --service-account="${RUNTIME_SA}"
 
-      - name: Print staging URL
+      # WIF credentials cannot mint Cloud Run identity tokens, so the
+      # smoke check verifies the two properties that matter: the
+      # revision reports Ready (container built, started, healthy)
+      # and unauthenticated traffic is rejected at the edge with 403
+      # (no container start, no spend).
+      - name: Smoke check (private)
         run: |
-          gcloud run services describe "${STAGING_SERVICE}" \
+          set -euo pipefail
+          READY=$(gcloud run services describe "${STAGING_SERVICE}" \
             --region="${GCP_REGION}" \
             --project="${GCP_PROJECT_ID}" \
-            --format='value(status.url)'
+            --format=json | python3 -c \
+            "import sys, json; c={x['type']: x['status'] for x in json.load(sys.stdin)['status']['conditions']}; print(c.get('Ready', ''))")
+          echo "Ready condition: ${READY}"
+          test "${READY}" = "True"
+
+          URL=$(gcloud run services describe "${STAGING_SERVICE}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            --format='value(status.url)')
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "${URL}/api/v1/bible/translations/")
+          echo "GET /api/v1/bible/translations/ (unauthenticated) -> ${CODE}"
+          test "${CODE}" = "403"
+
+      - name: Print preview access
+        run: |
+          URL=$(gcloud run services describe "${STAGING_SERVICE}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            --format='value(status.url)')
+          {
+            echo "Preview URL (private): ${URL}"
+            echo "Browse via: gcloud run services proxy ${STAGING_SERVICE} --region=${GCP_REGION} --project=${GCP_PROJECT_ID}"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+  cleanup:
+    # Tear down the PR's preview service when the pull request closes
+    # (merged or not) so previews never outlive their review.
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Delete preview service
+        run: |
+          gcloud run services delete "${STAGING_SERVICE}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            --quiet \
+            || echo "Preview service ${STAGING_SERVICE} not found - nothing to delete"
