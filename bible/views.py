@@ -19,6 +19,8 @@ from bible.utils.error_responses import (
 from bible.utils.provider_errors import (
     PassageNotFoundError,
     TimestampsNotGeneratedError,
+    capture_internal_exception,
+    capture_provider_exception,
     provider_error_fields,
 )
 from bible.utils.request_params import (
@@ -146,6 +148,10 @@ def provider_error_response(exc, not_found_message=None):
     fields = provider_error_fields(
         exc, not_found_message=not_found_message
     )
+    # Trend upstream outages in Sentry (warning-level, tagged
+    # with error_code); no-ops for not_found and when Sentry
+    # is off.
+    capture_provider_exception(exc, fields['error_code'])
     return Response(
         fields,
         status=PROVIDER_ERROR_STATUSES.get(
@@ -359,11 +365,17 @@ class BiblePassageView(APIView):
             # above — so the text holds no upstream URLs or
             # credentials.
             return bad_request(str(e))
-        except Exception:
+        except Exception as e:
             logger.exception(
                 "Unexpected error processing passage request: %s",
                 passage,
             )
+            # A caught 500 is a real server bug, and Sentry's
+            # DjangoIntegration only reports *uncaught*
+            # exceptions — report it explicitly at error level
+            # (``capture_provider_exception``'s warning level is
+            # for trending expected upstream outages).
+            capture_internal_exception(e)
             return Response(
                 {
                     "error": (

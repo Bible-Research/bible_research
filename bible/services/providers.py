@@ -82,6 +82,7 @@ from bible.services.sword.registry import (
 from bible.utils.provider_errors import (
     PassageNotFoundError,
     TimestampsNotGeneratedError,
+    capture_provider_exception,
     provider_error_fields,
     upstream_status_code,
 )
@@ -1034,9 +1035,13 @@ def get_passage_body(data):
             return _book_not_in_fileset_body(
                 book_id, book_name, chapter, fileset_id
             )
+        fields = provider_error_fields(e)
+        # Report upstream outages to Sentry (no-op for
+        # not_found and when Sentry is not configured).
+        capture_provider_exception(e, fields['error_code'])
         return {
             'book': book_id,
             'book_name': book_name,
             'chapter': chapter,
-            **provider_error_fields(e),
+            **fields,
         }

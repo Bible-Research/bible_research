@@ -1,4 +1,5 @@
-# Secrets are managed in GCP; Terraform only reads metadata (matches remote state).
+# Secrets are managed in GCP; Terraform only reads metadata
+# (matches remote state).
 data "google_secret_manager_secret" "app" {
   for_each = toset([
     "DJANGO_SECRET_KEY",
@@ -6,6 +7,7 @@ data "google_secret_manager_secret" "app" {
     "ESV_KEY",
     "DATABASE_URL",
     "DB_SSL_CERT",
+    "SENTRY_DSN",
   ])
 
   project   = var.project_id

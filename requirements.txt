@@ -7,9 +7,10 @@ Django==6.1.2
 PyYAML==6.0.3
 dj-database-url==3.1.2
 django-cors-headers==4.9.0
-djangorestframework==3.17.1
+djangorestframework==3.18.3
 drf-spectacular==0.29.0
 requests==2.33.1
+sentry-sdk==2.73.0
 pysword==0.2.8
 pycountry==26.2.16
 psycopg2-binary==2.9.13

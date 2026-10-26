@@ -1749,6 +1749,32 @@ console):
 tail -f logs/debug.log
 ```
 
+### Monitoring (Sentry)
+
+Error monitoring via Sentry is wired but opt-in: when
+`SENTRY_DSN` is empty the SDK stays uninitialized and nothing is
+sent (local dev and CI are silent by default).
+
+- **Local**: set `SENTRY_DSN` in `config.yaml` (see
+  `config_template.yaml`) to the `bible-research-api` project's
+  Client Key DSN.
+- **Production (GAE)**: create the `SENTRY_DSN` secret in GCP
+  Secret Manager (Terraform reads its metadata via
+  `terraform/secrets.tf`); the env var of the same name also
+  works. `GAE_VERSION` is used as the Sentry release;
+  environment is `production` on GCP, `development` otherwise.
+- Uncaught exceptions (HTTP 500s) are captured automatically.
+  Provider failures surfaced through the `error`/`error_code`
+  contract are additionally captured at `warning` level with an
+  `error_code` tag (`rate_limited`/`provider_error` only —
+  `not_found` and `book_not_in_fileset` are never sent). Log
+  records INFO+ are breadcrumbs only, not events.
+- `send_default_pii=False`; `before_send` drops request bodies
+  on `/api/token/` and `/api/v1/users/` (they contain
+  passwords).
+- `sentry-trace`/`baggage` are allowed CORS headers so the
+  frontend can link its traces to backend requests.
+
 ---
 
 ## Testing
@@ -1880,7 +1906,8 @@ To run the app against the restored copy, repoint `config.yaml`'s
 - [ ] Configure allowed hosts
 - [ ] Set up database backups
 - [ ] Configure logging to external service
-- [ ] Set up monitoring (e.g., Sentry)
+- [ ] Create `SENTRY_DSN` in Secret Manager (enables Sentry
+      monitoring — see "Monitoring (Sentry)")
 - [ ] Review security settings
 
 ---

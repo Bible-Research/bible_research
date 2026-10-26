@@ -48,9 +48,11 @@ def pytest_configure():
     settings.ESV_KEY = 'test-key'
     settings.API_BIBLE_KEY = 'test-key'
     settings.GEMINI_API_KEYS = ['test-gemini-key']
-    settings.SECRET_KEY = (
-        settings.SECRET_KEY or 'a-test-secret-for-pytest'
-    )
+    # An empty SECRET_KEY raises ImproperlyConfigured on
+    # attribute access, so it cannot be probed with ``or`` —
+    # set it outright; the real key is irrelevant under
+    # SQLite-backed tests.
+    settings.SECRET_KEY = 'a-test-secret-for-pytest'
 
     # Deterministic GCS targets (never reached — GCS calls are
     # mocked in tests).

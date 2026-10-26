@@ -11,7 +11,11 @@ from bible.utils.bible_books import (
     get_book_name_from_id,
     get_dbt_book_id,
 )
-from bible.utils.provider_errors import provider_error_fields
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+    capture_provider_exception,
+    provider_error_fields,
+)
 from .models import (
     Note,
     NoteVerse,
@@ -540,7 +544,11 @@ class NoteSerializer(serializers.ModelSerializer):
             logger.exception(f"Error fetching verses/headings: {e}")
             # Surface the provider failure to clients while
             # keeping the verse references for display.
-            representation.update(provider_error_fields(e))
+            fields = provider_error_fields(e)
+            # Report upstream outages to Sentry (no-op for
+            # not_found and when Sentry is not configured).
+            capture_provider_exception(e, fields['error_code'])
+            representation.update(fields)
             for verse in verses:
                 verses_with_text.append({
                     'book': book_name,
@@ -812,7 +820,13 @@ class ImageSerializer(serializers.ModelSerializer):
                 signed_image_url,
             )
             return signed_image_url(obj.id, obj.storage_url)
-        except Exception:
+        except Exception as e:
+            # Signing runs on our credentials against our
+            # bucket — a failure is our infrastructure breaking
+            # (or a code bug), not a routine upstream blip, so
+            # it reports at error level like a genuine 500. The
+            # field still degrades to None for the client.
+            capture_internal_exception(e)
             return None
 
 
