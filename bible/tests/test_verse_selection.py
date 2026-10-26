@@ -246,10 +246,34 @@ class ESVClientVerseRangeTests(TestCase):
 
     @override_settings(ESV_KEY='test-key')
     def test_no_selector_sends_chapter_ref(self):
+        """A chapter-only request sends an explicit whole-
+        chapter range; ESV clamps the end verse to the
+        chapter end (see the single-chapter regression
+        test below)."""
         client = self._client()
         client.get_chapter_with_headings('JHN', 3)
         params = client.session.get.call_args[1]['params']
-        self.assertEqual(params['q'], 'John 3')
+        self.assertEqual(params['q'], 'John 3:1-200')
+
+    @override_settings(ESV_KEY='test-key')
+    def test_single_chapter_book_sends_verse_range(self):
+        """Issue reactive-bible#186: api.esv.org reads
+        ``Philemon 1`` as Philemon 1:1 and returns only
+        verse 1. The query must carry an explicit range so
+        single-chapter books come back whole."""
+        client = self._client()
+        for book_id, book_name in (
+            ('PHM', 'Philemon'),
+            ('OBA', 'Obadiah'),
+            ('2JN', '2 John'),
+            ('3JN', '3 John'),
+            ('JUD', 'Jude'),
+        ):
+            client.get_chapter_with_headings(book_id, 1)
+            params = client.session.get.call_args[1]['params']
+            self.assertEqual(
+                params['q'], f'{book_name} 1:1-200'
+            )
 
 
 class VerseSelectionViewTests(TestCase):

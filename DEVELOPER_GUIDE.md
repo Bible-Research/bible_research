@@ -422,6 +422,13 @@ GET /api/v1/bible/?passage=John+3&response_format=audio&
   - For audio: Use audio fileset codes like "ENGESVN2DA",
     "LVSGLU8C1DA", "ENGNIVC1DA"
 
+ESV note: the `ENGESV_API` provider requests whole chapters
+upstream as an explicit `Book C:1-200` range rather than a bare
+`Book C` ref — api.esv.org parses a bare chapter ref as `C:1`
+for single-chapter books (Obadiah, Philemon, 2/3 John, Jude)
+and returns only verse 1. The out-of-range end verse clamps to
+the real chapter end.
+
 API.Bible text responses additionally carry a `meta` object with
 the upstream FUMS fields (`fums`, `fumsId`, `fumsJsInclude`,
 `fumsNoScript`) — clients must report them per API.Bible's
