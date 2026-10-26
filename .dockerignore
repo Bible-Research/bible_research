@@ -5,6 +5,7 @@ __pycache__/
 db.sqlite3
 config.yaml
 ca.pem
+.env
 staticfiles/
 logs/
 db_backups/

@@ -11,10 +11,10 @@ RUN grep -v '^debugpy' requirements.txt > /tmp/requirements-prod.txt \
 
 COPY . .
 
-# collectstatic needs a minimal config.yaml (build-time only)
-RUN printf 'SECRET_KEY: "build"\nDEBUG: false\nDBT_KEY: ""\nESV_KEY: ""\nDATABASES:\n  default:\n    ENGINE: django.db.backends.sqlite3\n    NAME: ":memory:"\n' > config.yaml \
+# collectstatic needs a minimal .env (build-time only)
+RUN printf 'SECRET_KEY=build\nDEBUG=False\nDATABASE_URL=sqlite:///:memory:\n' > .env \
     && python manage.py collectstatic --noinput \
-    && rm config.yaml
+    && rm .env
 
 ENV PORT=8080
 EXPOSE 8080

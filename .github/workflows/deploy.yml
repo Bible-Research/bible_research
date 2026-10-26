@@ -50,7 +50,10 @@ jobs:
         env:
           GOOGLE_CLOUD_PROJECT: ${{ env.GCP_PROJECT_ID }}
           GAE_APPLICATION: s~${{ env.GCP_PROJECT_ID }}
-        run: python manage.py migrate --noinput
+        run: |
+          export DOTENV="$(gcloud secrets versions access latest \
+            --secret=env-file --project="${GCP_PROJECT_ID}")"
+          python manage.py migrate --noinput
 
       - name: Deploy to App Engine
         run: |

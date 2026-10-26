@@ -1,0 +1,96 @@
+name: Deploy PR Preview (Cloud Run)
+
+# Builds the repo Dockerfile on every pull request to main and deploys
+# it to a scale-to-zero Cloud Run staging service
+# (bible-research-staging). The app gets its entire .env config from
+# the consolidated ``env-file`` secret injected as the DOTENV env var,
+# so no Secret Manager API call happens at startup.
+#
+# Can also be triggered manually via workflow_dispatch to redeploy the
+# currently checked-out ref.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID: bible-research-489314
+  GCP_REGION: europe-west3
+  WIF_PROVIDER: >-
+    projects/670506724494/locations/global/workloadIdentityPools/github-actions/providers/github
+  DEPLOY_SA: github-deployer@bible-research-489314.iam.gserviceaccount.com
+  # Runtime SA: reuses the App Engine default SA, which already has
+  # secretAccessor + the GCS bucket access audio/image features need.
+  RUNTIME_SA: bible-research-489314@appspot.gserviceaccount.com
+  STAGING_SERVICE: bible-research-staging
+  IMAGE_REPO: audio-generator
+  IMAGE_NAME: bible-research
+  IMAGE_TAG: pr-${{ github.event.pull_request.number || github.sha }}
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker \
+            "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push staging image
+        id: image
+        run: |
+          set -euo pipefail
+          REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}"
+          IMAGE="${REGISTRY}/${IMAGE_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Building ${IMAGE}"
+          docker build -t "${IMAGE}" .
+          docker push "${IMAGE}"
+          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Deploy to Cloud Run staging (scale to zero)
+        run: |
+          set -euo pipefail
+          gcloud run deploy "${STAGING_SERVICE}" \
+            --image="${{ steps.image.outputs.image }}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --min-instances=0 \
+            --max-instances=1 \
+            --memory=1Gi \
+            --cpu=1 \
+            --timeout=300 \
+            --set-secrets="DOTENV=env-file:latest" \
+            --set-env-vars="GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}" \
+            --service-account="${RUNTIME_SA}"
+
+      - name: Print staging URL
+        run: |
+          gcloud run services describe "${STAGING_SERVICE}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            --format='value(status.url)'

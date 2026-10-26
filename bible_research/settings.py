@@ -82,6 +82,18 @@ WSGI_APPLICATION = 'bible_research.wsgi.application'
 
 # --- Environment-Specific Configuration ---
 
+# Config sources, in precedence order:
+#   1. ``DOTENV`` env var — its VALUE is full .env contents. Cloud Run
+#      injects the consolidated ``env-file`` secret this way
+#      (--set-secrets=DOTENV=env-file:latest), needing no API call.
+#   2. ``DOTENV_PATH`` env var — path to a .env file to load.
+#   3. GCP branch — a single ``env-file`` Secret Manager entry fetched
+#      below when neither DOTENV nor DOTENV_PATH was provided.
+#   4. Local dev — ``.env`` next to manage.py, else the legacy
+#      ``config.yaml`` (kept for backwards compatibility).
+# Parsed values use setdefault semantics — real env vars always win.
+from .dotenv import load_dotenv, load_dotenv_file
+
 IS_GCP_ENVIRONMENT = (
     os.environ.get('GAE_APPLICATION') is not None
     or os.environ.get('K_SERVICE') is not None
@@ -89,129 +101,154 @@ IS_GCP_ENVIRONMENT = (
 )
 IS_VERCEL = os.environ.get('VERCEL') == '1'
 
-if IS_GCP_ENVIRONMENT:
-    # --- Production on Google Cloud ---
-    from .gcp import get_secret
+_dotenv_loaded = False
+if os.environ.get('DOTENV'):
+    load_dotenv(os.environ['DOTENV'])
+    _dotenv_loaded = True
+elif os.environ.get('DOTENV_PATH'):
+    load_dotenv_file(os.environ['DOTENV_PATH'])
+    _dotenv_loaded = True
 
-    SECRET_KEY = get_secret('DJANGO_SECRET_KEY')
-    DBT_KEY = get_secret('DBT_KEY')
-    ESV_KEY = get_secret('ESV_KEY')
-    # Optional until an API.Bible key is provisioned — fall back
-    # to a plain env var so the missing Secret Manager entry can
-    # never break startup.
-    API_BIBLE_KEY = os.environ.get('API_BIBLE_KEY')
-    if not API_BIBLE_KEY:
-        try:
-            API_BIBLE_KEY = get_secret('API_BIBLE_KEY')
-        except Exception:
-            API_BIBLE_KEY = None
-    DEBUG = False
+# Where a PEM from DB_SSL_CERT/capem is materialised at runtime.
+CA_PEM_PATH = '/tmp/bible-research-postgres-ca.pem'
 
-    # Assumes DATABASE_URL is stored in Secret Manager
-    database_url = get_secret('DATABASE_URL')
-    db_config = dj_database_url.parse(database_url)
 
-    # Handle SSL certificate from Secret Manager
-    db_ssl_cert_content = get_secret('DB_SSL_CERT')
-    if db_ssl_cert_content:
-        CA_PEM_PATH = '/tmp/ca.pem'
-        if not os.path.exists(CA_PEM_PATH):
-            # The content from Secret Manager should already be formatted
-            with open(CA_PEM_PATH, 'w') as f:
-                f.write(db_ssl_cert_content)
+def _write_ca_pem(pem_source):
+    """Write the Postgres CA cert to CA_PEM_PATH.
 
+    Accepts a PEM stored with real newlines, ``\\n`` escape sequences,
+    or collapsed onto a single line with spaces.
+    """
+    if os.path.exists(CA_PEM_PATH):
+        return
+    pem_source = pem_source.replace('\\n', '\n')
+    if '\n' in pem_source:
+        pem_content = pem_source
+    else:
+        lines = pem_source.replace(
+            "-----BEGIN CERTIFICATE----- ",
+            "-----BEGIN CERTIFICATE-----\n"
+        ).replace(
+            " -----END CERTIFICATE-----",
+            "\n-----END CERTIFICATE-----"
+        )
+        parts = lines.split("\n")
+        if len(parts) >= 3:
+            base64_content = ''.join(parts[1:-1]).replace(' ', '')
+            formatted_content = textwrap.fill(base64_content, 64)
+            pem_content = (
+                "-----BEGIN CERTIFICATE-----\n"
+                f"{formatted_content}\n"
+                "-----END CERTIFICATE-----"
+            )
+        else:
+            pem_content = pem_source
+    with open(CA_PEM_PATH, 'w') as f:
+        f.write(pem_content)
+
+
+def _db_config_from_env():
+    """Build the Django ``default`` database dict from env vars.
+
+    ``DATABASE_URL`` wins; Vercel-style ``DB_*`` parts are the next
+    fallback; local SQLite is the last resort. A CA PEM provided via
+    ``DB_SSL_CERT`` (or its ``capem`` alias) is written to CA_PEM_PATH
+    and wired up as sslmode=require + sslrootcert.
+    """
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        db_config = dj_database_url.parse(database_url)
+    elif os.environ.get('DB_NAME'):
+        db_config = {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ.get('DB_NAME'),
+            'USER': os.environ.get('DB_USER'),
+            'PASSWORD': os.environ.get('DB_PASSWORD'),
+            'HOST': os.environ.get('DB_HOST'),
+            'PORT': os.environ.get('DB_PORT', '5432'),
+        }
+    else:
+        db_config = {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': str(BASE_DIR / 'db.sqlite3'),
+        }
+
+    cert = os.environ.get('DB_SSL_CERT') or os.environ.get('capem')
+    if cert:
+        _write_ca_pem(cert)
         db_config.setdefault('OPTIONS', {})
         db_config['OPTIONS']['sslmode'] = 'require'
         db_config['OPTIONS']['sslrootcert'] = CA_PEM_PATH
-    DATABASES = {'default': db_config}
+    return db_config
 
-    _audio_settings_source = os.environ
 
-elif IS_VERCEL:
-    # --- Production on Vercel ---
+def _apply_env_config():
+    """Populate app config from os.environ.
+
+    Shared by every environment whose config arrives as a .env payload
+    (GCP ``env-file`` secret, DOTENV injection, local .env) or as plain
+    environment variables (Vercel).
+    """
+    global SECRET_KEY, DBT_KEY, ESV_KEY, API_BIBLE_KEY, DEBUG
+    global DATABASES, _audio_settings_source
+
     SECRET_KEY = os.environ.get('SECRET_KEY')
     DBT_KEY = os.environ.get('DBT_KEY')
     ESV_KEY = os.environ.get('ESV_KEY')
     API_BIBLE_KEY = os.environ.get('API_BIBLE_KEY')
     DEBUG = os.environ.get('DEBUG', 'False') == 'True'
-
-    # Build database config from individual env vars
-    db_config = {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('DB_NAME'),
-        'USER': os.environ.get('DB_USER'),
-        'PASSWORD': os.environ.get('DB_PASSWORD'),
-        'HOST': os.environ.get('DB_HOST'),
-        'PORT': os.environ.get('DB_PORT', '5432'),
-    }
-
-    # Create ca.pem at runtime if database cert is provided
-    CA_PEM_PATH = None
-    capem_content = os.environ.get('DB_SSL_CERT')
-    if capem_content:
-        CA_PEM_PATH = '/tmp/ca.pem'
-        if not os.path.exists(CA_PEM_PATH):
-            if '\n' not in capem_content:
-                lines = capem_content.replace(
-                    "-----BEGIN CERTIFICATE----- ",
-                    "-----BEGIN CERTIFICATE-----\n"
-                )
-                lines = lines.replace(
-                    " -----END CERTIFICATE-----",
-                    "\n-----END CERTIFICATE-----"
-                )
-                parts = lines.split("\n")
-                if len(parts) >= 3:
-                    base64_content = ''.join(parts[1:-1]).replace(' ', '')
-                    formatted_content = textwrap.fill(base64_content, 64)
-                    pem_content = (
-                        f"-----BEGIN CERTIFICATE-----\n"
-                        f"{formatted_content}\n"
-                        f"-----END CERTIFICATE-----"
-                    )
-                else:
-                    pem_content = capem_content
-            else:
-                pem_content = capem_content
-
-            with open(CA_PEM_PATH, 'w') as f:
-                f.write(pem_content)
-
-        db_config['OPTIONS'] = {
-            'sslmode': 'require',
-            'sslrootcert': CA_PEM_PATH
-        }
-
-    DATABASES = {'default': db_config}
-
+    DATABASES = {'default': _db_config_from_env()}
     _audio_settings_source = os.environ
+
+
+if IS_GCP_ENVIRONMENT:
+    # --- Production on Google Cloud (App Engine / Cloud Run) ---
+    if not _dotenv_loaded:
+        from .gcp import get_secret
+        load_dotenv(get_secret('env-file'))
+    _apply_env_config()
+
+elif IS_VERCEL:
+    # --- Production on Vercel ---
+    _apply_env_config()
 
 else:
     # --- Local Development ---
-    import yaml
-    CONFIG_FILE = BASE_DIR / 'config.yaml'
-    if not CONFIG_FILE.exists():
-        raise FileNotFoundError(
-            'config.yaml not found. Please create it from config_template.yaml'
-        )
+    if not _dotenv_loaded:
+        env_file = BASE_DIR / '.env'
+        if env_file.exists():
+            load_dotenv_file(env_file)
+            _dotenv_loaded = True
 
-    with open(CONFIG_FILE, 'r') as f:
-        config = yaml.safe_load(f)
+    if _dotenv_loaded:
+        _apply_env_config()
+    else:
+        import yaml
+        CONFIG_FILE = BASE_DIR / 'config.yaml'
+        if not CONFIG_FILE.exists():
+            raise FileNotFoundError(
+                '.env not found. Copy .env.example to .env and fill '
+                'in your values (the legacy config.yaml is still '
+                'supported).'
+            )
 
-    SECRET_KEY = config.get('SECRET_KEY')
-    DBT_KEY = config.get('DBT_KEY')
-    ESV_KEY = config.get('ESV_KEY')
-    API_BIBLE_KEY = config.get('API_BIBLE_KEY')
-    DEBUG = config.get('DEBUG', True)
-    DATABASES = config.get('DATABASES')
+        with open(CONFIG_FILE, 'r') as f:
+            config = yaml.safe_load(f)
 
-    if DATABASES and 'default' in DATABASES:
-        opts = DATABASES['default'].get('OPTIONS', {})
-        if 'sslrootcert' in opts:
-            cert_path = opts['sslrootcert']
-            opts['sslrootcert'] = str(BASE_DIR / cert_path)
+        SECRET_KEY = config.get('SECRET_KEY')
+        DBT_KEY = config.get('DBT_KEY')
+        ESV_KEY = config.get('ESV_KEY')
+        API_BIBLE_KEY = config.get('API_BIBLE_KEY')
+        DEBUG = config.get('DEBUG', True)
+        DATABASES = config.get('DATABASES')
 
-    _audio_settings_source = config
+        if DATABASES and 'default' in DATABASES:
+            opts = DATABASES['default'].get('OPTIONS', {})
+            if 'sslrootcert' in opts:
+                cert_path = opts['sslrootcert']
+                opts['sslrootcert'] = str(BASE_DIR / cert_path)
+
+        _audio_settings_source = config
 
 # Tests always run on a local throwaway sqlite DB: the configured
 # connection is a read-only user against production that cannot
@@ -256,10 +293,11 @@ LOCK_STALE_HOURS = int(
 
 # Gemini API key(s) for the free-tier generateContent TTS endpoint.
 # config.yaml may set GEMINI_API_KEY to a single string or a YAML
-# list (one key per free-tier project); normalized to a list here.
+# list (one key per free-tier project); a .env value is a
+# comma-separated string. Normalized to a list here.
 _gemini_api_key = _audio_settings_source.get("GEMINI_API_KEY", [])
 if isinstance(_gemini_api_key, str):
-    _gemini_api_key = [_gemini_api_key]
+    _gemini_api_key = _gemini_api_key.split(',')
 GEMINI_API_KEYS = [
     str(k).strip() for k in (_gemini_api_key or [])
     if str(k).strip()

@@ -4,41 +4,13 @@ resource "google_service_account" "audio_generator" {
   project      = var.project_id
 }
 
-# The Job needs to read DATABASE_URL and DJANGO_SECRET_KEY at Django
-# settings import time, even though it does not touch the DB. Reuse the
-# existing Secret Manager entries via the same data sources used in
-# secrets.tf.
-resource "google_secret_manager_secret_iam_member" "audio_generator_db_url" {
+# The Job needs the app's .env config at Django settings import time.
+# It is injected as the DOTENV env var sourced from the consolidated
+# ``env-file`` secret (see secrets.tf) — settings.py parses its value
+# directly, so no per-secret env vars or API calls are needed.
+resource "google_secret_manager_secret_iam_member" "audio_generator_env_file" {
   project   = var.project_id
-  secret_id = data.google_secret_manager_secret.app["DATABASE_URL"].secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.audio_generator.email}"
-}
-
-resource "google_secret_manager_secret_iam_member" "audio_generator_django_secret" {
-  project   = var.project_id
-  secret_id = data.google_secret_manager_secret.app["DJANGO_SECRET_KEY"].secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.audio_generator.email}"
-}
-
-resource "google_secret_manager_secret_iam_member" "audio_generator_dbt_key" {
-  project   = var.project_id
-  secret_id = data.google_secret_manager_secret.app["DBT_KEY"].secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.audio_generator.email}"
-}
-
-resource "google_secret_manager_secret_iam_member" "audio_generator_esv_key" {
-  project   = var.project_id
-  secret_id = data.google_secret_manager_secret.app["ESV_KEY"].secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.audio_generator.email}"
-}
-
-resource "google_secret_manager_secret_iam_member" "audio_generator_db_ssl_cert" {
-  project   = var.project_id
-  secret_id = data.google_secret_manager_secret.app["DB_SSL_CERT"].secret_id
+  secret_id = data.google_secret_manager_secret.env_file.secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.audio_generator.email}"
 }
@@ -121,20 +93,10 @@ resource "google_cloud_run_v2_job" "audio_generator" {
         }
 
         env {
-          name = "DATABASE_URL"
+          name = "DOTENV"
           value_source {
             secret_key_ref {
-              secret  = data.google_secret_manager_secret.app["DATABASE_URL"].secret_id
-              version = "latest"
-            }
-          }
-        }
-
-        env {
-          name = "DJANGO_SECRET_KEY"
-          value_source {
-            secret_key_ref {
-              secret  = data.google_secret_manager_secret.app["DJANGO_SECRET_KEY"].secret_id
+              secret  = data.google_secret_manager_secret.env_file.secret_id
               version = "latest"
             }
           }
@@ -144,11 +106,7 @@ resource "google_cloud_run_v2_job" "audio_generator" {
   }
 
   depends_on = [
-    google_secret_manager_secret_iam_member.audio_generator_db_url,
-    google_secret_manager_secret_iam_member.audio_generator_django_secret,
-    google_secret_manager_secret_iam_member.audio_generator_dbt_key,
-    google_secret_manager_secret_iam_member.audio_generator_esv_key,
-    google_secret_manager_secret_iam_member.audio_generator_db_ssl_cert,
+    google_secret_manager_secret_iam_member.audio_generator_env_file,
   ]
 
   lifecycle {
