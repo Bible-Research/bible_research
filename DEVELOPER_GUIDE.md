@@ -279,6 +279,13 @@ POST /api/token/
   is used
 - Invalid credentials return HTTP 400 with a `non_field_errors`
   list
+- Throttled at 5 requests/minute per username (per client IP
+  when no `username` is supplied); excess requests return
+  HTTP 429
+- Throttle counters use the default per-process locmem cache
+  (no shared `CACHES` backend is configured), so on GAE the
+  effective limit is roughly rate × running instances and
+  counters reset on every restart/deploy
 
 ### User Management
 
@@ -310,9 +317,18 @@ POST /api/v1/users/register/
 ```
 **Notes**:
 - Email is optional
-- Password must be at least 8 characters
+- Password must pass Django's `AUTH_PASSWORD_VALIDATORS`:
+  at least 8 characters, not entirely numeric, not a common
+  password, and not too similar to the username/email.
+  Violations return HTTP 400 with a `password` error list
 - Returns authentication token automatically
 - No authentication required for this endpoint
+- Throttled at 10 requests/minute per client IP; excess
+  requests return HTTP 429
+- Throttle counters use the default per-process locmem cache
+  (no shared `CACHES` backend is configured), so on GAE the
+  effective limit is roughly rate × running instances and
+  counters reset on every restart/deploy
 
 #### Get Current User
 ```
@@ -373,17 +389,23 @@ The other provider-backed endpoints — `/api/v1/bible/timestamps/`,
 `/api/v1/bible/copyright/`, `/api/v1/bible/search/`, and
 `/api/v1/bible/translations/` — surface upstream failures with the
 same `error`/`error_code` fields and the same HTTP status mapping
-(`429`/`404`/`502`). Raw exception text is never embedded in
-`error` because it can contain request URLs with credentials.
+(`429`/`404`/`502`). Timestamp 404s for missing coverage ("not
+yet generated" GCS artifacts, empty API.Bible timecodes) carry
+`error_code: "not_found"`. Raw exception text is never embedded
+in `error` because it can contain request URLs with credentials.
 
 **Client error response** (invalid input): returns `400` with an
-`error` message. `passage` accepts a book name and chapter number
-only (`John 3`) — verse selectors like `John 3:16` are rejected.
-Messages: `Passage parameter is required. Example:
-?passage=John+3`, `Invalid passage format. Use 'Book Chapter'
-(e.g., 'John 3')`, `Unknown book: <name>`, `Chapter must be a
-valid number` (non-numeric), `Chapter must be a positive number`
-(zero or negative).
+`error` message. `passage` accepts a book name plus a chapter
+token, optionally with a verse selector (`John 3`,
+`John 3:16`, `John 3:16-18,20`). Messages: `Passage parameter
+is required. Example: ?passage=John+3`, `Passage parameter is
+too long (max 100 characters).`, `Invalid passage format. Use
+'Book Chapter' (e.g., 'John 3')`, `Unknown book: <name>`,
+`Chapter must be a valid number` (non-numeric), `Chapter must
+be a positive number` (zero or negative), `Verse selectors
+must be positive numbers with Start <= End`,
+`Verse numbers must be between 1 and 200`, `Too many verse
+segments (max 25)`.
 
 #### Get Bible Passage (Audio)
 ```
@@ -412,7 +434,9 @@ GET /api/v1/bible/?passage=John+3&response_format=audio&
   verse numbers for `response_format=text`; audio responses are
   always chapter-granular and ignore the selector. A selector
   outside the chapter's verses returns `404` with
-  `error_code` `not_found`.
+  `error_code` `not_found`. The parameter is bounded: at most
+  100 characters total, 25 verse segments, and verse numbers
+  1–200 — larger values return `400`.
 - `response_format`: "text" or "audio" (default: "text")
 - `fileset_id`: DBT fileset ID for the specific translation and
   format (default: "ENGESV")
@@ -601,7 +625,10 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
 ```
 
 **Query Parameters**:
-- `query` (required): Word or phrase to search for
+- `query` (required): Word or phrase to search for. Leading
+  and trailing whitespace is stripped; a query that is empty
+  after stripping returns `400`, as does a query over 200
+  characters
 - `fileset_id` (required): DBT or SWORD fileset ID; use
   `ENGESV_API` for ESV API search or `ENGNIV_API` for API.Bible
   (NIV) search — `page`/`limit` are mapped onto API.Bible's
@@ -829,6 +856,11 @@ text for a note (e.g. rate-limited), the note keeps its
 empty provider response (no verse rows returned) is reported
 the same way as a missing passage: `error_code` is
 `not_found`.
+
+Notes with no verse links keep the same response shape:
+`verses` is `[]`, `headings` is `[]`, and `tag` is still the
+expanded tag object when set — clients never have to sniff
+for absent keys or a raw tag PK.
 
 **Examples**:
 ```
@@ -1137,7 +1169,27 @@ only the note's owner may upload; reads follow the note's
 accessibility scope. Comment images: only the comment's
 author may upload. `DELETE /images/{id}/` is allowed for the
 uploader, the parent note's owner, or the parent comment's
-author.
+author. A soft-deleted comment's image list returns `[]`
+(the same tombstone contract as the comment payload itself —
+its images are never exposed via the nested route).
+
+### Reading Positions
+```
+GET    /api/v1/reading-positions/
+POST   /api/v1/reading-positions/
+PATCH  /api/v1/reading-positions/{id}/
+DELETE /api/v1/reading-positions/{id}/
+Authorization: Token <your-token>
+```
+
+Tracks the caller's last-read location per book. `POST`
+upserts on `(user, book)`: the `book` name is validated
+through the book-name lookup and stored canonicalized
+(title case — `john`, `JOHN`, and `John` all resolve to the
+`John` row), so case variants can never fork duplicate
+positions. `book` is immutable afterwards — `PATCH` with a
+different book returns `400`; re-seat a position via
+delete + create instead.
 
 ---
 

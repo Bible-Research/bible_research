@@ -827,6 +827,34 @@ class CommentImageNestedScopingTest(TestCase):
                 "https://signed.example.com/img",
             )
 
+    @patch(
+        "annotations.services.image_storage.signed_image_url",
+        return_value="https://signed.example.com/img",
+    )
+    def test_deleted_comment_image_list_returns_empty(
+        self, _mock_sign
+    ):
+        """A soft-deleted comment must not serve signed URLs —
+        CommentSerializer redacts it to ``images: []`` and the
+        nested route has to honor the same tombstone contract."""
+        Image.objects.create(
+            comment=self.comment,
+            uploaded_by=self.owner,
+            storage_url="gs://b/originals/d/source.png",
+            content_type="image/png",
+            size_bytes=100,
+        )
+        self.comment.is_deleted = True
+        self.comment.content = ""
+        self.comment.save(
+            update_fields=["is_deleted", "content"]
+        )
+        resp = self.client.get(
+            self._images_url(self.note_b.id, self.comment.id)
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), [])
+
 
 class GuestImageWriteTest(TestCase):
     """The shared 'guest' account is read-only: writes → 403."""

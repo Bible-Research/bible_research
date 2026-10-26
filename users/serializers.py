@@ -1,4 +1,10 @@
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import (
+    validate_password,
+)
+from django.core.exceptions import (
+    ValidationError as DjangoValidationError,
+)
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 
@@ -55,6 +61,26 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'password_confirm'
         ]
         read_only_fields = ['id']
+
+    def validate_password(self, value):
+        """Run the field through AUTH_PASSWORD_VALIDATORS.
+
+        Settings configure all four standard validators
+        (similarity, minimum length, common-password and
+        numeric-only) — without this hook only the ``min_length``
+        field kwarg ran, so ``12345678``/``password1`` were
+        accepted. An unsaved ``User`` instance lets the
+        similarity validator compare against username/email.
+        """
+        user = User(
+            username=self.initial_data.get('username', ''),
+            email=self.initial_data.get('email', ''),
+        )
+        try:
+            validate_password(value, user=user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages)
+        return value
 
     def validate(self, attrs):
         """

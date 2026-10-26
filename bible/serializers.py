@@ -312,19 +312,41 @@ class BiblePassageSerializer(serializers.Serializer):
                 parsed = client.get_chapter(
                     meta['bible_id'], book_id, chapter
                 )
-                result = {
-                    'book': book_id,
-                    'book_name': book_name,
-                    'chapter': chapter,
-                    'format': 'text',
-                    'verses': [
+                # Same selection contract as the ESV path: a
+                # ``Chapter:Verse`` selector must return only the
+                # requested verses (API.Bible has no verse-range
+                # query param, so filtering is client-side) and a
+                # selection that resolves to nothing is missing
+                # content — not_found, not an empty chapter.
+                selected = _select_verses(
+                    [
                         {
                             'verse': v['verse_start'],
                             'text': v['verse_text'],
                         }
                         for v in parsed['verses']
                     ],
-                    'headings': parsed['headings'],
+                    verse_numbers,
+                )
+                if not selected:
+                    raise PassageNotFoundError(
+                        f"No verses found for {book_id} "
+                        f"{chapter} in fileset_id={fileset_id}"
+                    )
+                headings = parsed['headings']
+                if verse_numbers:
+                    wanted = set(verse_numbers)
+                    headings = [
+                        h for h in headings
+                        if h.get('before_verse') in wanted
+                    ]
+                result = {
+                    'book': book_id,
+                    'book_name': book_name,
+                    'chapter': chapter,
+                    'format': 'text',
+                    'verses': selected,
+                    'headings': headings,
                 }
                 # API.Bible's FUMS tracking token must reach the
                 # client — required by their license terms for web

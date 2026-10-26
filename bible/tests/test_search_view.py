@@ -47,6 +47,54 @@ def test_missing_query_param(client):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize('query', [' ', '   ', '\t\n'])
+def test_whitespace_query_rejected(query, client):
+    """A whitespace-only query strips to empty → 400 before any
+    provider call (a raw ' ' used to scan the whole SWORD
+    Bible per request)."""
+    response = client.get(SEARCH_URL, {
+        'query': query,
+        'fileset_id': 'LVSGLU8',
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'query' in response.json()['error']
+
+
+@pytest.mark.django_db
+def test_overlong_query_rejected(client):
+    """query is capped at 200 characters."""
+    response = client.get(SEARCH_URL, {
+        'query': 'a' * 201,
+        'fileset_id': 'ENGESV',
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'query' in response.json()['error']
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_esv_client')
+def test_query_is_stripped_before_provider_call(
+    mock_get_esv_client, client
+):
+    """Leading/trailing whitespace is stripped, not forwarded."""
+    mock_get_esv_client.return_value.search.return_value = {
+        'page': 1,
+        'total_results': 0,
+        'total_pages': 0,
+        'results': [],
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': '  love  ',
+        'fileset_id': 'ENGESV_API',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    mock_get_esv_client.return_value.search\
+        .assert_called_once_with('love', 1, 15)
+
+
+@pytest.mark.django_db
 def test_missing_fileset_id_param(client):
     """Missing fileset_id → 400 with descriptive error."""
     response = client.get(SEARCH_URL, {'query': 'love'})

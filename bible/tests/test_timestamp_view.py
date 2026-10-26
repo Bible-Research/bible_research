@@ -223,11 +223,9 @@ def test_gcs_not_found_returns_404(
     mock_read_ts, mock_tts_config, auth_client
 ):
     """A missing GCS timestamps object is a 404 — the most likely
-    real failure mode for freshly generated audio.
-
-    FIXME: this branch returns a bare ``error`` body with no
-    ``error_code``, breaking the error contract the React app
-    branches on (prod bug in ``AudioTimestampView``).
+    real failure mode for freshly generated audio. The body
+    carries the full ``error``/``error_code`` contract the
+    React app branches on.
     """
     mock_tts_config.return_value = {
         'voice_name': 'lv-LV-Chirp3-HD-Sadachbia',
@@ -245,7 +243,8 @@ def test_gcs_not_found_returns_404(
 
     assert response.status_code == status.HTTP_404_NOT_FOUND
     body = response.json()
-    assert set(body) == {'error'}
+    assert set(body) == {'error', 'error_code'}
+    assert body['error_code'] == 'not_found'
     assert body['error'] == (
         'Timestamps not yet generated for this chapter.'
     )
@@ -265,10 +264,8 @@ def test_apibible_empty_timecodes_returns_404(
     mock_get_client, auth_client, audio_payload
 ):
     """An API.Bible audio chapter with no usable timecodes gets the
-    same 'not yet generated' 404 as a missing GCS artifact.
-
-    FIXME: bare ``error`` body — no ``error_code`` for clients
-    (same contract deviation as the GCS branch).
+    same 'not yet generated' 404 as a missing GCS artifact —
+    with the full ``error``/``error_code`` contract.
     """
     mock_client = mock_get_client.return_value
     mock_client.get_chapter_audio.return_value = audio_payload
@@ -284,13 +281,39 @@ def test_apibible_empty_timecodes_returns_404(
 
     assert response.status_code == status.HTTP_404_NOT_FOUND
     body = response.json()
-    assert set(body) == {'error'}
+    assert set(body) == {'error', 'error_code'}
+    assert body['error_code'] == 'not_found'
     assert body['error'] == (
         'Timestamps not yet generated for this chapter.'
     )
     mock_client.get_chapter_audio.assert_called_once_with(
         AUDIO_BIBLE_ID, 'JHN', 3
     )
+
+
+@pytest.mark.django_db
+@patch('bible.views.get_default_dbt_client')
+def test_dbt_null_data_returns_empty_list(
+    mock_get_client, auth_client
+):
+    """DBT answers ``{"data": null}`` for chapters it knows
+    but has no timestamps for — that must produce an empty
+    ``data`` list, not a TypeError → 502."""
+    mock_get_client.return_value.get_timestamps.return_value = {
+        "data": None
+    }
+
+    response = auth_client.get(
+        reverse('audio-timestamps'),
+        {
+            'fileset_id': 'ENGESVN2DA',
+            'book': 'John',
+            'chapter': '1',
+        },
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == {'data': []}
 
 
 @pytest.mark.django_db

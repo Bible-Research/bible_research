@@ -1693,6 +1693,12 @@ class CommentImageViewSet(viewsets.GenericViewSet):
             raise PermissionDenied(
                 "You do not have access to this comment."
             )
+        if comment.is_deleted:
+            # CommentSerializer redacts deleted comments to
+            # ``images: []`` — the nested route must honor the
+            # same tombstone contract instead of serving the
+            # signed URLs the redaction was meant to hide.
+            return Response([])
         images = Image.objects.filter(comment=comment)
         serializer = ImageSerializer(
             images, many=True, context={'request': request}

@@ -374,6 +374,20 @@ REST_FRAMEWORK = {
         'bible_research.permissions.GuestReadOnly',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # GAE's fronting load balancer appends TWO IPs to
+    # X-Forwarded-For: the client IP, then the fixed
+    # GLOBAL_FORWARDING_RULE_IP. NUM_PROXIES=2 makes DRF key
+    # throttle idents on the second-to-last entry — the real
+    # client IP — not the shared forwarding-rule IP or the
+    # client-spoofable XFF prefix.
+    'NUM_PROXIES': 2,
+    # Scoped throttle rates — only /api/token/ and
+    # /api/v1/users/register/ opt in via throttle_classes; no
+    # global DEFAULT_THROTTLE_CLASSES is configured.
+    'DEFAULT_THROTTLE_RATES': {
+        'token': '5/min',
+        'register': '10/min',
+    },
 }
 
 SPECTACULAR_SETTINGS = {
