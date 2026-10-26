@@ -42,14 +42,15 @@ class ReadingPositionApiTest(TestCase):
         )
 
     def test_upsert_second_post_updates_in_place(self):
-        """Second POST for the same book updates the row, 200 both
-        times (never 201), leaving exactly one row."""
+        """The upsert reports 201 on first create, then 200 when
+        the second POST updates the same row in place — exactly
+        one row is left."""
         resp = self.client.post(
             self.URL,
             {'book': 'John', 'chapter': 3, 'verse': 16},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 201)
         resp = self.client.post(
             self.URL,
             {'book': 'John', 'chapter': 5, 'verse': 1},
@@ -111,30 +112,81 @@ class ReadingPositionApiTest(TestCase):
         self._position(self.user, 'Genesis', chapter=1, verse=1)
         resp = self.client.post(
             self.BULK_URL,
-            {'books': ['John', 'Genesis', 'Nonexistent']},
+            {'books': ['John', 'Genesis', 'Mark']},
             format='json',
         )
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(
-            set(data), {'John', 'Genesis', 'Nonexistent'}
+            set(data), {'John', 'Genesis', 'Mark'}
         )
         self.assertEqual(data['John'], {'chapter': 3, 'verse': 16})
         self.assertEqual(
             data['Genesis'], {'chapter': 1, 'verse': 1}
         )
-        self.assertIsNone(data['Nonexistent'])
+        self.assertIsNone(data['Mark'])
+
+    def test_bulk_canonicalizes_book_names(self):
+        """bulk/ resolves names through the same tolerant lookup
+        as create: 'john' finds the canonical 'John' row."""
+        self._position(self.user, 'John', chapter=3, verse=16)
+        resp = self.client.post(
+            self.BULK_URL, {'books': ['john']}, format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.json()['john'], {'chapter': 3, 'verse': 16}
+        )
+
+    def test_bulk_rejects_unresolvable_book_400(self):
+        """A book name the tolerant lookup cannot resolve is a
+        400, not a silent null — typos must not pass silently."""
+        resp = self.client.post(
+            self.BULK_URL,
+            {'books': ['NotABook']},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['error'], 'validation_error')
 
     def test_bulk_rejects_non_list(self):
-        """bulk/ with a non-array ``books`` value returns 400 with
-        the documented error body."""
+        """bulk/ with a non-array ``books`` value returns 400 in
+        the annotations ``{'error', 'message'}`` shape."""
         resp = self.client.post(
             self.BULK_URL, {'books': 'John'}, format='json',
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(
-            resp.json(), {'error': 'books must be an array'}
+        self.assertEqual(resp.json()['error'], 'validation_error')
+        self.assertIn('array', resp.json()['message'])
+
+    def test_bulk_rejects_non_object_body(self):
+        """A top-level JSON array body parses into a list — the
+        view must 400 instead of AttributeError-ing on
+        ``request.data.get`` into a 500."""
+        resp = self.client.post(
+            self.BULK_URL, ['John'], format='json',
         )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['error'], 'validation_error')
+
+    def test_bulk_rejects_over_100_books(self):
+        """The books array is capped at 100 entries."""
+        resp = self.client.post(
+            self.BULK_URL,
+            {'books': ['John'] * 101},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['error'], 'validation_error')
+
+    def test_bulk_rejects_non_string_entries(self):
+        """Non-string book entries are a 400, not a 500."""
+        resp = self.client.post(
+            self.BULK_URL,
+            {'books': ['John', 42, None]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
 
     def test_bulk_scoped_to_user(self):
         """bulk/ never surfaces another user's positions."""
@@ -153,7 +205,7 @@ class ReadingPositionApiTest(TestCase):
             {'book': 'John', 'chapter': 3, 'verse': 16},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 201)
         data = resp.json()
         self.assertIn('id', data)
         self.assertIn('last_accessed', data)
@@ -175,6 +227,47 @@ class ReadingPositionApiTest(TestCase):
         )
         self.assertEqual(resp.status_code, 401)
 
+    def test_chapter_verse_zero_or_negative_400(self):
+        """chapter/verse are 1-indexed — 0 or negative values
+        are a 400, not silently stored."""
+        for body in (
+            {'book': 'John', 'chapter': 0, 'verse': 1},
+            {'book': 'John', 'chapter': 1, 'verse': -3},
+        ):
+            resp = self.client.post(self.URL, body, format='json')
+            self.assertEqual(
+                resp.status_code, 400, f'body={body}'
+            )
+        self.assertFalse(
+            ReadingPosition.objects.filter(
+                user=self.user
+            ).exists()
+        )
+
+    def test_chapter_and_verse_required_on_create(self):
+        """POST must carry both coordinates — omitting either is
+        a 400, not a silent 1:1. PATCH stays partial-friendly:
+        required=True is skipped under partial=True."""
+        for body in (
+            {'book': 'John'},
+            {'book': 'John', 'chapter': 3},
+            {'book': 'John', 'verse': 16},
+        ):
+            resp = self.client.post(self.URL, body, format='json')
+            self.assertEqual(
+                resp.status_code, 400, f'body={body}'
+            )
+        position = self._position(self.user, 'John')
+        resp = self.client.patch(
+            f'{self.URL}{position.id}/',
+            {'chapter': 7},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        position.refresh_from_db()
+        self.assertEqual(position.chapter, 7)
+        self.assertEqual(position.verse, 1)
+
     def test_case_variant_books_upsert_one_row(self):
         """'John' and 'john' canonicalize to the same stored
         book and upsert into ONE row — validate_book returns
@@ -185,7 +278,7 @@ class ReadingPositionApiTest(TestCase):
             {'book': 'John', 'chapter': 3, 'verse': 16},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 201)
         resp = self.client.post(
             self.URL,
             {'book': 'john', 'chapter': 5, 'verse': 1},
@@ -228,9 +321,10 @@ class ReadingPositionApiTest(TestCase):
         self.assertEqual(position.book, 'John')
         self.assertEqual(position.chapter, 7)
 
-    def test_guest_patch_delete_bulk_403(self):
-        """GuestReadOnly rejects every write by the shared 'guest'
-        account — PATCH, DELETE, and POST bulk/ all return 403."""
+    def test_guest_patch_delete_403_bulk_reads_ok(self):
+        """GuestReadOnly rejects guest PATCH/DELETE with 403 —
+        but bulk/ is a read implemented as POST, so the guest
+        account is exempted there to match GET ?book=."""
         User = get_user_model()
         guest = User.objects.create_user(
             username='guest',
@@ -249,4 +343,7 @@ class ReadingPositionApiTest(TestCase):
         resp = self.client.post(
             self.BULK_URL, {'books': ['John']}, format='json',
         )
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 200)
+        # Guest's own data only — the position belongs to
+        # self.user, so the guest sees a null entry.
+        self.assertIsNone(resp.json()['John'])

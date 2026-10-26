@@ -40,12 +40,45 @@ _ALLOWED_EXTENSIONS = {
     "image/gif": ".gif",
 }
 
+# PIL ``img.format`` → expected declared content_type. Used to
+# verify the bytes actually match the client's claim — a PNG
+# uploaded as 'image/gif' must not be stored/served as GIF.
+_FORMAT_TO_CONTENT_TYPE = {
+    "JPEG": "image/jpeg",
+    "PNG": "image/png",
+    "WEBP": "image/webp",
+    "GIF": "image/gif",
+}
+
+# Timeout (seconds) for the GCS object upload — an unbounded
+# blob.upload_from_file can pin a worker on a stalled socket.
+_UPLOAD_TIMEOUT_SECONDS = 60
+
+
+def _allowed_content_types():
+    """Allowed content types: ``_ALLOWED_EXTENSIONS`` narrowed
+    by the ``IMAGE_ALLOWED_CONTENT_TYPES`` setting (the setting
+    used to be dead code — uploads only consulted the hardcoded
+    map). Unknown/deactivated types keep their extension entry
+    so the allowlist can be trimmed without a deploy.
+    """
+    configured = getattr(
+        settings, "IMAGE_ALLOWED_CONTENT_TYPES", None
+    )
+    if configured is None:
+        return _ALLOWED_EXTENSIONS
+    return {
+        ct: ext
+        for ct, ext in _ALLOWED_EXTENSIONS.items()
+        if ct in configured
+    }
+
 _SIGNING_SCOPES = [
     "https://www.googleapis.com/auth/devstorage.read_only",
     "https://www.googleapis.com/auth/iam",
 ]
 
-# ── Module-level GCS client singleton (avoids per-request init) ───────
+# -- Module-level GCS client singleton (avoids per-request init) ---
 _client: Optional[storage.Client] = None
 _client_lock = threading.Lock()
 
@@ -65,7 +98,7 @@ def _originals_bucket() -> storage.Bucket:
     )
 
 
-# ── Credential cache (one token refresh per expiry window) ────────────
+# -- Credential cache (one token refresh per expiry window) ---------
 _credentials = None
 _credentials_lock = threading.Lock()
 
@@ -85,7 +118,7 @@ def _get_credentials():
         return _credentials
 
 
-# ── Signed URL cache (avoids N+1 refreshes in list responses) ─────────
+# -- Signed URL cache (avoids N+1 refreshes in list responses) -----
 # Bounded LRU keyed by storage_url; evicts the oldest entry when full
 # so memory cannot grow without bound on long-running workers.
 _SIGNED_URL_SAFETY_MARGIN_SECONDS = 60
@@ -110,13 +143,14 @@ def upload_original(
     content_type = getattr(
         django_uploaded_file, "content_type", ""
     ) or ""
-    if content_type not in _ALLOWED_EXTENSIONS:
+    allowed = _allowed_content_types()
+    if content_type not in allowed:
         raise UnsupportedMediaType(
             content_type,
             detail=(
                 f"Unsupported image type '{content_type}'. "
                 f"Allowed: "
-                f"{', '.join(_ALLOWED_EXTENSIONS)}."
+                f"{', '.join(allowed)}."
             ),
         )
 
@@ -135,18 +169,39 @@ def upload_original(
     try:
         img = PILImage.open(django_uploaded_file)
         img.verify()
+    except PILImage.DecompressionBombError:
+        # Legit format, hostile size — the right status is
+        # 413 (payload too large), not 415 (bad media type).
+        raise FileTooLarge(
+            "Image dimensions exceed the decompression "
+            "bomb limit."
+        )
     except Exception:
         raise UnsupportedMediaType(
             content_type,
             detail=(
                 "File content is not a valid image. "
                 "Allowed: "
-                f"{', '.join(_ALLOWED_EXTENSIONS)}."
+                f"{', '.join(allowed)}."
             ),
         )
     django_uploaded_file.seek(0)
 
-    ext = _ALLOWED_EXTENSIONS[content_type]
+    # Verify the declared MIME type against the actual image
+    # format — the stored/served content_type must describe
+    # the real bytes.
+    actual = _FORMAT_TO_CONTENT_TYPE.get(img.format or "")
+    if actual != content_type:
+        raise UnsupportedMediaType(
+            content_type,
+            detail=(
+                f"Content-Type '{content_type}' does not "
+                f"match the image bytes "
+                f"({img.format or 'unknown'})."
+            ),
+        )
+
+    ext = allowed[content_type]
     object_name = f"originals/{image_id}/source{ext}"
 
     bucket = _originals_bucket()
@@ -154,6 +209,7 @@ def upload_original(
     blob.upload_from_file(
         django_uploaded_file,
         content_type=content_type,
+        timeout=_UPLOAD_TIMEOUT_SECONDS,
     )
 
     gs_uri = f"gs://{bucket.name}/{object_name}"

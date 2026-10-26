@@ -889,6 +889,14 @@ Content-Type: application/json
 }
 ```
 
+`parent_tag` must be one of the caller's own tags — a foreign
+or nonexistent tag id returns `400` (PKRF validation).
+Names are trimmed of surrounding whitespace, and a top-level
+tag name must be unique per user: creating or renaming to a
+duplicate returns `400` on the `name` field (backed by the
+`unique_top_level_tag_name_per_user` conditional constraint).
+The same name under different parents remains allowed.
+
 #### Update Tag
 ```
 PUT /api/v1/tags/{tag_id}/
@@ -899,6 +907,10 @@ Content-Type: application/json
   "name": "Divine Love"
 }
 ```
+
+Re-parenting is validated against cycles: a tag cannot be its
+own parent nor be moved underneath one of its own descendants
+(both return `400`).
 
 #### Delete Tag
 ```
@@ -1075,7 +1087,15 @@ Content-Type: application/json
 
 Note creation is atomic: if any `verse_references` entry fails to
 resolve, the request returns `400` and no note or verse links are
-persisted.
+persisted. Repeated entries in `verse_references` are silently
+deduplicated before linking (book match is case-insensitive), and
+`tag_position` is read-only on this endpoint — ordering is
+managed exclusively by `notes/reorder/` and `notes/move/`.
+
+Bulk creation goes through `POST /api/v1/notes/bulk/` with
+`{"tag_id": "TAG...", "notes": [...]}` — up to 100 notes per
+request (`400` beyond that), returning `201` with the created
+notes.
 
 #### Get Note by ID
 ```
@@ -1171,6 +1191,8 @@ ascending, nulls last, `-created_at` tiebreak — identical to
 every note's rank + passage at once (e.g. a "move note"
 dropdown listing 1-based order IDs), without paging through
 full note payloads. Anonymous callers see only public notes.
+`tag_id=untagged` resolves the sentinel to notes with no tag,
+matching `GET /notes/` and `/comments/counts/` semantics.
 
 **Response**:
 ```json
@@ -1287,10 +1309,13 @@ requester sees comments only on their own notes or on public
 notes. Any operation against a note outside that scope
 returns `404`, identical to a nonexistent note, so private
 note existence is not leaked. Any authenticated user may
-comment on a public note; updating or deleting a comment
-remains restricted to its author (`403` otherwise). Reads
-require no token (anonymous callers see public-note
-comments); writes require authentication.
+comment on a public note; updating a comment is restricted
+to its author (`403` otherwise), while deleting is allowed
+for the author **or the note's owner** (the note owner
+moderates discussion on their own note, mirroring
+`DELETE /images/{id}/`). `content` is capped at 10000
+characters. Reads require no token (anonymous callers see
+public-note comments); writes require authentication.
 
 Soft-delete contract: `DELETE` sets `is_deleted=True` and
 clears `content`, but the row is retained so reply threads
@@ -1303,7 +1328,10 @@ never returns `404` for a deleted comment.
 PATCH may only change `content`: `is_deleted` is read-only
 (deletion happens exclusively via `DELETE` and cannot be
 undone), and `parent_comment` is create-only — sending it on
-update returns `400`.
+update returns `400`. Tombstones are immutable: `PATCH` on a
+deleted comment returns `400`, and `POST` with a
+`parent_comment` pointing at a deleted comment also returns
+`400` — a reply cannot hang off a `[deleted]` stub.
 
 ### Note & Comment Images
 ```
@@ -1321,16 +1349,25 @@ author may upload. On both nested routes the parent note or
 comment is resolved through `get_accessible_notes_qs`, so an
 inaccessible (private foreign) parent returns `404` —
 identical to a nonexistent one — instead of a 403 that would
-leak its existence. `DELETE /images/{id}/` is allowed for the
-uploader, the parent note's owner, or the parent comment's
-author. A soft-deleted comment's image list returns `[]`
-(the same tombstone contract as the comment payload itself —
-its images are never exposed via the nested route).
+leak its existence. `DELETE /images/{id}/` returns `404`
+unless the requester may delete it — uploader, parent note's
+owner, or parent comment's author — so the endpoint leaks no
+existence oracle.
+
+Upload validation: the declared `Content-Type` must match the
+actual image bytes (Pillow format check — `415` on mismatch),
+and images tripping the decompression-bomb limit return `413`.
+Uploading to a soft-deleted comment is rejected (`400`).
+
+Every `Image` row deletion — including note/tag/user cascade
+deletes — removes its GCS object via a `post_delete`
+receiver, so blobs are never orphaned.
 
 ### Reading Positions
 ```
 GET    /api/v1/reading-positions/
 POST   /api/v1/reading-positions/
+POST   /api/v1/reading-positions/bulk/
 PATCH  /api/v1/reading-positions/{id}/
 DELETE /api/v1/reading-positions/{id}/
 Authorization: Token <your-token>
@@ -1343,7 +1380,20 @@ through the book-name lookup and stored canonicalized
 `John` row), so case variants can never fork duplicate
 positions. `book` is immutable afterwards — `PATCH` with a
 different book returns `400`; re-seat a position via
-delete + create instead.
+delete + create instead. The upsert returns `201` when a
+row is created and `200` when an existing row is updated.
+
+`POST /reading-positions/bulk/` is a read implemented as
+POST (the book list belongs in a body): `{"books": ["John",
+"Genesis"]}` → `{"John": {"chapter": 3, "verse": 16},
+"Genesis": null, ...}` — keys echo the names the client
+sent, values are null for books with no stored position.
+Names go through the same tolerant lookup as create
+(unresolvable names return `400`); the array is capped at
+100 entries. Because it is a read, the legacy `guest`
+account may call it — matching `GET ?book=` — while every
+other write still returns `403` for guest and `401`
+anonymously.
 
 ---
 
@@ -1372,6 +1422,12 @@ class Tag(models.Model):
 
 **Constraints**:
 - Unique combination of (user, name, parent_tag) for child tags
+- `unique_top_level_tag_name_per_user`: conditional
+  `UniqueConstraint(user, name)` where `parent_tag IS NULL` —
+  `unique_together` cannot cover NULL parents. Declared in the
+  model and enforced application-side by `TagSerializer`;
+  **migration not yet generated** (`python manage.py
+  makemigrations` is a required human step).
 
 ### Note Model
 ```python
@@ -1394,6 +1450,12 @@ class NoteVerse(models.Model):
     verse = ForeignKey(Verse, on_delete=PROTECT)
     created_at = DateTimeField(auto_now_add=True)
 ```
+
+**Constraints** (both declared, pending `makemigrations`):
+- `unique_note_verse_link` on NoteVerse: one link per
+  (note, verse).
+- `unique_book_chapter_verse` on Verse: one row per
+  (book, chapter, verse).
 
 ---
 
