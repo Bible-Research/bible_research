@@ -2,6 +2,9 @@
 
 import logging
 
+from bible.utils.provider_errors import (
+    capture_provider_exception,
+)
 from .fileset_groups import group_filesets
 from .providers import (
     ApiBibleProvider,
@@ -69,6 +72,11 @@ class TranslationService:
             logger.error(
                 "DBT API Error fetching translations: %s", e, exc_info=True
             )
+            # The DBT outage degrades to registry-only listings
+            # instead of failing the request, so it never reaches
+            # Sentry's uncaught-exception path — trend it like
+            # any other provider failure (warning level).
+            capture_provider_exception(e)
 
         registry_entries = []
         for provider_cls in _REGISTRY_PROVIDERS:

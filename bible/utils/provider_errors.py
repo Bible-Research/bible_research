@@ -122,6 +122,25 @@ def provider_error_fields(
 _CAPTURED_ERROR_CODES = frozenset({'rate_limited', 'provider_error'})
 
 
+def _sentry_capture(exc, error_code, level):
+    """Send *exc* to Sentry tagged ``error_code`` at *level*.
+
+    No-ops when sentry-sdk is not installed or no ``SENTRY_DSN``
+    was configured at startup (the SDK is then uninitialized and
+    ``capture_exception`` does nothing). The exception object is
+    passed, never a formatted string — consistent with
+    ``provider_error_fields`` keeping ``str(exc)`` out of
+    responses because it can embed credential-bearing URLs.
+    """
+    try:
+        import sentry_sdk
+    except ImportError:
+        return
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag('error_code', error_code)
+        sentry_sdk.capture_exception(exc, level=level)
+
+
 def capture_provider_exception(exc, error_code=None):
     """Send an upstream provider failure to Sentry, when enabled.
 
@@ -131,22 +150,24 @@ def capture_provider_exception(exc, error_code=None):
     user-input outcomes — ``not_found`` (``PassageNotFoundError``
     or upstream 404, i.e. typos) and ``book_not_in_fileset`` — are
     never sent.
-
-    No-ops when sentry-sdk is not installed or no ``SENTRY_DSN``
-    was configured at startup (the SDK is then uninitialized and
-    ``capture_exception`` does nothing). The exception object is
-    passed, never a formatted string — consistent with
-    ``provider_error_fields`` keeping ``str(exc)`` out of
-    responses because it can embed credential-bearing URLs.
     """
     if error_code is None:
         error_code = provider_error_fields(exc)['error_code']
     if error_code not in _CAPTURED_ERROR_CODES:
         return
-    try:
-        import sentry_sdk
-    except ImportError:
-        return
-    with sentry_sdk.new_scope() as scope:
-        scope.set_tag('error_code', error_code)
-        sentry_sdk.capture_exception(exc, level='warning')
+    _sentry_capture(exc, error_code, 'warning')
+
+
+def capture_internal_exception(exc):
+    """Send a genuine server-side failure to Sentry, when enabled.
+
+    ``DjangoIntegration`` only reports *uncaught* exceptions, so
+    a bug caught by a view's catch-all — or our own
+    infrastructure failing behind a degraded field (e.g. GCS
+    signed-URL generation) — stays invisible unless reported
+    explicitly. These are real bugs and outages, not routine
+    upstream blips, so they are captured at ``error`` level under
+    the ``internal_error`` code the 500 catch-all already
+    returns.
+    """
+    _sentry_capture(exc, 'internal_error', 'error')

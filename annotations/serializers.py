@@ -12,6 +12,7 @@ from bible.utils.bible_books import (
     get_dbt_book_id,
 )
 from bible.utils.provider_errors import (
+    capture_internal_exception,
     capture_provider_exception,
     provider_error_fields,
 )
@@ -819,7 +820,13 @@ class ImageSerializer(serializers.ModelSerializer):
                 signed_image_url,
             )
             return signed_image_url(obj.id, obj.storage_url)
-        except Exception:
+        except Exception as e:
+            # Signing runs on our credentials against our
+            # bucket — a failure is our infrastructure breaking
+            # (or a code bug), not a routine upstream blip, so
+            # it reports at error level like a genuine 500. The
+            # field still degrades to None for the client.
+            capture_internal_exception(e)
             return None
 
 
