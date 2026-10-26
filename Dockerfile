@@ -13,14 +13,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# collectstatic needs a minimal config.yaml (build-time only)
-RUN printf 'SECRET_KEY: "build"\nDEBUG: false\n' > config.yaml \
-    && printf 'DBT_KEY: ""\nESV_KEY: ""\n' >> config.yaml \
-    && printf 'DATABASES:\n  default:\n' >> config.yaml \
-    && printf '    ENGINE: django.db.backends.sqlite3\n' >> config.yaml \
-    && printf '    NAME: ":memory:"\n' >> config.yaml \
+# collectstatic needs a minimal .env (build-time only)
+RUN printf 'SECRET_KEY=build\nDEBUG=False\nDATABASE_URL=sqlite:///:memory:\n' > .env \
     && python manage.py collectstatic --noinput \
-    && rm config.yaml
+    && rm .env
 
 ENV PORT=8080
 EXPOSE 8080

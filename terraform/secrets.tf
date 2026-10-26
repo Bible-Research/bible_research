@@ -1,15 +1,10 @@
-# Secrets are managed in GCP; Terraform only reads metadata
-# (matches remote state).
-data "google_secret_manager_secret" "app" {
-  for_each = toset([
-    "DJANGO_SECRET_KEY",
-    "DBT_KEY",
-    "ESV_KEY",
-    "DATABASE_URL",
-    "DB_SSL_CERT",
-    "SENTRY_DSN",
-  ])
-
+# Secrets are managed in GCP; Terraform only reads metadata (matches
+# remote state). All app secrets are consolidated into a single
+# ``env-file`` secret holding the full .env contents — settings.py
+# loads it via DOTENV injection (Cloud Run) or one get_secret() call
+# (App Engine). The legacy per-key secrets can be deleted once every
+# consumer has migrated.
+data "google_secret_manager_secret" "env_file" {
   project   = var.project_id
-  secret_id = each.value
+  secret_id = "env-file"
 }

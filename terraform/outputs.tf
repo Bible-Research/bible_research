@@ -33,8 +33,9 @@ output "terraform_state_bucket" {
   value = google_storage_bucket.terraform_state.url
 }
 
-output "secret_ids_observed" {
-  value = sort(keys({ for k, v in data.google_secret_manager_secret.app : k => true }))
+output "env_file_secret_id" {
+  description = "Secret Manager id of the consolidated .env secret"
+  value       = data.google_secret_manager_secret.env_file.secret_id
 }
 
 output "bible_audio_bucket" {
