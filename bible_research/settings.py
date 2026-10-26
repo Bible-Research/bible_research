@@ -17,6 +17,8 @@ import textwrap
 
 import dj_database_url
 
+from .dotenv import load_dotenv, load_dotenv_file
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -92,7 +94,6 @@ WSGI_APPLICATION = 'bible_research.wsgi.application'
 #   4. Local dev — ``.env`` next to manage.py, else the legacy
 #      ``config.yaml`` (kept for backwards compatibility).
 # Parsed values use setdefault semantics — real env vars always win.
-from .dotenv import load_dotenv, load_dotenv_file
 
 IS_GCP_ENVIRONMENT = (
     os.environ.get('GAE_APPLICATION') is not None
