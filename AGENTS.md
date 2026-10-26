@@ -5,7 +5,7 @@ editing; trust the code over any doc that disagrees with it.
 
 ## What this is
 
-Django 5.2 + Django REST Framework API serving a Bible reading/study
+Django 6.1 + Django REST Framework API serving a Bible reading/study
 app (`reactive-bible` frontend). Deployed on Google App Engine at
 `https://bible-research-489314.ey.r.appspot.com`; PostgreSQL in prod.
 Local dev's `config.yaml` also points at prod via a read-only user;
@@ -16,7 +16,7 @@ tests run on SQLite.
 - `bible/` — passage text, audio, search, translations, timestamps.
 - `annotations/` — notes, tags, comments, images, reading positions.
 - `users/` — auth/token endpoints.
-- `bible_research/` — settings, urls, middleware, authentication.
+- `bible_research/` — settings, urls, authentication.
 - `terraform/` — GCP infra (Cloud Run job, storage; see note below).
 - `config.yaml` — local secrets (gitignored). Tests do NOT need it.
 
@@ -199,13 +199,12 @@ source venv/bin/activate
 python -m pytest annotations/tests.py -q   # or a single class
 ```
 
-conftest.py configures Django settings for pytest; tests run on
-SQLite in-memory — no `config.yaml`, no DB setup needed, and they
-never touch the production database. `manage.py test` also stays
-off prod: `settings.py` overrides `DATABASES` to local SQLite
+conftest.py imports the real `bible_research.settings` and
+overrides only the test deltas; tests run on SQLite in-memory —
+no `config.yaml`, no DB setup needed, and they never touch the
+production database. `manage.py test` also stays off prod:
+`settings.py` overrides `DATABASES` to local SQLite
 (`db.sqlite3`) whenever `'test'` is in `sys.argv`.
-`bible/services/dbt/dbt_integration_test.py` hits the live DBT API —
-skip unless you have a real `DBT_KEY`.
 
 Test user accounts: `testuser`, `guest` — create via
 `python scripts/create_test_user.py` if a local DB lacks them
@@ -253,5 +252,11 @@ resolved:
   stage only files you changed.
 - `terraform/scheduler.tf`: the monthly TTS Cloud Scheduler is
   intentionally commented out — do NOT enable it.
-- Stale docs: `DEVELOPER_GUIDE.md` still references Django 4.2.6 and
-  older structure; this file is the source of truth for agents.
+- Dependencies: `requirements.txt` pins the runtime stack to
+  the versions installed in `venv/` (verify with `pip freeze`);
+  `requirements-dev.txt` adds pytest/pytest-django/debugpy.
+- `bible/services/dbt/dbt_client/` is a slimmed vendored
+  OpenAPI client imported via a `sys.path` append in
+  `dbt/client.py` — not a pip package; don't add it to
+  requirements or remove the path patch.
+- If docs and code disagree, the code wins — fix the doc.

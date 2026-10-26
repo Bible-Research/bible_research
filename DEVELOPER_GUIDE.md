@@ -34,7 +34,7 @@ frontend repository will consume this API.
 ## Architecture
 
 ### Technology Stack
-- **Framework**: Django 5.2
+- **Framework**: Django 6.1
 - **API**: Django REST Framework
 - **Database**: PostgreSQL (production) / SQLite (development)
 - **External APIs**: DBT API v4, ESV API (api.esv.org),
@@ -147,7 +147,7 @@ bible_research/
 ## Getting Started
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.12
 - PostgreSQL (for production) or SQLite (for development)
 - DBT API key (from [Bible Brain][bible-brain])
 
@@ -167,8 +167,12 @@ bible_research/
 
 3. **Install dependencies**
    ```bash
-   pip install -r requirements.txt
+   pip install -r requirements-dev.txt
    ```
+   `requirements-dev.txt` pulls in the pinned
+   `requirements.txt` runtime stack plus dev-only tools
+   (pytest, pytest-django, debugpy). Production installs
+   `requirements.txt` alone.
 
 4. **Configure the application**
    ```bash
@@ -1733,14 +1737,16 @@ python manage.py migrate annotations 0001
 
 ### Logging
 
-Logs are stored in `logs/` directory (development only):
-- `django.log` - General Django logs
-- `bible.log` - Bible app logs
-- `annotations.log` - Annotations app logs
+Logs are stored in `logs/` directory (local development only —
+cloud filesystems are read-only, so production logs go to the
+console):
+- `debug.log` - `django`, `bible`, `annotations`, and `users`
+  records at INFO and above
+- `error.log` - ERROR-level records from the same loggers
 
 **View logs**:
 ```bash
-tail -f logs/django.log
+tail -f logs/debug.log
 ```
 
 ---
@@ -1863,12 +1869,6 @@ pg_restore -d bibledb --clean --if-exists \
 
 To run the app against the restored copy, repoint `config.yaml`'s
 `DATABASES.default` at the local database.
-
-### Vercel Deployment
-
-The project includes Vercel configuration:
-- `vercel.json` - Vercel settings
-- `build_files.sh` - Build script
 
 ### Production Checklist
 
