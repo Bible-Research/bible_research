@@ -2,11 +2,13 @@
 from urllib.parse import urlparse
 
 # Auth endpoints whose request bodies carry credentials (token
-# login at ``/api/token/``, registration under ``/api/v1/users/``).
+# login at ``/api/token``, registration under ``/api/v1/users/``).
 # ``sentry_before_send`` strips the parsed body for these paths so
-# passwords can never reach Sentry.
+# passwords can never reach Sentry. ``/api/token`` is matched as a
+# bare prefix so both the slash-less and trailing-slash variants
+# (and any nested token endpoints) are covered.
 _SENSITIVE_PATH_PREFIXES = (
-    '/api/token/',
+    '/api/token',
     '/api/v1/users/',
 )
 
@@ -20,7 +22,9 @@ def sentry_before_send(event, hint):
     denylist/server-side scrubbers. URL, method, and headers are
     kept so the event stays debuggable.
     """
-    request = event.get('request') or {}
+    request = event.get('request')
+    if not isinstance(request, dict):
+        return event
     path = urlparse(request.get('url') or '').path
     if path.startswith(_SENSITIVE_PATH_PREFIXES):
         request.pop('data', None)

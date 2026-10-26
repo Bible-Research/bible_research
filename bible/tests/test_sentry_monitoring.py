@@ -111,6 +111,23 @@ class SentryBeforeSendTests(TestCase):
         self.assertNotIn('data', event['request'])
         self.assertEqual(event['request']['method'], 'POST')
 
+    def test_token_endpoint_without_slash_body_is_dropped(self):
+        event = sentry_before_send(
+            self._event('https://api.example.com/api/token'), None
+        )
+
+        self.assertNotIn('data', event['request'])
+
+    def test_token_endpoint_query_string_body_is_dropped(self):
+        event = sentry_before_send(
+            self._event(
+                'https://api.example.com/api/token/?next=/admin'
+            ),
+            None,
+        )
+
+        self.assertNotIn('data', event['request'])
+
     def test_user_register_body_is_dropped(self):
         event = sentry_before_send(
             self._event(
@@ -132,3 +149,8 @@ class SentryBeforeSendTests(TestCase):
 
     def test_missing_request_block_is_tolerated(self):
         self.assertEqual(sentry_before_send({}, None), {})
+
+    def test_non_dict_request_block_is_tolerated(self):
+        event = {'request': 'not-a-dict'}
+
+        self.assertIs(sentry_before_send(event, None), event)

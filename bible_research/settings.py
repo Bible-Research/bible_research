@@ -282,8 +282,10 @@ if SENTRY_DSN:
         # keeps IPs/usernames off events as well.
         before_send=sentry_before_send,
         send_default_pii=False,
+        # The legacy Vercel path deploys the same production API.
         environment=(
-            'production' if IS_GCP_ENVIRONMENT else 'development'
+            'production' if IS_GCP_ENVIRONMENT or IS_VERCEL
+            else 'development'
         ),
         # GAE sets GAE_VERSION per deploy — free release tracking
         # with no CI changes.
