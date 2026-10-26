@@ -72,3 +72,38 @@ def provider_error_fields(exc: Exception) -> Dict[str, str]:
         ),
         'error_code': 'provider_error',
     }
+
+
+# Only upstream outages are worth trending in Sentry; codes for
+# routine user-input outcomes are deliberately excluded.
+_CAPTURED_ERROR_CODES = frozenset({'rate_limited', 'provider_error'})
+
+
+def capture_provider_exception(exc, error_code=None):
+    """Send an upstream provider failure to Sentry, when enabled.
+
+    ``rate_limited`` and ``provider_error`` failures are upstream
+    outages worth trending, so they are tagged with ``error_code``
+    and captured at ``warning`` level. Codes for routine
+    user-input outcomes — ``not_found`` (``PassageNotFoundError``
+    or upstream 404, i.e. typos) and ``book_not_in_fileset`` — are
+    never sent.
+
+    No-ops when sentry-sdk is not installed or no ``SENTRY_DSN``
+    was configured at startup (the SDK is then uninitialized and
+    ``capture_exception`` does nothing). The exception object is
+    passed, never a formatted string — consistent with
+    ``provider_error_fields`` keeping ``str(exc)`` out of
+    responses because it can embed credential-bearing URLs.
+    """
+    if error_code is None:
+        error_code = provider_error_fields(exc)['error_code']
+    if error_code not in _CAPTURED_ERROR_CODES:
+        return
+    try:
+        import sentry_sdk
+    except ImportError:
+        return
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag('error_code', error_code)
+        sentry_sdk.capture_exception(exc, level='warning')

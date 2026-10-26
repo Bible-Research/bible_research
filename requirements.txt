@@ -5,6 +5,7 @@ django-cors-headers
 djangorestframework
 drf-spectacular
 requests
+sentry-sdk>=2.71.0,<3
 pysword
 pycountry
 psycopg2-binary==2.9.13

@@ -24,6 +24,7 @@ from bible.services.sword.registry import (
 from bible.services.storage import gcs
 from bible.utils.provider_errors import (
     PassageNotFoundError,
+    capture_provider_exception,
     provider_error_fields,
 )
 
@@ -409,9 +410,13 @@ class BiblePassageSerializer(serializers.Serializer):
             }
         except Exception as e:
             logger.exception(f"Error fetching Bible passage: {e}")
+            fields = provider_error_fields(e)
+            # Report upstream outages to Sentry (no-op for
+            # not_found and when Sentry is not configured).
+            capture_provider_exception(e, fields['error_code'])
             return {
                 'book': book_id,
                 'book_name': book_name,
                 'chapter': chapter,
-                **provider_error_fields(e),
+                **fields,
             }

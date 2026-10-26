@@ -10,7 +10,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from bible.utils.bible_books import get_dbt_book_id
-from bible.utils.provider_errors import provider_error_fields
+from bible.utils.provider_errors import (
+    capture_provider_exception,
+    provider_error_fields,
+)
 from bible.services.apibible.registry import (
     get_apibible_meta,
     is_apibible_fileset,
@@ -144,6 +147,9 @@ def provider_error_response(exc):
     query param) — never reaches the response body.
     """
     fields = provider_error_fields(exc)
+    # Trend upstream outages in Sentry (warning-level, tagged with
+    # error_code); no-ops for not_found and when Sentry is off.
+    capture_provider_exception(exc, fields['error_code'])
     return Response(
         fields,
         status=PROVIDER_ERROR_STATUSES.get(

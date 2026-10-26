@@ -10,12 +10,16 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
 import textwrap
 
 import dj_database_url
+from corsheaders.defaults import default_headers
+
+from .utils import sentry_before_send
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -53,6 +57,15 @@ MIDDLEWARE = [
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
+
+# Let Sentry's distributed-tracing headers through CORS preflight
+# so frontend errors correlate with backend traces (the default
+# header safelist does not include them).
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    'sentry-trace',
+    'baggage',
+)
 
 # Allow all Vercel automatically deployed PR preview origins
 CORS_ALLOWED_ORIGIN_REGEXES = [
@@ -223,6 +236,60 @@ if 'test' in sys.argv:
             'NAME': BASE_DIR / 'db.sqlite3',
         }
     }
+
+# --- Sentry error monitoring ---
+# The DSN is optional in every environment: absent or empty leaves
+# the SDK uninitialized (a complete no-op), so local dev, CI, and a
+# production deploy made before the secret exists all stay silent.
+SENTRY_DSN = None
+if IS_GCP_ENVIRONMENT:
+    # Env var first, then Secret Manager — the same graceful
+    # pattern as API_BIBLE_KEY. The SENTRY_DSN secret may not
+    # exist yet, so the lookup must never break startup.
+    SENTRY_DSN = os.environ.get('SENTRY_DSN')
+    if not SENTRY_DSN:
+        try:
+            SENTRY_DSN = get_secret('SENTRY_DSN')
+        except Exception:
+            SENTRY_DSN = None
+elif IS_VERCEL:
+    SENTRY_DSN = os.environ.get('SENTRY_DSN')
+else:
+    SENTRY_DSN = _audio_settings_source.get('SENTRY_DSN')
+
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+    from sentry_sdk.integrations.logging import LoggingIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[
+            DjangoIntegration(),
+            # INFO+ log records become breadcrumbs but are NOT
+            # turned into events — existing code logs routine
+            # user-input validation at ERROR, which would flood
+            # the project with non-bugs. Real failures reach
+            # Sentry via DjangoIntegration (unhandled 500s) and
+            # explicit capture_exception calls.
+            LoggingIntegration(
+                level=logging.INFO,
+                event_level=None,
+            ),
+        ],
+        # Auth-endpoint request bodies carry passwords —
+        # sentry_before_send drops them; send_default_pii=False
+        # keeps IPs/usernames off events as well.
+        before_send=sentry_before_send,
+        send_default_pii=False,
+        environment=(
+            'production' if IS_GCP_ENVIRONMENT else 'development'
+        ),
+        # GAE sets GAE_VERSION per deploy — free release tracking
+        # with no CI changes.
+        release=os.environ.get('GAE_VERSION'),
+        traces_sample_rate=0.1,
+    )
 
 # Audio / Cloud TTS settings are resolved from a single source per
 # environment (os.environ in cloud branches, the parsed config.yaml

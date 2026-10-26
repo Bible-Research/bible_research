@@ -20,6 +20,7 @@ from bible.services.sword.registry import is_sword_fileset
 from bible.utils.bible_books import get_dbt_book_id
 from bible.utils.provider_errors import (
     PassageNotFoundError,
+    capture_provider_exception,
     provider_error_fields,
 )
 from .models import (
@@ -506,7 +507,11 @@ class NoteSerializer(serializers.ModelSerializer):
             logger.exception(f"Error fetching verses/headings: {e}")
             # Surface the provider failure to clients while
             # keeping the verse references for display.
-            representation.update(provider_error_fields(e))
+            fields = provider_error_fields(e)
+            # Report upstream outages to Sentry (no-op for
+            # not_found and when Sentry is not configured).
+            capture_provider_exception(e, fields['error_code'])
+            representation.update(fields)
             for verse in verses:
                 verses_with_text.append({
                     'book': book_name,
