@@ -78,6 +78,39 @@ license metadata, API.Bible filesets fetch the live statement
 from the matching text/audio bible, and everything else
 proxies DBT.
 
+### Caching
+
+The app uses a process-local Django cache (`CACHES` → locmem;
+fine on the single-instance App Engine F1 — swap for
+Memcached/Redis if a second instance is ever added). It backs
+DRF throttling and these provider-data caches:
+
+- `GET /api/v1/bible/translations/` — the whole response is
+  cached per `language_iso` for 6 h and carries
+  `Cache-Control: public, max-age=21600`. A DBT outage returns
+  the registry-only list with `"degraded": true`, which is
+  never cached (`Cache-Control: no-store`). Error responses
+  are not cached either.
+- `GET /api/v1/bible/copyright/` — cached per
+  `(provider, bible_id)` for 24 h (copyright text is static)
+  with `Cache-Control: public, max-age=86400`.
+- `read_timestamps_json` (GCS `_timestamps.json` sidecars) —
+  cached per `(fileset, voice, book, chapter, mode)` for 24 h;
+  the artifact is nominally immutable (the generator only
+  writes chapters that lack one). On overwrite the writer
+  deletes the cache entry in its own process only — the
+  generator runs as a Cloud Run job, separate from the App
+  Engine serving process, so a re-generated chapter can serve
+  stale data until the TTL expires or the service restarts.
+  The timestamps endpoint and the passage audio path share this
+  cache. Misses are never cached, so a chapter becomes
+  available as soon as its artifact is generated.
+- Signed audio URLs (`gcs.signed_audio_url`) live in a bounded
+  in-process LRU (2048 entries, evicts oldest), expiring 60 s
+  before the URL's real TTL.
+
+All cache keys carry a `v1:` namespace prefix.
+
 ### Project Structure
 ```
 bible_research/
@@ -518,6 +551,28 @@ license terms. Audio responses return API.Bible's presigned
 `resourceUrl`, which expires (typically within minutes); treat
 it like any other short-lived signed URL.
 
+**Text-vs-audio capability matrix** — providers disagree on
+what a mismatched `response_format` means, and the endpoint
+relays each provider's answer rather than normalizing it:
+
+- `text` on an audio fileset:
+  - DBT (`*DA` id) → `format:"audio"` payload — the audio
+    fileset has no text rows to return.
+  - SWORD (`LVSGLU8C1DA`/`C2DA`), API.Bible (`ENGNIVC1DA`) →
+    chapter text (the audio id canonicalizes to the provider's
+    text resource).
+  - ESV has no separate audio fileset id — `ENGESV_API`
+    serves both formats, so the mismatch cannot arise.
+- `audio` on a text fileset:
+  - DBT → 404 `book_not_in_fileset`.
+  - ESV, SWORD, API.Bible → chapter audio URL (the same id's
+    audio resource: ESV API audio, the generated TTS sibling,
+    or the paired API.Bible audio bible).
+
+Callers should always branch on the returned `format` field,
+not on the requested `response_format`, and treat 404
+`book_not_in_fileset` as "try another fileset".
+
 **Error contract** — when the requested book/chapter is not
 covered by the fileset, the endpoint returns HTTP 404 with a
 stable error code (for both text and audio requests) so clients
@@ -619,6 +674,15 @@ GET /api/v1/bible/translations/
 }
 ```
 
+**Degraded mode** — the response merges the live DBT `/bibles`
+list with bundled registry translations (ESV API, API.Bible NIV,
+SWORD), deduplicated by `abbr`. If the DBT fetch fails the
+request still returns `200` with the registry-only list and
+`"degraded": true` (`Cache-Control: no-store`); any other
+failure keeps the `502`/`provider_error` contract. Successful
+responses are cached per `language_iso` for 6 h (see
+*Caching*); the DBT listing itself is truncated at 500 rows.
+
 **Normalized options** — each translation also carries
 `text_options` (at most one entry, `kind: "text"`) and
 `audio_options` (one per listening experience; `kind` is
@@ -709,7 +773,8 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
   `offset`-based pagination
 - `limit`: Max results per page (default 15)
 - `page`: Result page number (default 1)
-- `sort_by`: Sort field (DBT only)
+- `sort_by`: Sort field (DBT only — forwarded on every paged
+  and grouped upstream call)
 - `books`: Comma-separated USFM book IDs (e.g. `JHN,ROM`);
   honored for DBT and SWORD only — the ESV API has no book
   filter
@@ -740,6 +805,13 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
   }
 }
 ```
+`meta.pagination` is always present for every provider — fields
+a provider omits fall back to locally-known values.
+`chapter`/`verse_start` are always real integers. For SWORD
+filesets the local scan stops once enough matches fill the
+requested page; `meta.truncated: true` then marks
+`total`/`total_pages` as lower bounds — keep paging while it
+is set.
 
 **Grouped mode** (`group_by=book`) fetches all matches and
 returns them bucketed per book in canonical order. Verses
@@ -770,8 +842,8 @@ within each group are sorted by chapter and verse:
 ```
 `meta.total` is the provider-reported match count (number
 scanned for SWORD). `meta.truncated` is true when a safety cap
-cut results off (5000 results for DBT, 30 pages for ESV;
-SWORD is never truncated).
+cut results off (5000 results for DBT/API.Bible/SWORD, 30 pages
+for ESV).
 
 ### Tags
 

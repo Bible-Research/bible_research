@@ -310,3 +310,161 @@ def test_apibible_abbr_canonicalizes_to_text_bible(
     assert entry['copyright'] == 'Copyright Biblica'
     mock_get_client.return_value.get_bible \
         .assert_called_once_with(APINIV_BIBLE_ID)
+
+
+# --- audio fileset branch (copyright #5/#7) ----------------------
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_apibible_client')
+def test_apibible_audio_fileset_reads_audio_bible(
+    mock_get_client, client
+):
+    """``ENGNIVC1DA`` must read the *audio* bible's copyright —
+    with ``type: "audio"`` — not echo the text bible's."""
+    mock_get_client.return_value.get_bible.return_value = {
+        'copyrightStatement': 'Copyright Listener Audio',
+    }
+
+    response = client.get(
+        COPYRIGHT_URL, {'bible_id': 'ENGNIVC1DA'}
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    entry = response.json()['data'][0]
+    assert entry['id'] == 'ENGNIVC1DA'
+    assert entry['type'] == 'audio'
+    assert entry['copyright'] == 'Copyright Listener Audio'
+    mock_get_client.return_value.get_bible \
+        .assert_called_once_with(
+            get_apibible_meta('ENGNIV_API')['audio_bible_id']
+        )
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_apibible_client')
+def test_apibible_copyright_falls_back_to_copyright_key(
+    mock_get_client, client
+):
+    """Bibles whose payload lacks ``copyrightStatement`` fall
+    back to the plain ``copyright`` field."""
+    mock_get_client.return_value.get_bible.return_value = {
+        'copyright': 'Plain copyright field',
+    }
+
+    response = client.get(
+        COPYRIGHT_URL, {'bible_id': 'ENGNIV_API'}
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()['data'][0]['copyright'] == (
+        'Plain copyright field'
+    )
+
+
+# --- response caching (S7 / copyright #3) ------------------------
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+def test_second_request_serves_from_cache(
+    mock_get_client, client
+):
+    """The first response is cached per (provider, bible_id);
+    the repeat request pays no upstream call."""
+    mock_get_client.return_value.get_copyright.return_value = (
+        SAMPLE_COPYRIGHT_DATA
+    )
+
+    first = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+    second = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+
+    assert first.status_code == status.HTTP_200_OK
+    assert second.json() == first.json()
+    assert (
+        mock_get_client.return_value.get_copyright.call_count
+        == 1
+    )
+    assert first['Cache-Control'].startswith('public')
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+def test_cache_key_includes_bible_id(mock_get_client, client):
+    """Distinct bible_ids fetch separately — the id is part of
+    the cache key."""
+    mock_get_client.return_value.get_copyright.return_value = []
+
+    client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+    client.get(COPYRIGHT_URL, {'bible_id': 'ENGKJV'})
+    client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+
+    assert (
+        mock_get_client.return_value.get_copyright.call_count
+        == 2
+    )
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+def test_error_response_not_cached(mock_get_client, client):
+    """A provider failure must not poison the cache — the next
+    request retries upstream."""
+    mock_get_client.return_value.get_copyright.side_effect = [
+        FakeProviderError(500),
+        SAMPLE_COPYRIGHT_DATA,
+    ]
+
+    failed = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+    retried = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+
+    assert failed.status_code == status.HTTP_502_BAD_GATEWAY
+    assert retried.status_code == status.HTTP_200_OK
+    assert (
+        mock_get_client.return_value.get_copyright.call_count
+        == 2
+    )
+
+
+# --- defensive payload handling (copyright #6) -------------------
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+def test_malformed_dbt_rows_are_skipped(
+    mock_get_client, client
+):
+    """Non-dict items and non-dict ``copyright`` payloads in the
+    DBT response must not AttributeError into a 502."""
+    mock_get_client.return_value.get_copyright.return_value = [
+        'not-a-dict',
+        {'id': 'ENGESV', 'copyright': 'a-string-not-dict'},
+        SAMPLE_COPYRIGHT_DATA[0],
+    ]
+
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()['data']
+    assert len(data) == 2
+    assert data[0]['copyright'] == ''
+    assert data[1]['copyright'] == '© 2001 Crossway Bibles'
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+def test_upstream_404_says_copyright_not_found(
+    mock_get_client, client
+):
+    """The 404 message names the resource being looked up —
+    'Passage not found' was misleading for a copyright call."""
+    mock_get_client.return_value.get_copyright.side_effect = (
+        FakeProviderError(404)
+    )
+
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    body = response.json()
+    assert body['error_code'] == 'not_found'
+    assert body['error'] == 'Copyright not found (HTTP 404)'

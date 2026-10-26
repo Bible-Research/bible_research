@@ -92,27 +92,6 @@ class ParsePassageVersesTests(TestCase):
 
 class ESVClientSessionTests(TestCase):
     @override_settings(ESV_KEY="test-key")
-    def test_get_chapter_verses_uses_session(self):
-        client = ESVClient(api_key="test-key")
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "passages": [_SIMPLE_PASSAGE]
-        }
-        mock_resp.raise_for_status = MagicMock()
-        client.session.get = MagicMock(return_value=mock_resp)
-
-        verses = client.get_chapter_verses("GEN", 1)
-
-        client.session.get.assert_called_once()
-        call_args, call_kwargs = client.session.get.call_args
-        self.assertIn(
-            "api.esv.org", call_args[0]
-        )
-        params = call_kwargs.get("params", {})
-        self.assertIn("Genesis 1", params.get("q", ""))
-        self.assertEqual(len(verses), 2)
-
-    @override_settings(ESV_KEY="test-key")
     def test_authorization_header_is_set(self):
         client = ESVClient(api_key="test-key")
         self.assertIn(

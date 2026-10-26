@@ -23,7 +23,9 @@ os.environ.setdefault(
     'DJANGO_SETTINGS_MODULE', 'bible_research.settings'
 )
 
+import pytest
 from django.conf import settings
+from django.core.cache import cache
 
 
 def pytest_configure():
@@ -74,6 +76,21 @@ def pytest_configure():
     settings.REST_FRAMEWORK = rest
 
     settings._PYTEST_OVERRIDES_APPLIED = True
+
+
+@pytest.fixture(autouse=True)
+def _isolated_locmem_cache():
+    """Give every test an empty locmem cache.
+
+    The default cache is process-wide and shared: it holds DRF
+    throttle history plus the provider-response caches
+    (translations, copyright, GCS timestamps JSON). Without
+    clearing, a cached response from an earlier test would make
+    later tests see stale data or skip mocked upstream calls.
+    """
+    cache.clear()
+    yield
+    cache.clear()
 
 
 def prod_auth_stack(cls):
