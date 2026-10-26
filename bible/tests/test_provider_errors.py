@@ -52,7 +52,7 @@ def _rate_limited_client():
 class ProviderErrorSerializerTests(TestCase):
     """Serializer must omit ``verses`` and include error fields."""
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_429_returns_rate_limited_fields(self, mock_get):
         mock_get.return_value = _rate_limited_client()
 
@@ -66,7 +66,7 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertEqual(result['error_code'], 'rate_limited')
         self.assertIn('429', result['error'])
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_other_failure_returns_provider_error(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.side_effect = FakeProviderError(500)
@@ -81,7 +81,7 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertEqual(result['error_code'], 'provider_error')
         self.assertIn('500', result['error'])
 
-    @patch('bible.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_esv_provider_429_returns_rate_limited(
         self, mock_get
     ):
@@ -99,7 +99,7 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertNotIn('verses', result)
         self.assertEqual(result['error_code'], 'rate_limited')
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_statusless_error_does_not_leak_details(
         self, mock_get
     ):
@@ -123,7 +123,7 @@ class ProviderErrorSerializerTests(TestCase):
         self.assertNotIn('SECRET', result['error'])
         self.assertNotIn('url:', result['error'])
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_404_returns_book_not_in_fileset_fields(
         self, mock_get
     ):
@@ -143,7 +143,7 @@ class ProviderErrorSerializerTests(TestCase):
             result['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_empty_dbt_data_returns_book_not_in_fileset(
         self, mock_get
     ):
@@ -163,10 +163,13 @@ class ProviderErrorSerializerTests(TestCase):
             result['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_esv_client')
-    def test_esv_empty_verses_returns_not_found(self, mock_get):
+    @patch('bible.services.providers.get_default_esv_client')
+    def test_esv_empty_verses_returns_book_not_in_fileset(
+        self, mock_get
+    ):
         """A successful-but-empty ESV body parses to no verses —
-        missing content, not a silent empty chapter."""
+        a coverage miss like every other provider branch, so it
+        carries the unified ``book_not_in_fileset`` code."""
         mock_client = MagicMock()
         mock_client.get_chapter_with_headings.return_value = {
             'verses': [],
@@ -180,9 +183,58 @@ class ProviderErrorSerializerTests(TestCase):
         )
 
         self.assertNotIn('verses', result)
-        self.assertEqual(result['error_code'], 'not_found')
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
 
-    @patch('bible.serializers.get_default_sword_client')
+    @patch('bible.services.providers.get_default_apibible_client')
+    def test_apibible_404_returns_book_not_in_fileset(
+        self, mock_get
+    ):
+        """An API.Bible upstream 404 (uncovered chapter) is the
+        same coverage miss as a DBT 404 — ``book_not_in_fileset``
+        so the frontend fallback keys on one code."""
+        mock_client = MagicMock()
+        mock_client.get_chapter.side_effect = _http_error(404)
+        mock_get.return_value = mock_client
+
+        data = _passage_data(fileset_id='ENGNIV_API')
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertNotIn('verses', result)
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
+
+    @patch('bible.services.providers.get_default_apibible_client')
+    def test_apibible_empty_chapter_returns_book_not_in_fileset(
+        self, mock_get
+    ):
+        """API.Bible's own ``PassageNotFoundError`` (no usable
+        verse content) also normalizes to
+        ``book_not_in_fileset``."""
+        from bible.utils.provider_errors import (
+            PassageNotFoundError,
+        )
+        mock_client = MagicMock()
+        mock_client.get_chapter.side_effect = PassageNotFoundError(
+            'No verses found for JHN 3'
+        )
+        mock_get.return_value = mock_client
+
+        data = _passage_data(fileset_id='ENGNIV_API')
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertNotIn('verses', result)
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
+
+    @patch('bible.services.providers.get_default_sword_client')
     def test_sword_missing_chapter_returns_book_not_in_fileset(
         self, mock_get
     ):
@@ -210,7 +262,7 @@ class ProviderErrorSerializerTests(TestCase):
 class ProviderErrorViewTests(TestCase):
     """The view must map provider failures to real HTTP statuses."""
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_view_returns_429_when_rate_limited(self, mock_get):
         mock_get.return_value = _rate_limited_client()
 
@@ -225,7 +277,7 @@ class ProviderErrorViewTests(TestCase):
             response.data['error_code'], 'rate_limited'
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_view_returns_502_for_other_failures(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.side_effect = FakeProviderError(503)
@@ -241,7 +293,7 @@ class ProviderErrorViewTests(TestCase):
             response.data['error_code'], 'provider_error'
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_view_returns_404_for_missing_passage(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.side_effect = FakeProviderError(404)
@@ -257,7 +309,7 @@ class ProviderErrorViewTests(TestCase):
             response.data['error_code'], 'book_not_in_fileset'
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_view_does_not_leak_credentials_in_error(
         self, mock_get
     ):
@@ -282,3 +334,44 @@ class ProviderErrorViewTests(TestCase):
         )
         self.assertNotIn('SECRET', response.data['error'])
         self.assertNotIn('key=', response.data['error'])
+
+
+class FakeGcsError(Exception):
+    """Mimics ``google.api_core`` exceptions — the HTTP status
+    lives on ``exc.code``, not ``exc.status``/``exc.response``."""
+
+    def __init__(self, code):
+        super().__init__(f'code={code}')
+        self.code = code
+
+
+class ExcCodeStatusTests(TestCase):
+    """``upstream_status_code`` learns ``exc.code`` so GCS
+    failures classify like any other upstream HTTP status."""
+
+    def test_code_429_maps_to_rate_limited(self):
+        from bible.utils.provider_errors import (
+            provider_error_fields,
+        )
+        fields = provider_error_fields(FakeGcsError(429))
+        self.assertEqual(fields['error_code'], 'rate_limited')
+
+    def test_code_404_maps_to_not_found(self):
+        from bible.utils.provider_errors import (
+            provider_error_fields,
+        )
+        fields = provider_error_fields(FakeGcsError(404))
+        self.assertEqual(fields['error_code'], 'not_found')
+
+    def test_non_int_code_is_not_an_http_status(self):
+        """A gRPC-style enum ``code`` must not classify as an
+        HTTP status."""
+        from bible.utils.provider_errors import (
+            provider_error_fields,
+        )
+
+        class GrpcStyleError(Exception):
+            code = 'NOT_FOUND'
+
+        fields = provider_error_fields(GrpcStyleError('x'))
+        self.assertEqual(fields['error_code'], 'provider_error')

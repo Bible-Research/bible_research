@@ -25,15 +25,29 @@ All API routes live under `/api/v1/` (see `bible_research/urls.py`).
 ## Provider routing (core business logic)
 
 Every passage/audio request carries a `fileset_id` that selects the
-provider. Routing happens in `bible/services/translation_service.py`:
+provider. All routing goes through the facade in
+`bible/services/providers.py` — `provider_for(fileset_id)` returns
+the provider object and callers use its uniform surface
+(`get_chapter`, `get_passage`, `get_audio`, `get_timestamps`,
+`search`, `search_grouped`, `get_copyright`,
+`translation_listing`). `get_passage_body()` in the same module is
+the `/api/v1/bible/` fetch+shape path the view calls; the
+serializer only validates input. Dispatch order:
 
 1. ESV filesets (`is_esv_fileset` in `bible/services/esv/registry.py`)
    → ESV API via `bible/services/esv/client.py`.
-2. SWORD filesets (`bible/services/sword/registry.py`) → local SWORD
-   modules via pysword (`bible/services/sword/client.py`).
-3. API.Bible filesets (`bible/services/apibible/registry.py`) →
+2. API.Bible filesets (`bible/services/apibible/registry.py`) →
    api.scripture.api.bible via `bible/services/apibible/client.py`.
+3. SWORD filesets (`bible/services/sword/registry.py`) → local SWORD
+   modules via pysword (`bible/services/sword/client.py`).
 4. Everything else → DBT API v4 via `bible/services/dbt/client.py`.
+
+Copyright routing uses the same facade: ESV/SWORD ids (and abbrs)
+answer from registry `license` metadata, API.Bible ids fetch the
+live statement (audio fileset ids read the audio bible's entry),
+other ids proxy DBT. Note enrichment batches by
+(fileset, book, chapter) through a serializer-context cache —
+one upstream call per chapter per page, not per note.
 
 Known fileset ids: `ENGKJV` (KJV), `ENGESV_API` (ESV), `LVSGLU8`
 (Latvian Glück text), `LVSGLU8C1DA` (Latvian Glück generated audio,
@@ -80,12 +94,20 @@ Token login: `POST /api/token/`.
 Provider failures surface as `error` + `error_code` fields built by
 `bible/utils/provider_errors.py`: `rate_limited` → HTTP 429,
 `not_found` (missing passage, upstream 404, or
-`PassageNotFoundError`) → HTTP 404, anything else →
+`PassageNotFoundError`) → HTTP 404, `book_not_in_fileset`
+(every provider's "fileset lacks this book/chapter" coverage
+miss on the passage endpoint) → HTTP 404, anything else →
 `provider_error` → HTTP 502 (see `bible/views.py`). Note
 serialization degrades the same way — verse refs kept, `text`
-empty. Keep field names stable; the React app branches on
-`error_code`. Never embed `str(exc)` in `error` — exception text
-can contain request URLs with credentials.
+empty. Client-input 400/404s in `bible/views.py` are built by
+`bible/utils/error_responses.py` (`bad_request`/`not_found`,
+codes `missing_parameter`/`invalid_parameter`), and routing ids
+(`fileset_id`, `bible_id`, `language_iso`, `book`) are
+charset-validated at the view boundary via
+`bible/utils/request_params.py`. Keep field names stable; the
+React app branches on `error_code`. Never embed `str(exc)` in
+`error` — exception text can contain request URLs with
+credentials.
 
 ## Auth quirks
 
@@ -142,6 +164,13 @@ notes and comments via nested routes. Positions use float
 `tag_position`/`position` fields — reordering writes fractional
 values; uniqueness collisions are handled in `annotations/views.py`.
 
+Pending human-run `makemigrations` (Meta declared, no migration
+file yet): `unique_top_level_tag_name_per_user` on Tag
+(`(user, name)` where `parent_tag IS NULL`),
+`unique_note_verse_link` on NoteVerse (`note, verse`),
+`unique_book_chapter_verse` on Verse (`book, chapter, verse`).
+Serializers enforce all three application-side.
+
 ## Code style & patterns
 
 - Imports ordered: stdlib → Django → third-party → local.
@@ -187,42 +216,34 @@ Known pre-existing failure on `main` (not a regression):
 
 Known pinned prod bugs (FIXME-marked tests). Each pins current
 buggy behavior pending a product decision — these are latent
-code bugs, not test failures:
+code bugs, not test failures: none outstanding. Recently
+resolved:
 
-- `annotations/test_reading_positions.py:179`
-  (`test_case_variant_books_create_separate_rows`) —
-  case-variant book names (`John` vs `john`) create duplicate
-  `ReadingPosition` rows (serializers.py:907 + case-sensitive
-  `unique_together`, models.py:460).
-- `annotations/test_tag_isolation.py:131`
-  (`test_duplicate_name_same_user`) — duplicate tag name with
-  NULL `parent_tag` silently creates a second row with 201
-  (`unique_together` at models.py:65 doesn't cover NULL
-  parent; no clean 400).
-- `annotations/test_note_isolation.py:231`
-  (`test_untagged_order_index`) — order-index endpoint filters
-  `tag_id` literally and never resolves the `untagged`
-  sentinel, returning an empty list for untagged notes
-  (views.py:1019 vs :590-592).
-- `annotations/test_images.py:947`
-  (`test_note_images_list_private_foreign_403`) —
-  `NoteImageViewSet._get_note` is unscoped: GET images on a
-  foreign PRIVATE note returns 403, revealing that the note
-  exists (vs comments' deliberate 404 at views.py:1344-1353).
-- `annotations/test_images.py:1033`
-  (`test_cascade_delete_orphans_gcs_blob`) — row-level CASCADE
-  delete of a note/comment leaves orphaned GCS blobs; no
-  `post_delete` receiver calls `delete_original`
-  (models.py:303-318).
-- `bible/tests/test_timestamp_view.py:228`
-  (`test_gcs_not_found_returns_404`) —
-  `gcs_exceptions.NotFound` → 404 returns a bare `{"error"}`
-  body with no `error_code` (views.py:398-407), breaking the
-  error/error_code contract.
-- `bible/tests/test_timestamp_view.py:270`
-  (`test_apibible_empty_timecodes_returns_404`) — API.Bible
-  empty timecodes → 404 likewise returns bare `{"error"}`
-  without `error_code` (views.py:430-439).
+- ~~`annotations/test_reading_positions.py`
+  (`test_case_variant_books_create_separate_rows`)~~ — book
+  names canonicalize through `get_dbt_book_id` +
+  `get_book_name_from_id` before storage; `book` is immutable
+  after create (serializer `update()` → 400).
+- ~~`annotations/test_tag_isolation.py`
+  (`test_duplicate_name_same_user`)~~ — `TagSerializer.validate`
+  enforces top-level (user, name) uniqueness → 400, backed by
+  the `unique_top_level_tag_name_per_user` conditional
+  constraint (pending its migration).
+- ~~`annotations/test_note_isolation.py`
+  (`test_untagged_order_index`)~~ — order-index resolves the
+  `untagged` sentinel to `tag__isnull=True`, matching list and
+  `/comments/counts/` semantics.
+- ~~`annotations/test_images.py`
+  (`test_note_images_list_private_foreign_403`)~~ — resolved:
+  `NoteImageViewSet._get_note` and `CommentImageViewSet.
+  _get_comment` now resolve parents through
+  `get_accessible_notes_qs`, so inaccessible and nonexistent
+  parents both 404 (the test asserts 404 as
+  `test_note_images_list_private_foreign_404`).
+- ~~`annotations/test_images.py`
+  (`test_cascade_delete_orphans_gcs_blob`)~~ — a `post_delete`
+  receiver on Image calls `delete_original`, so cascade
+  deletes (note/tag/user) no longer orphan GCS blobs.
 
 ## Housekeeping
 

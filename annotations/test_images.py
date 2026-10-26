@@ -233,6 +233,22 @@ class UploadOriginalServiceTest(TestCase):
             with self.assertRaises(UnsupportedMediaType):
                 upload_original("IMG_X", evil)
 
+    def test_mismatched_content_type_raises_415(self):
+        """PNG bytes declared as image/gif must be rejected —
+        the stored content_type would otherwise describe the
+        wrong bytes."""
+        from rest_framework.exceptions import (
+            UnsupportedMediaType,
+        )
+        mislabelled = _make_file(
+            content=_SMALL_PNG,
+            name="photo.gif",
+            content_type="image/gif",
+        )
+        with _mock_bucket():
+            with self.assertRaises(UnsupportedMediaType):
+                upload_original("IMG_X", mislabelled)
+
 
 class NoteImageAPITest(TestCase):
     """Integration tests for NoteImageViewSet."""
@@ -274,7 +290,26 @@ class NoteImageAPITest(TestCase):
         )
         self.assertEqual(Image.objects.count(), 1)
 
-    def test_non_owner_upload_returns_403(self):
+    def test_non_owner_upload_private_note_returns_404(self):
+        """Upload to a private foreign note 404s — _get_note
+        resolves through get_accessible_notes_qs, so
+        inaccessible notes are indistinguishable from
+        nonexistent ones (no existence oracle)."""
+        self.client.force_authenticate(user=self.other)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._upload_url(),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(Image.objects.count(), 0)
+
+    def test_non_owner_upload_public_note_returns_403(self):
+        """A public note IS accessible, so the owner check runs
+        and a foreign uploader still gets 403."""
+        self.note.public = True
+        self.note.save(update_fields=['public'])
         self.client.force_authenticate(user=self.other)
         with _mock_bucket():
             resp = self.client.post(
@@ -326,14 +361,18 @@ class NoteImageAPITest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.data), 1)
 
-    def test_list_other_user_private_note_returns_403(self):
+    def test_list_other_user_private_note_returns_404(self):
+        """A private foreign note 404s like a nonexistent one —
+        no existence oracle (S10)."""
         self.client.force_authenticate(user=self.other)
         resp = self.client.get(self._upload_url())
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 404)
 
-    def test_unauthenticated_list_private_note_returns_403(self):
+    def test_unauthenticated_list_private_note_returns_404(self):
+        """Anonymous callers see public notes only — a private
+        note's image list 404s instead of revealing it via 403."""
         resp = self.client.get(self._upload_url())
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 404)
 
     def test_unauthenticated_list_public_note_returns_200(self):
         """Anon may read images on public notes (plan scope)."""
@@ -348,14 +387,18 @@ class NoteImageAPITest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.data), 1)
 
-    def test_unauthenticated_upload_returns_403(self):
+    def test_unauthenticated_upload_returns_401(self):
+        """401 under the production-like test settings —
+        token/bearer authenticators advertise
+        WWW-Authenticate, so DRF keeps NotAuthenticated
+        as a 401 rather than coercing to 403."""
         with _mock_bucket():
             resp = self.client.post(
                 self._upload_url(),
                 {"file": _make_file()},
                 format="multipart",
             )
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 401)
 
     def test_upload_without_file_returns_400(self):
         self.client.force_authenticate(user=self.owner)
@@ -429,7 +472,24 @@ class CommentImageAPITest(TestCase):
         img = Image.objects.get(pk=resp.data["id"])
         self.assertEqual(img.comment_id, self.comment.id)
 
-    def test_non_author_upload_returns_403(self):
+    def test_non_author_upload_private_note_returns_404(self):
+        """A comment on a private foreign note 404s for upload —
+        _get_comment resolves through get_accessible_notes_qs
+        (no existence oracle, S10)."""
+        self.client.force_authenticate(user=self.other)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._upload_url(),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_non_author_upload_public_note_returns_403(self):
+        """On a public note the comment is accessible, so the
+        author check runs and a foreign uploader gets 403."""
+        self.note.public = True
+        self.note.save(update_fields=['public'])
         self.client.force_authenticate(user=self.other)
         with _mock_bucket():
             resp = self.client.post(
@@ -438,6 +498,49 @@ class CommentImageAPITest(TestCase):
                 format="multipart",
             )
         self.assertEqual(resp.status_code, 403)
+
+    def test_upload_to_deleted_comment_returns_400(self):
+        """A soft-deleted comment must not accrete images — the
+        serializer redacts them, so a new upload would violate
+        the tombstone contract."""
+        self.comment.is_deleted = True
+        self.comment.content = ""
+        self.comment.save(
+            update_fields=["is_deleted", "content"]
+        )
+        self.client.force_authenticate(user=self.owner)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._upload_url(),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("file", resp.data)
+        self.assertEqual(Image.objects.count(), 0)
+
+    @override_settings(IMAGE_MAX_PER_COMMENT=2)
+    def test_comment_image_cap_enforced(self):
+        """At IMAGE_MAX_PER_COMMENT the next POST → 400 'file'
+        error (cap lookup in the shared base's create)."""
+        for i in (1, 2):
+            Image.objects.create(
+                comment=self.comment,
+                uploaded_by=self.owner,
+                storage_url=(
+                    f"gs://b/originals/cc{i}/source.png"
+                ),
+            )
+        self.client.force_authenticate(user=self.owner)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._upload_url(),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("file", resp.data)
+        self.assertEqual(Image.objects.count(), 2)
 
 
 class ImageDeleteAPITest(TestCase):
@@ -487,10 +590,13 @@ class ImageDeleteAPITest(TestCase):
             Image.objects.filter(pk=self.image.id).exists()
         )
 
-    def test_non_owner_delete_returns_403(self):
+    def test_non_owner_delete_returns_404(self):
+        """A foreign image 404s like a nonexistent one — the
+        delete-authorized queryset is the lookup itself, so the
+        endpoint leaks no existence oracle (S10 follow-up)."""
         self.client.force_authenticate(user=self.other)
         resp = self.client.delete(self._delete_url())
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 404)
         self.assertTrue(
             Image.objects.filter(pk=self.image.id).exists()
         )
@@ -581,7 +687,9 @@ class ImageDeleteAPITest(TestCase):
         )
 
     def test_unrelated_user_cannot_delete_comment_image(self):
-        """A user unrelated to note and comment gets 403."""
+        """A user unrelated to note and comment gets 404 —
+        indistinguishable from a nonexistent image (no
+        existence oracle)."""
         image = self._make_comment_image()
         third = User.objects.create_user(
             username="img_del_third",
@@ -591,7 +699,7 @@ class ImageDeleteAPITest(TestCase):
         self.client.force_authenticate(user=third)
         resp = self.client.delete(f"/api/v1/images/{image.id}/")
 
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 404)
         self.assertTrue(
             Image.objects.filter(pk=image.id).exists()
         )
@@ -827,6 +935,34 @@ class CommentImageNestedScopingTest(TestCase):
                 "https://signed.example.com/img",
             )
 
+    @patch(
+        "annotations.services.image_storage.signed_image_url",
+        return_value="https://signed.example.com/img",
+    )
+    def test_deleted_comment_image_list_returns_empty(
+        self, _mock_sign
+    ):
+        """A soft-deleted comment must not serve signed URLs —
+        CommentSerializer redacts it to ``images: []`` and the
+        nested route has to honor the same tombstone contract."""
+        Image.objects.create(
+            comment=self.comment,
+            uploaded_by=self.owner,
+            storage_url="gs://b/originals/d/source.png",
+            content_type="image/png",
+            size_bytes=100,
+        )
+        self.comment.is_deleted = True
+        self.comment.content = ""
+        self.comment.save(
+            update_fields=["is_deleted", "content"]
+        )
+        resp = self.client.get(
+            self._images_url(self.note_b.id, self.comment.id)
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), [])
+
 
 class GuestImageWriteTest(TestCase):
     """The shared 'guest' account is read-only: writes → 403."""
@@ -942,21 +1078,18 @@ class NoteImageEdgeCasesTest(TestCase):
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(Image.objects.count(), 0)
 
-    def test_note_images_list_private_foreign_403(self):
-        """PIN: GET images on another user's PRIVATE note → 403.
+    def test_note_images_list_private_foreign_404(self):
+        """GET images on another user's PRIVATE note → 404.
 
-        FIXME: existence oracle — NoteImageViewSet._get_note is
-        unscoped (views.py:1587-1590), so list() reaches the
-        accessibility check and raises PermissionDenied (403),
-        revealing the note exists. CommentViewSet._get_note
-        scopes to get_accessible_notes_qs and 404s instead
-        (views.py:1344-1353). Flagged for product decision.
+        NoteImageViewSet._get_note resolves through
+        get_accessible_notes_qs, so an inaccessible note is
+        indistinguishable from a nonexistent one — matching
+        CommentViewSet._get_note (no existence oracle).
         """
         self.client.force_authenticate(user=self.other)
         resp = self.client.get(self._images_url(self.note.id))
-        self.assertEqual(resp.status_code, 403)
-        # A truly nonexistent note 404s — the 403 above leaks
-        # that THIS note exists.
+        self.assertEqual(resp.status_code, 404)
+        # Identical to the response for a truly nonexistent note.
         resp = self.client.get(
             self._images_url("NOTDOESNOTEXIST01")
         )
@@ -1027,19 +1160,9 @@ class NoteImageEdgeCasesTest(TestCase):
         self.assertIsNotNone(data["created_at"])
 
     def test_cascade_delete_orphans_gcs_blob(self):
-        """PIN: deleting a note removes its Image rows via
-        row-level CASCADE but never calls delete_original —
-        the GCS blob is orphaned.
-
-        FIXME: CODE bug — no post_delete receiver exists for
-        Image (models.py:303-318 CASCADE FKs); the only
-        delete_original callers are the view rollback and
-        destroy paths (views.py:1657, 1763, 1817). Flagged for
-        product decision; do not fix here. The pin patches
-        delete_original at both seams — the views alias and
-        its image_storage origin — so a signal-based fix
-        trips it too.
-        """
+        """Deleting a note removes its Image rows via row-level
+        CASCADE — the post_delete receiver on Image then calls
+        delete_original so the GCS blob is not orphaned."""
         self.client.force_authenticate(user=self.owner)
         with _mock_bucket():
             resp = self.client.post(
@@ -1051,13 +1174,14 @@ class NoteImageEdgeCasesTest(TestCase):
         image_id = resp.data["id"]
 
         with patch(
-            "annotations.views.delete_original"
-        ) as mock_view_delete, patch(
             "annotations.services.image_storage.delete_original"
         ) as mock_svc_delete:
             self.note.delete()
-        mock_view_delete.assert_not_called()
-        mock_svc_delete.assert_not_called()
+        mock_svc_delete.assert_called_once_with(
+            image_id,
+            "gs://test-bucket/originals/"
+            f"{image_id}/source.png",
+        )
         self.assertFalse(
             Image.objects.filter(pk=image_id).exists()
         )

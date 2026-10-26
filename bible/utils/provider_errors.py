@@ -1,7 +1,8 @@
 """Helpers for describing upstream Bible provider failures.
 
-Both the DBT OpenAPI client (``ApiException.status``) and the
+The DBT OpenAPI client (``ApiException.status``), the
 ``requests``-based clients (``HTTPError.response.status_code``)
+and the ``google.api_core`` GCS exceptions (``exc.code``) all
 carry the upstream HTTP status, so a single helper can classify
 failures from any provider.
 """
@@ -17,6 +18,26 @@ class PassageNotFoundError(ValueError):
     instead of a generic ``provider_error``. Subclasses
     ``ValueError`` for backward compatibility with callers that
     caught the previous exception type.
+
+    ``client_message`` optionally carries a fixed, safe message
+    the caller may surface in the response body (e.g. the SWORD
+    generated-audio miss explains *why* the fileset lacks the
+    chapter). ``None`` means the default coverage-miss message.
+    """
+
+    def __init__(self, message='', client_message=None):
+        super().__init__(message)
+        self.client_message = client_message
+
+
+class TimestampsNotGeneratedError(PassageNotFoundError):
+    """The audio exists but its timestamp sidecar does not yet.
+
+    Raised by the provider facade when a GCS ``_timestamps.json``
+    artifact or an API.Bible ``timecodes`` list is missing — the
+    timestamps endpoint maps it to its dedicated "not yet
+    generated" 404 while every other caller still sees a plain
+    ``PassageNotFoundError``.
     """
 
 
@@ -30,16 +51,35 @@ def upstream_status_code(exc: Exception) -> Optional[int]:
     if isinstance(status, int):
         return status
     response = getattr(exc, 'response', None)
-    return getattr(response, 'status_code', None)
+    status_code = getattr(response, 'status_code', None)
+    if isinstance(status_code, int):
+        return status_code
+    # google.api_core exceptions expose the HTTP status as
+    # ``.code`` — an int for HTTP failures (e.g. a GCS
+    # TooManyRequests carries 429). gRPC-sourced errors expose a
+    # StatusCode enum instead, which is intentionally not
+    # classified as an upstream HTTP status.
+    code = getattr(exc, 'code', None)
+    if isinstance(code, int):
+        return code
+    return None
 
 
-def provider_error_fields(exc: Exception) -> Dict[str, str]:
+def provider_error_fields(
+    exc: Exception,
+    not_found_message: Optional[str] = None,
+) -> Dict[str, str]:
     """Build ``error``/``error_code`` fields for a provider failure.
 
     ``error_code`` is ``rate_limited`` for upstream HTTP 429,
     ``not_found`` when the passage does not exist upstream
     (``PassageNotFoundError`` or upstream HTTP 404), and
     ``provider_error`` for any other failure.
+
+    ``not_found_message`` overrides the "Passage not found" text
+    for endpoints whose lookup is not a passage (e.g.
+    ``copyright``) — it only rewords ``error``; the ``not_found``
+    code stays stable for the frontend.
 
     ``str(exc)`` is never embedded in ``error``: exception text can
     contain request URLs with credentials (e.g. DBT's ``?key=``
@@ -57,7 +97,10 @@ def provider_error_fields(exc: Exception) -> Dict[str, str]:
     if isinstance(exc, PassageNotFoundError) or status == 404:
         detail = f' (HTTP {status})' if status else ''
         return {
-            'error': f'Passage not found{detail}',
+            'error': (
+                f'{not_found_message or "Passage not found"}'
+                f'{detail}'
+            ),
             'error_code': 'not_found',
         }
     if status:

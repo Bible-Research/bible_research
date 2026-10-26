@@ -71,13 +71,15 @@ class CaptureProviderExceptionTests(TestCase):
 class ProviderErrorContractTests(TestCase):
     """The capture wiring must not change the response contract."""
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.provider_for')
     def test_provider_failure_returns_error_contract(
-        self, mock_get
+        self, mock_provider_for
     ):
-        mock_client = MagicMock()
-        mock_client.get_verses.side_effect = FakeProviderError(500)
-        mock_get.return_value = mock_client
+        mock_provider = MagicMock()
+        mock_provider.get_passage.side_effect = FakeProviderError(
+            500
+        )
+        mock_provider_for.return_value = mock_provider
 
         response = APIClient().get(
             '/api/v1/bible/',

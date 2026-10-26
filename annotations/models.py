@@ -2,6 +2,8 @@ import uuid
 import time
 from django.db import models
 from django.db.models import UniqueConstraint, Q
+from django.db.models.signals import post_delete
+from django.dispatch import receiver
 from bible.models import Verse
 from django.contrib.auth import get_user_model
 
@@ -63,6 +65,18 @@ class Tag(models.Model):
         # Ensures that a user cannot have two tags with the same
         # name and parent.
         unique_together = ('user', 'name', 'parent_tag')
+        # unique_together cannot cover parent_tag=None (UNIQUE
+        # treats NULLs as distinct), so top-level name uniqueness
+        # needs this conditional constraint. TagSerializer also
+        # validates it application-side for a clean 400.
+        # Requires a human-run `makemigrations`.
+        constraints = [
+            UniqueConstraint(
+                fields=['user', 'name'],
+                condition=Q(parent_tag__isnull=True),
+                name='unique_top_level_tag_name_per_user',
+            )
+        ]
         ordering = ['name']
 
     def __str__(self):
@@ -394,9 +408,16 @@ class NoteVerse(models.Model):
     class Meta:
         verbose_name = "Note-Verse Link"
         verbose_name_plural = "Note-Verse Links"
-        # Ensures that a specific note is linked to a specific verse only once.
-        # TODO: Refine uniqueness logic
-        # unique_together = ('note', 'verse')
+        # Ensures that a specific note is linked to a specific
+        # verse only once. Serializers also dedupe input
+        # application-side for a clean 400.
+        # Requires a human-run `makemigrations`.
+        constraints = [
+            UniqueConstraint(
+                fields=['note', 'verse'],
+                name='unique_note_verse_link',
+            )
+        ]
         # ordering = ['note', 'verse']
 
     def __str__(self):
@@ -473,3 +494,21 @@ class ReadingPosition(models.Model):
     def __str__(self):
         username = self.user.username if self.user else 'unknown'
         return f"{username} - {self.book} {self.chapter}:{self.verse}"
+
+
+@receiver(post_delete, sender=Image)
+def delete_image_blob(sender, instance, **kwargs):
+    """Delete the image's GCS object whenever its row goes away.
+
+    Row deletion happens through more paths than
+    ``DELETE /images/<pk>/`` — note/tag/user cascades remove
+    Image rows via FK CASCADE and used to orphan the blobs in
+    the bucket forever. Firing on ``post_delete`` catches every
+    removal path. Failures are logged-and-tolerated inside
+    ``delete_original`` (best-effort; a missing blob is fine).
+    """
+    # Local import: image_storage pulls in google-cloud-storage,
+    # which must not load during model import.
+    from .services.image_storage import delete_original
+
+    delete_original(instance.id, instance.storage_url)

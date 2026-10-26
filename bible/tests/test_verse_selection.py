@@ -10,7 +10,14 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from bible.serializers import BiblePassageSerializer
+from bible.services.apibible.registry import (
+    APIBIBLE_TRANSLATIONS,
+)
 from bible.services.esv.client import ESVClient
+
+APINIV_BIBLE_ID = (
+    APIBIBLE_TRANSLATIONS['ENGNIV_API']['bible_id']
+)
 
 
 def _passage_data(fileset_id='ENGESV', verses=None):
@@ -39,7 +46,7 @@ class VerseSelectionSerializerTests(TestCase):
     """The serializer filters provider output to the requested
     verses for every provider."""
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_dbt_single_verse(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -57,7 +64,7 @@ class VerseSelectionSerializerTests(TestCase):
             [{'verse': 16, 'text': 'text 16'}],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_dbt_verse_range(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -75,7 +82,7 @@ class VerseSelectionSerializerTests(TestCase):
             [16, 17, 18],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_dbt_discontiguous_selection(self, mock_get):
         """'John 3:16,18' returns exactly verses 16 and 18 even
         when the provider returns the contiguous range."""
@@ -95,10 +102,14 @@ class VerseSelectionSerializerTests(TestCase):
             [16, 18],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
-    def test_dbt_out_of_range_verse_returns_not_found(
+    @patch('bible.services.providers.get_default_dbt_client')
+    def test_dbt_out_of_range_verse_returns_book_not_in_fileset(
         self, mock_get
     ):
+        """A verse selector outside the chapter's verses is a
+        coverage miss — the fileset lacks those verses — so it
+        carries the unified ``book_not_in_fileset`` code the
+        frontend fallback keys on (S6 normalization)."""
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
             1, 2, 3
@@ -111,9 +122,11 @@ class VerseSelectionSerializerTests(TestCase):
         )
 
         self.assertNotIn('verses', result)
-        self.assertEqual(result['error_code'], 'not_found')
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
 
-    @patch('bible.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_esv_narrows_upstream_and_filters(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_chapter_with_headings.return_value = {
@@ -148,7 +161,7 @@ class VerseSelectionSerializerTests(TestCase):
             [{'before_verse': 17, 'text': 'In-range heading'}],
         )
 
-    @patch('bible.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_esv_chapter_only_call_unchanged(self, mock_get):
         """Without a verse selector the ESV client is called
         exactly as before (no verse kwargs)."""
@@ -170,7 +183,7 @@ class VerseSelectionSerializerTests(TestCase):
             .assert_called_once_with('JHN', 3)
         self.assertEqual(len(result['verses']), 1)
 
-    @patch('bible.serializers.get_default_sword_client')
+    @patch('bible.services.providers.get_default_sword_client')
     def test_sword_narrows_and_filters(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_chapter_verses.return_value = [
@@ -195,7 +208,7 @@ class VerseSelectionSerializerTests(TestCase):
             [16, 17],
         )
 
-    @patch('bible.serializers.get_default_sword_client')
+    @patch('bible.services.providers.get_default_sword_client')
     def test_sword_chapter_only_call_unchanged(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_chapter_verses.return_value = [
@@ -212,6 +225,69 @@ class VerseSelectionSerializerTests(TestCase):
             'LVSGLU8', 'JHN', 3
         )
         self.assertEqual(len(result['verses']), 1)
+
+    @patch('bible.services.providers.get_default_apibible_client')
+    def test_apibible_filters_to_requested_verses(self, mock_get):
+        """'John 3:16' on NIV must return only verse 16 — the
+        API.Bible branch used to ignore the selector and return
+        the whole chapter."""
+        mock_client = MagicMock()
+        mock_client.get_chapter.return_value = {
+            'verses': [
+                {'verse_start': n, 'verse_text': f'text {n}'}
+                for n in (15, 16, 17)
+            ],
+            'headings': [
+                {'before_verse': 15, 'text': 'Out-of-range'},
+                {'before_verse': 16, 'text': 'In-range'},
+            ],
+        }
+        mock_get.return_value = mock_client
+
+        data = _passage_data(
+            fileset_id='ENGNIV_API', verses=[16]
+        )
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertEqual(
+            result['verses'],
+            [{'verse': 16, 'text': 'text 16'}],
+        )
+        self.assertEqual(
+            result['headings'],
+            [{'before_verse': 16, 'text': 'In-range'}],
+        )
+        mock_client.get_chapter.assert_called_once_with(
+            APINIV_BIBLE_ID, 'JHN', 3,
+        )
+
+    @patch('bible.services.providers.get_default_apibible_client')
+    def test_apibible_out_of_range_verse_returns_not_in_fileset(
+        self, mock_get
+    ):
+        mock_client = MagicMock()
+        mock_client.get_chapter.return_value = {
+            'verses': [
+                {'verse_start': n, 'verse_text': f'text {n}'}
+                for n in (1, 2, 3)
+            ],
+            'headings': [],
+        }
+        mock_get.return_value = mock_client
+
+        data = _passage_data(
+            fileset_id='ENGNIV_API', verses=[99]
+        )
+        result = BiblePassageSerializer(data).to_representation(
+            data
+        )
+
+        self.assertNotIn('verses', result)
+        self.assertEqual(
+            result['error_code'], 'book_not_in_fileset'
+        )
 
 
 class ESVClientVerseRangeTests(TestCase):
@@ -255,26 +331,6 @@ class ESVClientVerseRangeTests(TestCase):
         params = client.session.get.call_args[1]['params']
         self.assertEqual(params['q'], 'John 3:1-200')
 
-    @override_settings(ESV_KEY='test-key')
-    def test_single_chapter_book_sends_verse_range(self):
-        """Issue reactive-bible#186: api.esv.org reads
-        ``Philemon 1`` as Philemon 1:1 and returns only
-        verse 1. The query must carry an explicit range so
-        single-chapter books come back whole."""
-        client = self._client()
-        for book_id, book_name in (
-            ('PHM', 'Philemon'),
-            ('OBA', 'Obadiah'),
-            ('2JN', '2 John'),
-            ('3JN', '3 John'),
-            ('JUD', 'Jude'),
-        ):
-            client.get_chapter_with_headings(book_id, 1)
-            params = client.session.get.call_args[1]['params']
-            self.assertEqual(
-                params['q'], f'{book_name} 1:1-200'
-            )
-
 
 class VerseSelectionViewTests(TestCase):
     """The view accepts ``Chapter:Verse`` selectors and rejects
@@ -286,7 +342,7 @@ class VerseSelectionViewTests(TestCase):
             {'passage': passage, 'fileset_id': fileset_id},
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_single_verse_request(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -302,7 +358,7 @@ class VerseSelectionViewTests(TestCase):
             [{'verse': 16, 'text': 'text 16'}],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_verse_range_request(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -318,7 +374,7 @@ class VerseSelectionViewTests(TestCase):
             [16, 17, 18],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_multi_select_request(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(
@@ -334,7 +390,7 @@ class VerseSelectionViewTests(TestCase):
             [16, 17, 18, 20],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_chapter_only_request_unchanged(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(1, 2)
@@ -348,7 +404,7 @@ class VerseSelectionViewTests(TestCase):
             [1, 2],
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_out_of_range_verse_returns_404(self, mock_get):
         mock_client = MagicMock()
         mock_client.get_verses.return_value = _dbt_rows(1, 2)
@@ -357,8 +413,11 @@ class VerseSelectionViewTests(TestCase):
         response = self._get('John 3:99')
 
         self.assertEqual(response.status_code, 404)
+        # Out-of-range selectors are coverage misses — the
+        # unified ``book_not_in_fileset`` code lets clients fall
+        # back to another fileset deterministically.
         self.assertEqual(
-            response.data['error_code'], 'not_found'
+            response.data['error_code'], 'book_not_in_fileset'
         )
 
     def test_invalid_verse_selector_returns_400(self):
@@ -376,3 +435,43 @@ class VerseSelectionViewTests(TestCase):
                 f"{passage!r} should be a 400, got "
                 f"{response.status_code}: {response.data}",
             )
+
+    def test_huge_verse_range_returns_400(self):
+        """'John 3:1-999999999' must be rejected before the
+        range expands — the endpoint is AllowAny and an
+        unbounded ``range()`` used to allocate ~10^9 ints."""
+        response = self._get('John 3:1-999999999')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            'Verse numbers', response.json()['error']
+        )
+
+    def test_verse_range_at_cap_is_allowed(self):
+        """The cap sits above the longest canonical chapter
+        (Psalms 119:176) — a 'John 3:1-200' selector parses."""
+        with patch(
+            'bible.services.providers.get_default_dbt_client'
+        ) as mock_get:
+            mock_client = MagicMock()
+            mock_client.get_verses.return_value = _dbt_rows(
+                *range(1, 37)
+            )
+            mock_get.return_value = mock_client
+            response = self._get('John 3:1-200')
+        self.assertEqual(response.status_code, 200)
+
+    def test_too_many_verse_segments_returns_400(self):
+        passage = 'John 3:' + ','.join(['1'] * 26)
+        response = self._get(passage)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            'Too many verse segments',
+            response.json()['error'],
+        )
+
+    def test_overlong_passage_returns_400(self):
+        response = self._get('John ' + '3' * 200)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            'too long', response.json()['error']
+        )

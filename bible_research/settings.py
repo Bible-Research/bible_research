@@ -203,13 +203,18 @@ else:
     # --- Local Development ---
     import yaml
     CONFIG_FILE = BASE_DIR / 'config.yaml'
-    if not CONFIG_FILE.exists():
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, 'r') as f:
+            config = yaml.safe_load(f)
+    elif 'pytest' in sys.modules:
+        # pytest runs against production-like settings with no
+        # secrets file: conftest overrides DATABASES (SQLite
+        # in-memory) and the provider keys with test values.
+        config = {}
+    else:
         raise FileNotFoundError(
             'config.yaml not found. Please create it from config_template.yaml'
         )
-
-    with open(CONFIG_FILE, 'r') as f:
-        config = yaml.safe_load(f)
 
     SECRET_KEY = config.get('SECRET_KEY')
     DBT_KEY = config.get('DBT_KEY')
@@ -432,6 +437,21 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Process-local cache. The app runs a single-instance App Engine
+# F1, so locmem is sufficient: it backs DRF throttling plus the
+# provider-response caches in ``bible/views.py`` and
+# ``bible/services/storage/gcs.py`` (translations, copyright, the
+# immutable GCS timestamps artifact, signed audio URLs). Cache
+# keys carry a ``v1:`` namespace so a format change can bump the
+# version instead of needing a flush. If a second instance or a
+# shared cache is ever needed, swap in Memcached/Redis.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'bible-research-locmem',
+    }
+}
+
 # REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -443,6 +463,29 @@ REST_FRAMEWORK = {
         'bible_research.permissions.GuestReadOnly',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # GAE's fronting load balancer appends TWO IPs to
+    # X-Forwarded-For: the client IP, then the fixed
+    # GLOBAL_FORWARDING_RULE_IP. NUM_PROXIES=2 makes DRF key
+    # throttle idents on the second-to-last entry — the real
+    # client IP — not the shared forwarding-rule IP or the
+    # client-spoofable XFF prefix.
+    'NUM_PROXIES': 2,
+    # Global anonymous throttle — generous on purpose: it bounds
+    # credential-free abuse of endpoints that spend paid
+    # provider quota without impeding reading/paging. Views with
+    # their own ``throttle_classes`` (search, token, register)
+    # replace this list entirely.
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '300/min',
+        # BibleSearchView opts in via throttle_classes — grouped
+        # mode fans out to ~30 upstream calls per request.
+        'search': '30/min',
+        'token': '5/min',
+        'register': '10/min',
+    },
 }
 
 SPECTACULAR_SETTINGS = {

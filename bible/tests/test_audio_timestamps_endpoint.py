@@ -16,8 +16,8 @@ def auth_client(db):
     return c
 
 
-@patch("bible.views.get_tts_config")
-@patch("bible.views.gcs.read_timestamps_json")
+@patch("bible.services.providers.get_tts_config")
+@patch("bible.services.providers.gcs.read_timestamps_json")
 @pytest.mark.django_db
 def test_sword_timestamps_served_from_gcs(
     read_ts, tts_cfg, auth_client,
@@ -40,8 +40,8 @@ def test_sword_timestamps_served_from_gcs(
     assert resp.json()["data"][1]["timestamp"] == 5.34
 
 
-@patch("bible.views.get_tts_config")
-@patch("bible.views.gcs.read_timestamps_json")
+@patch("bible.services.providers.get_tts_config")
+@patch("bible.services.providers.gcs.read_timestamps_json")
 @pytest.mark.django_db
 def test_sword_timestamps_gcs_failure_surfaces_provider_error(
     read_ts, tts_cfg, auth_client,
@@ -64,8 +64,8 @@ def test_sword_timestamps_gcs_failure_surfaces_provider_error(
     assert "SECRET" not in body["error"]
 
 
-@patch("bible.views.get_tts_config")
-@patch("bible.views.gcs.read_timestamps_json")
+@patch("bible.services.providers.get_tts_config")
+@patch("bible.services.providers.gcs.read_timestamps_json")
 @pytest.mark.django_db
 def test_chapter_audio_fileset_reads_chapter_mode_paths(
     read_ts, tts_cfg, auth_client,

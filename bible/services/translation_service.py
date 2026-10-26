@@ -2,13 +2,24 @@
 
 import logging
 
-from .apibible.registry import get_apibible_translation_listing
-from .dbt.client import get_default_dbt_client
-from .esv.registry import get_esv_translation_listing
 from .fileset_groups import group_filesets
-from .sword.client import get_default_sword_client
+from .providers import (
+    ApiBibleProvider,
+    DbtProvider,
+    ESVProvider,
+    SwordProvider,
+)
 
 logger = logging.getLogger(__name__)
+
+# Registry providers whose listings merge into the translations
+# response alongside the live DBT ``/bibles`` list. Each answers
+# its own entries through the facade's ``translation_listing``.
+_REGISTRY_PROVIDERS = (
+    SwordProvider,
+    ESVProvider,
+    ApiBibleProvider,
+)
 
 
 class TranslationService:
@@ -26,23 +37,27 @@ class TranslationService:
                 Defaults to None.
 
         Returns:
-            list: A list of translations without video and audio stream.
+            tuple: ``(translations, dbt_failed)`` — the processed
+                translation list without video/audio-stream
+                filesets, and a flag that is ``True`` when the
+                live DBT fetch failed and the list only contains
+                static registry entries. The view surfaces the
+                flag as ``degraded`` so a DBT outage degrades the
+                response instead of breaking it; a truly fatal
+                error (registry/processing failure) still
+                propagates to the view's 502 path.
         """
         logger.info(
             "Fetching live translations for language_iso: %s",
             language_iso,
         )
-        client = get_default_dbt_client()
-        params = {'limit': 500}
-        if language_iso:
-            params['language_code'] = language_iso.upper()
-
-        logger.debug("Requesting bibles with params: %s", params)
 
         processed = []
+        dbt_failed = False
         try:
-            response = client.get_bibles(**params)
-            translations = response.get('data', [])
+            translations = DbtProvider().translation_listing(
+                language_iso
+            )
             logger.info(
                 "Received %d translations from DBT API.",
                 len(translations),
@@ -50,37 +65,17 @@ class TranslationService:
             logger.debug("Raw translations from API: %s", translations)
             processed = cls._process_translations(translations)
         except Exception as e:
+            dbt_failed = True
             logger.error(
                 "DBT API Error fetching translations: %s", e, exc_info=True
             )
 
-        sword_entries = get_default_sword_client().get_translation_listing()
-        if language_iso:
-            needle = language_iso.lower()
-            sword_entries = [
-                e for e in sword_entries
-                if e['iso'].lower() == needle
-            ]
-
-        esv_entries = get_esv_translation_listing()
-        if language_iso:
-            needle = language_iso.lower()
-            esv_entries = [
-                e for e in esv_entries
-                if e['iso'].lower() == needle
-            ]
-
-        apibible_entries = get_apibible_translation_listing()
-        if language_iso:
-            needle = language_iso.lower()
-            apibible_entries = [
-                e for e in apibible_entries
-                if e['iso'].lower() == needle
-            ]
-        merged = (
-            processed + sword_entries + esv_entries
-            + apibible_entries
-        )
+        registry_entries = []
+        for provider_cls in _REGISTRY_PROVIDERS:
+            registry_entries += provider_cls().translation_listing(
+                language_iso
+            )
+        merged = cls._merge_by_abbr(processed, registry_entries)
         # Attach normalized option groups so clients can offer
         # version-level text/audio choices without parsing raw
         # fileset ids. ``filesets`` stays untouched for backwards
@@ -89,6 +84,50 @@ class TranslationService:
             options = group_filesets(entry)
             entry['text_options'] = options['text_options']
             entry['audio_options'] = options['audio_options']
+        return merged, dbt_failed
+
+    @staticmethod
+    def _merge_by_abbr(processed, registry_entries):
+        """Merge registry entries into the DBT list by ``abbr``.
+
+        A translation present in both sources (e.g. DBT's ESV
+        rows plus the ``ENGESV_API`` registry entry, both
+        ``abbr:ESV``) must produce one row — not two — so its
+        filesets fold into the existing entry, deduped by fileset
+        ``(id, type)`` — the same id can legitimately appear as
+        both text and audio. Entries without a counterpart
+        append as new rows.
+        """
+        merged = list(processed)
+        by_abbr = {}
+        for entry in merged:
+            abbr = entry.get('abbr')
+            if abbr:
+                by_abbr[abbr.upper()] = entry
+        for entry in registry_entries:
+            abbr = entry.get('abbr')
+            existing = by_abbr.get(abbr.upper()) if abbr else None
+            if existing is None:
+                merged.append(entry)
+                if abbr:
+                    by_abbr[abbr.upper()] = entry
+                continue
+            filesets = existing.setdefault('filesets', [])
+            # Dedupe on (id, type) — registry listings reuse one
+            # id across types (ENGESV_API is both text_plain and
+            # audio), so the id alone is not unique.
+            seen = {
+                (fs.get('id'), fs.get('type'))
+                for fs in filesets
+                if isinstance(fs, dict)
+            }
+            for fs in entry.get('filesets') or []:
+                if not isinstance(fs, dict):
+                    continue
+                key = (fs.get('id'), fs.get('type'))
+                if key not in seen:
+                    filesets.append(fs)
+                    seen.add(key)
         return merged
 
     @classmethod

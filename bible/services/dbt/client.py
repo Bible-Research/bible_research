@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import requests
-from typing import Dict, Optional, Any
+from typing import Any, Dict, List, Optional
 from django.conf import settings
 
 # Set up logging
@@ -22,6 +22,30 @@ from openapi_client.api.audio_timing_api import AudioTimingApi
 from openapi_client.configuration import Configuration
 from openapi_client.api_client import ApiClient
 from openapi_client.exceptions import ApiException
+
+
+# Bound every upstream call so a stalled b4.dbt.io socket cannot
+# pin a GAE worker indefinitely. Matches the ESV/API.Bible clients.
+_REQUEST_TIMEOUT_SECONDS = 10
+
+
+def _log_request_error(context, exc):
+    """Log a failed upstream call without exception text.
+
+    ``requests``/``ApiException`` objects stringify with the full
+    request URL — including the ``?key=`` credential this client
+    sends as a query param — so only the exception type and HTTP
+    status are safe to write to logs.
+    """
+    status_code = getattr(exc, 'status', None)
+    if status_code is None:
+        response = getattr(exc, 'response', None)
+        if response is not None:
+            status_code = getattr(response, 'status_code', None)
+    logger.error(
+        "%s: %s (status=%s)",
+        context, type(exc).__name__, status_code,
+    )
 
 
 class DBTClient:
@@ -39,7 +63,7 @@ class DBTClient:
                 environment.
         """
 
-        api_key = getattr(settings, 'DBT_KEY')
+        api_key = api_key or getattr(settings, 'DBT_KEY', None)
 
         if not api_key:
             raise ValueError("DBT_KEY not found in settings.")
@@ -79,17 +103,22 @@ class DBTClient:
         # Ensure version is set
         if 'v' not in kwargs:
             kwargs['v'] = 4
+        # Bound the generated client's socket wait — its default
+        # ``_request_timeout`` is None (no timeout).
+        kwargs.setdefault(
+            '_request_timeout', _REQUEST_TIMEOUT_SECONDS
+        )
 
         try:
             response = request_func(*args, **kwargs)
             return response
         except ApiException as e:
-            logger.error(f"API error: {e}")
+            _log_request_error("DBT API error", e)
             if e.status == 401:
                 logger.error("Authentication failed. Check your API key.")
             raise
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            _log_request_error("DBT unexpected error", e)
             raise
 
     def get_bibles(self, language: str = None, **kwargs) -> Dict[str, Any]:
@@ -112,13 +141,16 @@ class DBTClient:
 
         try:
             response = self.session.get(
-                f"{self.base_url}/bibles", params=params
+                f"{self.base_url}/bibles", params=params,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"DBT API request error: {e}")
-            if e.response and e.response.status_code == 401:
+            _log_request_error("DBT bibles request error", e)
+            if e.response is not None and (
+                e.response.status_code == 401
+            ):
                 logger.error("Authentication failed. Check your API key.")
             raise
 
@@ -275,18 +307,21 @@ class DBTClient:
         )
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(
+                url, params=params,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"DBT timestamps request error: {e}")
+            _log_request_error("DBT timestamps request error", e)
             raise
 
     def get_copyright(
         self,
         bible_id: str,
         **kwargs
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """
         Get copyright info for a Bible.
 
@@ -309,13 +344,14 @@ class DBTClient:
 
         try:
             response = self.session.get(
-                url, params=params
+                url, params=params,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(
-                f"DBT copyright request error: {e}"
+            _log_request_error(
+                "DBT copyright request error", e
             )
             raise
 
@@ -366,13 +402,14 @@ class DBTClient:
 
         try:
             response = self.session.get(
-                url, params=params
+                url, params=params,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(
-                f"DBT search request error: {e}"
+            _log_request_error(
+                "DBT search request error", e
             )
             raise
 
@@ -418,13 +455,14 @@ class DBTClient:
 
         try:
             response = self.session.get(
-                url, params=params
+                url, params=params,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(
-                f"DBT languages request error: {e}"
+            _log_request_error(
+                "DBT languages request error", e
             )
             raise
 

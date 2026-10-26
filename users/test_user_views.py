@@ -45,7 +45,11 @@ class RegisterUserTest(TestCase):
         )
         self.assertEqual(
             set(response.data['user'].keys()),
-            {'id', 'username', 'email', 'date_joined'},
+            {'id', 'username', 'email', 'date_joined',
+             'account_kind'},
+        )
+        self.assertEqual(
+            response.data['user']['account_kind'], 'registered'
         )
         self.assertEqual(response.data['user']['username'], 'newuser')
         self.assertEqual(
@@ -116,6 +120,51 @@ class RegisterUserTest(TestCase):
         )
         self.assertIn('username', response.data)
 
+    def test_register_duplicate_username_iexact_400(self):
+        """Uniqueness is case-insensitive: login uses iexact,
+        so 'NewUser' must not coexist with 'newuser'."""
+        User.objects.create_user(
+            username='NewUser', password='whatever-123'
+        )
+
+        response = self._register()
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('username', response.data)
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_register_username_with_whitespace_400(self):
+        """Usernames containing whitespace are rejected — they
+        served the removed device-middleware impersonation and
+        have no legitimate purpose."""
+        for username in ('has space', 'lead user', 'trail\tuser'):
+            with self.subTest(username=username):
+                response = self._register(username=username)
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_400_BAD_REQUEST,
+                )
+                self.assertIn('username', response.data)
+        self.assertFalse(User.objects.exists())
+
+    def test_register_integrity_error_400_not_500(self):
+        """A UniqueValidator→insert race hits the DB unique
+        constraint — the IntegrityError maps to 400, not 500."""
+        from django.db import IntegrityError
+
+        with patch.object(
+            User.objects, 'create_user',
+            side_effect=IntegrityError('UNIQUE username'),
+        ):
+            response = self._register()
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('username', response.data)
+
     def test_register_duplicate_email_400(self):
         """An existing email is rejected with 400."""
         User.objects.create_user(
@@ -158,6 +207,44 @@ class RegisterUserTest(TestCase):
         )
         self.assertIn('username', response.data)
 
+    def test_register_numeric_only_password_400(self):
+        """AUTH_PASSWORD_VALIDATORS now actually run: a purely
+        numeric password fails NumericPasswordValidator even
+        though it satisfies min_length=8."""
+        response = self._register(
+            password='12345678', password_confirm='12345678'
+        )
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('password', response.data)
+        self.assertFalse(User.objects.filter(username='newuser'))
+
+    def test_register_common_password_400(self):
+        """``password1`` is on the common-password list — it
+        passed before validate_password was wired in."""
+        response = self._register(
+            password='password1', password_confirm='password1'
+        )
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('password', response.data)
+
+    def test_register_password_similar_to_username_400(self):
+        """UserAttributeSimilarityValidator gets a real user
+        instance so a password matching the username fails."""
+        response = self._register(
+            password='newuser123', password_confirm='newuser123'
+        )
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('password', response.data)
+
     def test_register_email_optional(self):
         """Email may be omitted entirely; register returns 201."""
         response = self.client.post(
@@ -174,6 +261,18 @@ class RegisterUserTest(TestCase):
             response.status_code, status.HTTP_201_CREATED
         )
         self.assertEqual(response.data['user']['email'], '')
+
+    def test_register_json_array_body_400_not_500(self):
+        """A top-level JSON array body makes request.data a
+        list — the logger's getattr guard must defer to the
+        serializer's 400 instead of AttributeError-ing."""
+        response = self.client.post(
+            REGISTER_URL, ['not', 'a', 'dict'], format='json'
+        )
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
 
 
 class CurrentUserTest(TestCase):
@@ -197,19 +296,37 @@ class CurrentUserTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             set(response.data.keys()),
-            {'id', 'username', 'email', 'date_joined'},
+            {'id', 'username', 'email', 'date_joined',
+             'account_kind'},
         )
         self.assertEqual(response.data['username'], 'meuser')
         self.assertEqual(response.data['email'], 'me@example.com')
+        self.assertEqual(
+            response.data['account_kind'], 'registered'
+        )
 
-    def test_me_unauthenticated_403(self):
-        """Anonymous requests are denied: the view's explicit
-        @permission_classes([IsAuthenticated]) yields 403 under
-        the pytest settings (no authenticator supplies a
-        WWW-Authenticate header here)."""
+    def test_me_guest_account_kind(self):
+        """The legacy 'guest' account reports
+        ``account_kind: 'guest'`` so clients stop string-matching
+        the username."""
+        guest = User.objects.create_user(
+            username='guest', password='whatever-123'
+        )
+        self.client.force_authenticate(user=guest)
+
+        response = self.client.get(ME_URL)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['account_kind'], 'guest')
+
+    def test_me_unauthenticated_401(self):
+        """Anonymous requests are denied with 401 — the pytest
+        settings now mirror production, where Token/Bearer
+        authentication supplies the WWW-Authenticate header
+        DRF needs to answer 401 instead of 403."""
         response = self.client.get(ME_URL)
 
         self.assertEqual(
             response.status_code,
-            status.HTTP_403_FORBIDDEN,
+            status.HTTP_401_UNAUTHORIZED,
         )

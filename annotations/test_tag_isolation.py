@@ -2,10 +2,11 @@
 Cross-user isolation and serializer-contract tests for
 /api/v1/tags/.
 
-TagViewSet (annotations/views.py:115) has no ownership checks in
-perform_update/perform_destroy — the user filter in get_queryset
-(views.py:123-163) is the sole isolation barrier. These tests pin
-that barrier plus the TagSerializer response shape.
+The user filter in get_queryset is the primary isolation
+barrier; perform_update/perform_destroy now also carry explicit
+ownership checks mirroring NoteViewSet (defense-in-depth).
+These tests pin the barrier plus the TagSerializer response
+shape, the parent-cycle guards, and top-level name uniqueness.
 """
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -125,28 +126,112 @@ class TagIsolationTest(TestCase):
         self.assertIn('parent_tag', resp.json())
 
     def test_duplicate_name_same_user(self):
-        """A second tag with the same name and no parent is
-        silently created — pinned 201.
+        """A second top-level tag with the same name is rejected
+        with a clean 400.
 
-        FIXME: prod bug — unique_together
-        ('user', 'name', 'parent_tag') (annotations/models.py:65)
-        does NOT protect same-name tags when parent_tag is NULL
-        (UNIQUE indexes treat NULLs as distinct) and no
-        serializer layer returns a clean 400, so the duplicate
-        is created. With a non-null parent the same request does
-        get a clean 400 from UniqueTogetherValidator. Flagged
-        for a product decision.
+        unique_together ('user', 'name', 'parent_tag') cannot
+        cover NULL parents (UNIQUE treats NULLs as distinct), so
+        TagSerializer.validate enforces top-level (user, name)
+        uniqueness application-side — backed by the conditional
+        ``unique_top_level_tag_name_per_user`` model constraint
+        once its migration lands.
         """
         resp = self.client.post(
             self.BASE_URL, {'name': 'Owner tag'}, format='json'
         )
-        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('name', resp.json())
         self.assertEqual(
             Tag.objects.filter(
                 user=self.owner, name='Owner tag'
             ).count(),
-            2,
+            1,
         )
+
+    def test_duplicate_name_rename_400(self):
+        """PATCHing a top-level tag onto an existing name is a
+        400 — the same uniqueness rule covers updates."""
+        other = Tag.objects.create(
+            user=self.owner, name='Other tag',
+        )
+        resp = self.client.patch(
+            f'{self.BASE_URL}{other.id}/',
+            {'name': 'Owner tag'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        other.refresh_from_db()
+        self.assertEqual(other.name, 'Other tag')
+
+    def test_same_name_under_parent_allowed(self):
+        """The top-level rule does not fire under a parent —
+        (user, name, parent_tag) unique_together governs."""
+        resp = self.client.post(
+            self.BASE_URL,
+            {'name': 'Owner tag',
+             'parent_tag': self.owner_tag.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+
+    def test_parent_tag_rejects_self(self):
+        """PATCH {parent_tag: <self>} is a 400 — the tag cannot
+        be its own parent (was silently accepted before)."""
+        resp = self.client.patch(
+            f'{self.BASE_URL}{self.owner_tag.id}/',
+            {'parent_tag': self.owner_tag.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('parent_tag', resp.json())
+        self.owner_tag.refresh_from_db()
+        self.assertIsNone(self.owner_tag.parent_tag)
+
+    def test_parent_tag_rejects_descendant(self):
+        """Moving a tag under its own descendant is a 400 —
+        it would silently corrupt the hierarchy."""
+        child = Tag.objects.create(
+            user=self.owner, name='Child',
+            parent_tag=self.owner_tag,
+        )
+        grandchild = Tag.objects.create(
+            user=self.owner, name='Grandchild',
+            parent_tag=child,
+        )
+        resp = self.client.patch(
+            f'{self.BASE_URL}{self.owner_tag.id}/',
+            {'parent_tag': grandchild.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('parent_tag', resp.json())
+        self.owner_tag.refresh_from_db()
+        self.assertIsNone(self.owner_tag.parent_tag)
+
+    def test_parent_tag_accepts_own_non_descendant(self):
+        """Re-parenting under a tag outside the subtree still
+        works (happy path)."""
+        sibling = Tag.objects.create(
+            user=self.owner, name='Sibling',
+        )
+        resp = self.client.patch(
+            f'{self.BASE_URL}{self.owner_tag.id}/',
+            {'parent_tag': sibling.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.owner_tag.refresh_from_db()
+        self.assertEqual(self.owner_tag.parent_tag, sibling)
+
+    def test_child_tag_under_foreign_parent_via_patch_400(self):
+        """PATCH parent_tag to a foreign tag is a 400 — the
+        scoped queryset rejects it like the POST path."""
+        resp = self.client.patch(
+            f'{self.BASE_URL}{self.owner_tag.id}/',
+            {'parent_tag': self.intruder_tag.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
 
     def test_name_too_long_400(self):
         """name longer than the model's max_length=100 -> 400."""
