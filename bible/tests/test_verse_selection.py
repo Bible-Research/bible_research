@@ -322,10 +322,14 @@ class ESVClientVerseRangeTests(TestCase):
 
     @override_settings(ESV_KEY='test-key')
     def test_no_selector_sends_chapter_ref(self):
+        """A chapter-only request sends an explicit whole-
+        chapter range; ESV clamps the end verse to the
+        chapter end (see the single-chapter regression
+        test below)."""
         client = self._client()
         client.get_chapter_with_headings('JHN', 3)
         params = client.session.get.call_args[1]['params']
-        self.assertEqual(params['q'], 'John 3')
+        self.assertEqual(params['q'], 'John 3:1-200')
 
 
 class VerseSelectionViewTests(TestCase):
