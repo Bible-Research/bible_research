@@ -16,6 +16,11 @@ ESV_HTML_BASE_URL = "https://api.esv.org/v3/passage/html/"
 ESV_AUDIO_BASE_URL = "https://api.esv.org/v3/passage/audio/"
 ESV_SEARCH_BASE_URL = "https://api.esv.org/v3/passage/search/"
 
+# Upper bound for a whole-chapter ESV query ("Book C:1-N").
+# api.esv.org clamps an out-of-range end verse to the chapter
+# end; 200 exceeds the longest chapter (Psalm 119 has 176).
+_ESV_MAX_VERSES_PER_CHAPTER = 200
+
 
 class ESVClient:
     def __init__(self, api_key=None):
@@ -44,6 +49,14 @@ class ESVClient:
             ref += f":{verse_start}"
             if verse_end is not None and verse_end != verse_start:
                 ref += f"-{verse_end}"
+        else:
+            # A bare "Book C" ref is ambiguous for
+            # single-chapter books (Obadiah, Philemon,
+            # 2/3 John, Jude): api.esv.org reads
+            # "Philemon 1" as Philemon 1:1 and returns only
+            # that verse. An explicit "C:1-N" range is
+            # unambiguous and clamps to the chapter end.
+            ref += f":1-{_ESV_MAX_VERSES_PER_CHAPTER}"
         params = {
             "q": ref,
             "include-headings": "true",
