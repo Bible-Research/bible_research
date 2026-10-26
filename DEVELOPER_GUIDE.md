@@ -34,11 +34,82 @@ frontend repository will consume this API.
 ## Architecture
 
 ### Technology Stack
-- **Framework**: Django 4.2.6
+- **Framework**: Django 6.1
 - **API**: Django REST Framework
 - **Database**: PostgreSQL (production) / SQLite (development)
-- **External API**: Digital Bible Platform (DBT) API v4
-- **Authentication**: Token-based (DRF TokenAuthentication)
+- **External APIs**: DBT API v4, ESV API (api.esv.org),
+  API.Bible (api.scripture.api.bible), local SWORD modules
+- **Authentication**: Token-based (DRF TokenAuthentication
+  plus a Bearer alias)
+
+### Provider routing
+
+Every request that reaches a Bible provider is dispatched by a
+single facade — `bible/services/providers.py` — instead of each
+view/serializer re-implementing the
+`is_esv → is_apibible → is_sword → else DBT` chain. Callers ask
+`provider_for(fileset_id)` for a provider object and invoke its
+uniform capability surface:
+
+- `get_chapter(book_id, chapter)` — normalized chapter payload
+  (`verses`/`headings`/`meta`) used by note enrichment;
+- `get_passage(book_id, chapter, response_format, verse_start,
+  verse_end)` — the `/api/v1/bible/` response payload
+  (`get_passage_body` in the same module wraps it with the
+  response shaping + `error`/`error_code` mapping);
+- `get_audio`, `get_timestamps`, `search`, `search_grouped`,
+  `get_copyright`, `translation_listing`.
+
+Coverage misses raise `PassageNotFoundError` (subclassed by
+`TimestampsNotGeneratedError` for the "audio exists but its
+timestamp sidecar does not" case) and surface as the stable
+`book_not_in_fileset`/`not_found` codes; every other failure is
+classified by `bible/utils/provider_errors.py` — raw exception
+text never reaches a response body. Serializers shape data
+only: `BiblePassageSerializer` is the request-validation
+boundary and delegates to `get_passage_body`, and
+`NoteSerializer` fetches each `(fileset_id, book, chapter)`
+once per page through a context-shared cache instead of one
+provider call per note.
+
+Non-DBT copyright ids resolve through the same facade: ESV and
+SWORD filesets (and abbrs like `GLU8`) answer from registry
+license metadata, API.Bible filesets fetch the live statement
+from the matching text/audio bible, and everything else
+proxies DBT.
+
+### Caching
+
+The app uses a process-local Django cache (`CACHES` → locmem;
+fine on the single-instance App Engine F1 — swap for
+Memcached/Redis if a second instance is ever added). It backs
+DRF throttling and these provider-data caches:
+
+- `GET /api/v1/bible/translations/` — the whole response is
+  cached per `language_iso` for 6 h and carries
+  `Cache-Control: public, max-age=21600`. A DBT outage returns
+  the registry-only list with `"degraded": true`, which is
+  never cached (`Cache-Control: no-store`). Error responses
+  are not cached either.
+- `GET /api/v1/bible/copyright/` — cached per
+  `(provider, bible_id)` for 24 h (copyright text is static)
+  with `Cache-Control: public, max-age=86400`.
+- `read_timestamps_json` (GCS `_timestamps.json` sidecars) —
+  cached per `(fileset, voice, book, chapter, mode)` for 24 h;
+  the artifact is nominally immutable (the generator only
+  writes chapters that lack one). On overwrite the writer
+  deletes the cache entry in its own process only — the
+  generator runs as a Cloud Run job, separate from the App
+  Engine serving process, so a re-generated chapter can serve
+  stale data until the TTL expires or the service restarts.
+  The timestamps endpoint and the passage audio path share this
+  cache. Misses are never cached, so a chapter becomes
+  available as soon as its artifact is generated.
+- Signed audio URLs (`gcs.signed_audio_url`) live in a bounded
+  in-process LRU (2048 entries, evicts oldest), expiring 60 s
+  before the URL's real TTL.
+
+All cache keys carry a `v1:` namespace prefix.
 
 ### Project Structure
 ```
@@ -46,10 +117,17 @@ bible_research/
 ├── bible/                  # Bible data and retrieval
 │   ├── models.py          # Verse model
 │   ├── views.py           # Bible passage endpoints
-│   ├── serializers.py     # Bible data serialization
-│   ├── services/          # External API clients
-│   │   └── dbt/          # DBT API client
-│   └── utils/            # Helper functions (book mappings)
+│   ├── serializers.py     # Request-validation boundary only
+│   ├── services/          # Provider clients and facade
+│   │   ├── providers.py   # fileset_id routing facade
+│   │   ├── dbt/          # DBT API client
+│   │   ├── esv/          # ESV API client + registry
+│   │   ├── apibible/     # API.Bible client + registry
+│   │   ├── sword/        # local SWORD module client + registry
+│   │   ├── google_tts/   # generated-audio helpers
+│   │   └── storage/      # GCS artifact helpers
+│   └── utils/            # Helper functions (book mappings,
+│                         # provider error normalization)
 ├── annotations/           # User notes and tags
 │   ├── models.py         # Tag, Note, NoteVerse models
 │   ├── views.py          # CRUD endpoints for tags/notes
@@ -69,7 +147,7 @@ bible_research/
 ## Getting Started
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.12
 - PostgreSQL (for production) or SQLite (for development)
 - DBT API key (from [Bible Brain][bible-brain])
 
@@ -89,8 +167,12 @@ bible_research/
 
 3. **Install dependencies**
    ```bash
-   pip install -r requirements.txt
+   pip install -r requirements-dev.txt
    ```
+   `requirements-dev.txt` pulls in the pinned
+   `requirements.txt` runtime stack plus dev-only tools
+   (pytest, pytest-django, debugpy). Production installs
+   `requirements.txt` alone.
 
 4. **Configure the application**
    ```bash
@@ -233,6 +315,18 @@ The project uses two special accounts:
   `GET /api/v1/comments/counts/` carry
   `permission_classes = [AllowAny]`.
 
+**Throttling**: a global `AnonRateThrottle` caps anonymous
+traffic at 300 requests/minute per client IP; authenticated
+requests are exempt except where a view opts into a scope.
+`POST /api/token/` (5/min per username), `POST
+/api/v1/users/register/` (10/min per client), and
+`GET /api/v1/bible/search/` (30/min, applied to anonymous and
+authenticated callers alike) carry tighter scoped rates —
+grouped search fans out to ~30 upstream provider calls per
+request. Throttle counters use the per-process locmem cache,
+so on GAE the effective limits scale roughly with running
+instances and reset on every restart/deploy.
+
 ---
 
 ## API Endpoints
@@ -309,7 +403,8 @@ POST /api/v1/users/register/
     "id": 3,
     "username": "newuser",
     "email": "user@example.com",
-    "date_joined": "2026-03-01T07:11:10Z"
+    "date_joined": "2026-03-01T07:11:10Z",
+    "account_kind": "registered"
   },
   "token": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0",
   "message": "User registered successfully"
@@ -317,6 +412,12 @@ POST /api/v1/users/register/
 ```
 **Notes**:
 - Email is optional
+- Usernames may not contain whitespace (HTTP 400), and
+  uniqueness is case-insensitive — login matches usernames
+  with `iexact`, so `Alice`/`alice` cannot coexist
+- `account_kind` is `guest` for the legacy read-only
+  account, `registered` otherwise — clients should branch on
+  it instead of string-matching `username == 'guest'`
 - Password must pass Django's `AUTH_PASSWORD_VALIDATORS`:
   at least 8 characters, not entirely numeric, not a common
   password, and not too similar to the username/email.
@@ -341,7 +442,8 @@ Authorization: Token <your-token>
   "id": 3,
   "username": "newuser",
   "email": "user@example.com",
-  "date_joined": "2026-03-01T07:11:10Z"
+  "date_joined": "2026-03-01T07:11:10Z",
+  "account_kind": "registered"
 }
 ```
 
@@ -434,7 +536,7 @@ GET /api/v1/bible/?passage=John+3&response_format=audio&
   verse numbers for `response_format=text`; audio responses are
   always chapter-granular and ignore the selector. A selector
   outside the chapter's verses returns `404` with
-  `error_code` `not_found`. The parameter is bounded: at most
+  `error_code` `book_not_in_fileset`. The parameter is bounded: at most
   100 characters total, 25 verse segments, and verse numbers
   1–200 — larger values return `400`.
 - `response_format`: "text" or "audio" (default: "text")
@@ -446,19 +548,34 @@ GET /api/v1/bible/?passage=John+3&response_format=audio&
   - For audio: Use audio fileset codes like "ENGESVN2DA",
     "LVSGLU8C1DA", "ENGNIVC1DA"
 
-ESV note: the `ENGESV_API` provider requests whole chapters
-upstream as an explicit `Book C:1-200` range rather than a bare
-`Book C` ref — api.esv.org parses a bare chapter ref as `C:1`
-for single-chapter books (Obadiah, Philemon, 2/3 John, Jude)
-and returns only verse 1. The out-of-range end verse clamps to
-the real chapter end.
-
 API.Bible text responses additionally carry a `meta` object with
 the upstream FUMS fields (`fums`, `fumsId`, `fumsJsInclude`,
 `fumsNoScript`) — clients must report them per API.Bible's
 license terms. Audio responses return API.Bible's presigned
 `resourceUrl`, which expires (typically within minutes); treat
 it like any other short-lived signed URL.
+
+**Text-vs-audio capability matrix** — providers disagree on
+what a mismatched `response_format` means, and the endpoint
+relays each provider's answer rather than normalizing it:
+
+- `text` on an audio fileset:
+  - DBT (`*DA` id) → `format:"audio"` payload — the audio
+    fileset has no text rows to return.
+  - SWORD (`LVSGLU8C1DA`/`C2DA`), API.Bible (`ENGNIVC1DA`) →
+    chapter text (the audio id canonicalizes to the provider's
+    text resource).
+  - ESV has no separate audio fileset id — `ENGESV_API`
+    serves both formats, so the mismatch cannot arise.
+- `audio` on a text fileset:
+  - DBT → 404 `book_not_in_fileset`.
+  - ESV, SWORD, API.Bible → chapter audio URL (the same id's
+    audio resource: ESV API audio, the generated TTS sibling,
+    or the paired API.Bible audio bible).
+
+Callers should always branch on the returned `format` field,
+not on the requested `response_format`, and treat 404
+`book_not_in_fileset` as "try another fileset".
 
 **Error contract** — when the requested book/chapter is not
 covered by the fileset, the endpoint returns HTTP 404 with a
@@ -478,18 +595,32 @@ can fall back to another fileset:
 
 This covers a DBT 404 (or empty `data`) from
 `v4_bible_filesets_show_chapter`, SWORD misses (a book/chapter
-outside the module, or generated audio not yet uploaded), and
-ESV API 404s for both text and audio requests.
+outside the module, or generated audio not yet uploaded),
+ESV API 404s for both text and audio requests, and API.Bible
+misses (upstream 404s, empty chapters, or missing audio
+resources reported as `PassageNotFoundError`). Every provider's
+"fileset lacks this book/chapter" outcome is normalized to the
+single `book_not_in_fileset` code the frontend's fileset
+fallback keys on.
 
 Other provider failures surface as `error` + `error_code` with a
 real HTTP status (built by `bible/utils/provider_errors.py`):
-`rate_limited` → 429, `not_found` (missing passage content, e.g.
-an empty ESV body) → 404, anything else → `provider_error` →
-502. Raw exception text is never embedded in `error` — upstream
-exception messages can contain request URLs with credentials
-(DBT's `?key=` query param); only the exception class name is
-surfaced. The React app branches on `error_code`, so these
-fields stay stable.
+`rate_limited` → 429, `not_found` → 404, anything else →
+`provider_error` → 502. Raw exception text is never embedded in
+`error` — upstream exception messages can contain request URLs
+with credentials (DBT's `?key=` query param); only the exception
+class name is surfaced. The React app branches on `error_code`,
+so these fields stay stable.
+
+**Client-input 400s** on all `bible/` endpoints carry the same
+contract — `{"error", "error_code"}` built by
+`bible/utils/error_responses.py`: `missing_parameter` when a
+required query param is absent, `invalid_parameter` when one is
+malformed. `fileset_id` (passage/search/timestamps), `bible_id`
+(copyright), `language_iso` (translations) and `book`
+(timestamps) are charset/length-validated at the view boundary
+before provider routing, so garbage ids can never reach the DBT
+branch or an upstream URL path.
 
 #### List Available Translations
 ```
@@ -547,6 +678,15 @@ GET /api/v1/bible/translations/
 }
 ```
 
+**Degraded mode** — the response merges the live DBT `/bibles`
+list with bundled registry translations (ESV API, API.Bible NIV,
+SWORD), deduplicated by `abbr`. If the DBT fetch fails the
+request still returns `200` with the registry-only list and
+`"degraded": true` (`Cache-Control: no-store`); any other
+failure keeps the `502`/`provider_error` contract. Successful
+responses are cached per `language_iso` for 6 h (see
+*Caching*); the DBT listing itself is truncated at 500 rows.
+
 **Normalized options** — each translation also carries
 `text_options` (at most one entry, `kind: "text"`) and
 `audio_options` (one per listening experience; `kind` is
@@ -566,7 +706,9 @@ Grouping rules (see `bible/services/fileset_groups.py`):
 
 **Query Parameters**:
 - `language_iso` (optional): Filter by ISO language code
-  (e.g., "eng", "lvs")
+  (e.g., "eng", "lvs"). Must match `^[a-zA-Z]{2,3}$` —
+  anything else returns `400` with
+  `error_code: "invalid_parameter"`.
 
 **Example**:
 ```
@@ -635,7 +777,8 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
   `offset`-based pagination
 - `limit`: Max results per page (default 15)
 - `page`: Result page number (default 1)
-- `sort_by`: Sort field (DBT only)
+- `sort_by`: Sort field (DBT only — forwarded on every paged
+  and grouped upstream call)
 - `books`: Comma-separated USFM book IDs (e.g. `JHN,ROM`);
   honored for DBT and SWORD only — the ESV API has no book
   filter
@@ -666,6 +809,13 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
   }
 }
 ```
+`meta.pagination` is always present for every provider — fields
+a provider omits fall back to locally-known values.
+`chapter`/`verse_start` are always real integers. For SWORD
+filesets the local scan stops once enough matches fill the
+requested page; `meta.truncated: true` then marks
+`total`/`total_pages` as lower bounds — keep paging while it
+is set.
 
 **Grouped mode** (`group_by=book`) fetches all matches and
 returns them bucketed per book in canonical order. Verses
@@ -696,8 +846,8 @@ within each group are sorted by chapter and verse:
 ```
 `meta.total` is the provider-reported match count (number
 scanned for SWORD). `meta.truncated` is true when a safety cap
-cut results off (5000 results for DBT, 30 pages for ESV;
-SWORD is never truncated).
+cut results off (5000 results for DBT/API.Bible/SWORD, 30 pages
+for ESV).
 
 ### Tags
 
@@ -743,6 +893,14 @@ Content-Type: application/json
 }
 ```
 
+`parent_tag` must be one of the caller's own tags — a foreign
+or nonexistent tag id returns `400` (PKRF validation).
+Names are trimmed of surrounding whitespace, and a top-level
+tag name must be unique per user: creating or renaming to a
+duplicate returns `400` on the `name` field (backed by the
+`unique_top_level_tag_name_per_user` conditional constraint).
+The same name under different parents remains allowed.
+
 #### Update Tag
 ```
 PUT /api/v1/tags/{tag_id}/
@@ -753,6 +911,10 @@ Content-Type: application/json
   "name": "Divine Love"
 }
 ```
+
+Re-parenting is validated against cycles: a tag cannot be its
+own parent nor be moved underneath one of its own descendants
+(both return `400`).
 
 #### Delete Tag
 ```
@@ -817,9 +979,13 @@ uses it to decide whether a shared note is editable.
 - `fileset_id` (optional): Bible translation used to enrich
   each note's `verses[].text` — same provider routing as the
   passage endpoint (`ENGESV_API` → ESV API, SWORD ids like
-  `LVSGLU8` → local module, anything else → DBT).
-  Defaults to `ENGESV` (DBT). SWORD translations return no
-  `headings`.
+  `LVSGLU8` → local module, `ENGNIV_API`/`NIV` → API.Bible,
+  anything else → DBT) via `provider_for(fileset_id)`.
+  Enrichment is batched: the whole chapter is fetched once per
+  `(fileset_id, book, chapter)` per page through a serializer
+  context cache, so a page of notes on one passage costs one
+  upstream call. Defaults to `ENGESV` (DBT). SWORD
+  translations return no `headings`.
 - `ordering` (optional): Sort order
   - `custom` (default): Custom order ascending
   - `-custom`: Custom order descending
@@ -925,7 +1091,15 @@ Content-Type: application/json
 
 Note creation is atomic: if any `verse_references` entry fails to
 resolve, the request returns `400` and no note or verse links are
-persisted.
+persisted. Repeated entries in `verse_references` are silently
+deduplicated before linking (book match is case-insensitive), and
+`tag_position` is read-only on this endpoint — ordering is
+managed exclusively by `notes/reorder/` and `notes/move/`.
+
+Bulk creation goes through `POST /api/v1/notes/bulk/` with
+`{"tag_id": "TAG...", "notes": [...]}` — up to 100 notes per
+request (`400` beyond that), returning `201` with the created
+notes.
 
 #### Get Note by ID
 ```
@@ -1021,6 +1195,8 @@ ascending, nulls last, `-created_at` tiebreak — identical to
 every note's rank + passage at once (e.g. a "move note"
 dropdown listing 1-based order IDs), without paging through
 full note payloads. Anonymous callers see only public notes.
+`tag_id=untagged` resolves the sentinel to notes with no tag,
+matching `GET /notes/` and `/comments/counts/` semantics.
 
 **Response**:
 ```json
@@ -1137,10 +1313,13 @@ requester sees comments only on their own notes or on public
 notes. Any operation against a note outside that scope
 returns `404`, identical to a nonexistent note, so private
 note existence is not leaked. Any authenticated user may
-comment on a public note; updating or deleting a comment
-remains restricted to its author (`403` otherwise). Reads
-require no token (anonymous callers see public-note
-comments); writes require authentication.
+comment on a public note; updating a comment is restricted
+to its author (`403` otherwise), while deleting is allowed
+for the author **or the note's owner** (the note owner
+moderates discussion on their own note, mirroring
+`DELETE /images/{id}/`). `content` is capped at 10000
+characters. Reads require no token (anonymous callers see
+public-note comments); writes require authentication.
 
 Soft-delete contract: `DELETE` sets `is_deleted=True` and
 clears `content`, but the row is retained so reply threads
@@ -1153,7 +1332,10 @@ never returns `404` for a deleted comment.
 PATCH may only change `content`: `is_deleted` is read-only
 (deletion happens exclusively via `DELETE` and cannot be
 undone), and `parent_comment` is create-only — sending it on
-update returns `400`.
+update returns `400`. Tombstones are immutable: `PATCH` on a
+deleted comment returns `400`, and `POST` with a
+`parent_comment` pointing at a deleted comment also returns
+`400` — a reply cannot hang off a `[deleted]` stub.
 
 ### Note & Comment Images
 ```
@@ -1167,16 +1349,29 @@ DELETE /api/v1/images/{image_id}/
 Multipart upload with a single `file` field. Note images:
 only the note's owner may upload; reads follow the note's
 accessibility scope. Comment images: only the comment's
-author may upload. `DELETE /images/{id}/` is allowed for the
-uploader, the parent note's owner, or the parent comment's
-author. A soft-deleted comment's image list returns `[]`
-(the same tombstone contract as the comment payload itself —
-its images are never exposed via the nested route).
+author may upload. On both nested routes the parent note or
+comment is resolved through `get_accessible_notes_qs`, so an
+inaccessible (private foreign) parent returns `404` —
+identical to a nonexistent one — instead of a 403 that would
+leak its existence. `DELETE /images/{id}/` returns `404`
+unless the requester may delete it — uploader, parent note's
+owner, or parent comment's author — so the endpoint leaks no
+existence oracle.
+
+Upload validation: the declared `Content-Type` must match the
+actual image bytes (Pillow format check — `415` on mismatch),
+and images tripping the decompression-bomb limit return `413`.
+Uploading to a soft-deleted comment is rejected (`400`).
+
+Every `Image` row deletion — including note/tag/user cascade
+deletes — removes its GCS object via a `post_delete`
+receiver, so blobs are never orphaned.
 
 ### Reading Positions
 ```
 GET    /api/v1/reading-positions/
 POST   /api/v1/reading-positions/
+POST   /api/v1/reading-positions/bulk/
 PATCH  /api/v1/reading-positions/{id}/
 DELETE /api/v1/reading-positions/{id}/
 Authorization: Token <your-token>
@@ -1189,7 +1384,20 @@ through the book-name lookup and stored canonicalized
 `John` row), so case variants can never fork duplicate
 positions. `book` is immutable afterwards — `PATCH` with a
 different book returns `400`; re-seat a position via
-delete + create instead.
+delete + create instead. The upsert returns `201` when a
+row is created and `200` when an existing row is updated.
+
+`POST /reading-positions/bulk/` is a read implemented as
+POST (the book list belongs in a body): `{"books": ["John",
+"Genesis"]}` → `{"John": {"chapter": 3, "verse": 16},
+"Genesis": null, ...}` — keys echo the names the client
+sent, values are null for books with no stored position.
+Names go through the same tolerant lookup as create
+(unresolvable names return `400`); the array is capped at
+100 entries. Because it is a read, the legacy `guest`
+account may call it — matching `GET ?book=` — while every
+other write still returns `403` for guest and `401`
+anonymously.
 
 ---
 
@@ -1218,6 +1426,12 @@ class Tag(models.Model):
 
 **Constraints**:
 - Unique combination of (user, name, parent_tag) for child tags
+- `unique_top_level_tag_name_per_user`: conditional
+  `UniqueConstraint(user, name)` where `parent_tag IS NULL` —
+  `unique_together` cannot cover NULL parents. Declared in the
+  model and enforced application-side by `TagSerializer`;
+  **migration not yet generated** (`python manage.py
+  makemigrations` is a required human step).
 
 ### Note Model
 ```python
@@ -1240,6 +1454,12 @@ class NoteVerse(models.Model):
     verse = ForeignKey(Verse, on_delete=PROTECT)
     created_at = DateTimeField(auto_now_add=True)
 ```
+
+**Constraints** (both declared, pending `makemigrations`):
+- `unique_note_verse_link` on NoteVerse: one link per
+  (note, verse).
+- `unique_book_chapter_verse` on Verse: one row per
+  (book, chapter, verse).
 
 ---
 
@@ -1517,19 +1737,61 @@ python manage.py migrate annotations 0001
 
 ### Logging
 
-Logs are stored in `logs/` directory (development only):
-- `django.log` - General Django logs
-- `bible.log` - Bible app logs
-- `annotations.log` - Annotations app logs
+Logs are stored in `logs/` directory (local development only —
+cloud filesystems are read-only, so production logs go to the
+console):
+- `debug.log` - `django`, `bible`, `annotations`, and `users`
+  records at INFO and above
+- `error.log` - ERROR-level records from the same loggers
 
 **View logs**:
 ```bash
-tail -f logs/django.log
+tail -f logs/debug.log
 ```
+
+### Monitoring (Sentry)
+
+Error monitoring via Sentry is wired but opt-in: when
+`SENTRY_DSN` is empty the SDK stays uninitialized and nothing is
+sent (local dev and CI are silent by default).
+
+- **Local**: set `SENTRY_DSN` in `config.yaml` (see
+  `config_template.yaml`) to the `bible-research-api` project's
+  Client Key DSN.
+- **Production (GAE)**: create the `SENTRY_DSN` secret in GCP
+  Secret Manager (Terraform reads its metadata via
+  `terraform/secrets.tf`); the env var of the same name also
+  works. `GAE_VERSION` is used as the Sentry release;
+  environment is `production` on GCP, `development` otherwise.
+- Uncaught exceptions (HTTP 500s) are captured automatically.
+  Provider failures surfaced through the `error`/`error_code`
+  contract are additionally captured at `warning` level with an
+  `error_code` tag (`rate_limited`/`provider_error` only —
+  `not_found` and `book_not_in_fileset` are never sent). Log
+  records INFO+ are breadcrumbs only, not events.
+- `send_default_pii=False`; `before_send` drops request bodies
+  on `/api/token/` and `/api/v1/users/` (they contain
+  passwords).
+- `sentry-trace`/`baggage` are allowed CORS headers so the
+  frontend can link its traces to backend requests.
 
 ---
 
 ## Testing
+
+The pytest suite runs against the real
+`bible_research.settings` module — `conftest.py` imports it and
+overrides only the test-required deltas (SQLite in-memory
+database, dummy provider keys, generous throttle rates), so
+tests exercise the production `REST_FRAMEWORK`
+authentication/permission stack and `MIDDLEWARE` chain.
+`config.yaml` is not required: under pytest, `settings.py`
+treats a missing config file as empty instead of raising.
+
+```bash
+python -m pytest -q                # full suite
+python -m pytest annotations/ -q   # one app
+```
 
 ### Test User Setup
 
@@ -1634,12 +1896,6 @@ pg_restore -d bibledb --clean --if-exists \
 To run the app against the restored copy, repoint `config.yaml`'s
 `DATABASES.default` at the local database.
 
-### Vercel Deployment
-
-The project includes Vercel configuration:
-- `vercel.json` - Vercel settings
-- `build_files.sh` - Build script
-
 ### Production Checklist
 
 - [ ] Set `DEBUG=False`
@@ -1650,7 +1906,8 @@ The project includes Vercel configuration:
 - [ ] Configure allowed hosts
 - [ ] Set up database backups
 - [ ] Configure logging to external service
-- [ ] Set up monitoring (e.g., Sentry)
+- [ ] Create `SENTRY_DSN` in Secret Manager (enables Sentry
+      monitoring — see "Monitoring (Sentry)")
 - [ ] Review security settings
 
 ---

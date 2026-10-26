@@ -16,11 +16,11 @@ def auth_client(db):
     return c
 
 
-@patch("bible.serializers.get_tts_config")
-@patch("bible.serializers.gcs.read_timestamps_json")
-@patch("bible.serializers.gcs.signed_audio_url")
-@patch("bible.serializers.gcs.chapter_audio_exists")
-@patch("bible.serializers.gcs.get_default_client")
+@patch("bible.services.providers.get_tts_config")
+@patch("bible.services.providers.gcs.read_timestamps_json")
+@patch("bible.services.providers.gcs.signed_audio_url")
+@patch("bible.services.providers.gcs.chapter_audio_exists")
+@patch("bible.services.providers.gcs.get_default_client")
 @pytest.mark.django_db
 def test_audio_response_returns_signed_url(
     get_client, exists, signed, read_ts, tts_cfg, auth_client,
@@ -50,10 +50,10 @@ def test_audio_response_returns_signed_url(
     assert body["file_size_bytes"] == 1234567
 
 
-@patch("bible.serializers.get_tts_config")
-@patch("bible.serializers.gcs.read_timestamps_json")
-@patch("bible.serializers.gcs.signed_audio_url")
-@patch("bible.serializers.gcs.chapter_audio_exists")
+@patch("bible.services.providers.get_tts_config")
+@patch("bible.services.providers.gcs.read_timestamps_json")
+@patch("bible.services.providers.gcs.signed_audio_url")
+@patch("bible.services.providers.gcs.chapter_audio_exists")
 @pytest.mark.django_db
 def test_chapter_audio_fileset_uses_chapter_mode_gcs_paths(
     exists, signed, read_ts, tts_cfg, auth_client,
@@ -85,8 +85,8 @@ def test_chapter_audio_fileset_uses_chapter_mode_gcs_paths(
     assert signed.call_args.kwargs["mode"] == "chapter"
 
 
-@patch("bible.serializers.get_tts_config")
-@patch("bible.serializers.gcs.chapter_audio_exists")
+@patch("bible.services.providers.get_tts_config")
+@patch("bible.services.providers.gcs.chapter_audio_exists")
 @pytest.mark.django_db
 def test_verse_audio_fileset_keeps_verse_mode(
     exists, tts_cfg, auth_client,

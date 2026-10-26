@@ -44,7 +44,7 @@ def _http_error(status_code):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_404_text_request(mock_get_client, client):
     """DBT ApiException 404 on a text request → 404 body."""
     mock_get_client.return_value.get_verses.side_effect = (
@@ -59,7 +59,7 @@ def test_dbt_404_text_request(mock_get_client, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_404_audio_request(mock_get_client, client):
     """DBT ApiException 404 on an audio request → 404 body."""
     mock_get_client.return_value.get_verses.side_effect = (
@@ -75,7 +75,7 @@ def test_dbt_404_audio_request(mock_get_client, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_empty_data_returns_404(mock_get_client, client):
     """A 200 DBT response with empty ``data`` → 404 body."""
     mock_get_client.return_value.get_verses.return_value = {
@@ -90,7 +90,7 @@ def test_dbt_empty_data_returns_404(mock_get_client, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_audio_request_without_path_returns_404(
     mock_get_client, client
 ):
@@ -108,7 +108,7 @@ def test_audio_request_without_path_returns_404(
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_audio_request_with_null_path_returns_404(
     mock_get_client, client
 ):
@@ -126,8 +126,8 @@ def test_audio_request_with_null_path_returns_404(
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_tts_config')
-@patch('bible.serializers.gcs.chapter_audio_exists')
+@patch('bible.services.providers.get_tts_config')
+@patch('bible.services.providers.gcs.chapter_audio_exists')
 def test_sword_audio_missing_chapter_404(exists, tts_cfg, client):
     """SWORD audio not yet generated → canonical 404 body."""
     tts_cfg.return_value = {'voice_name': 'lv-LV-test'}
@@ -147,7 +147,7 @@ def test_sword_audio_missing_chapter_404(exists, tts_cfg, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_sword_client')
+@patch('bible.services.providers.get_default_sword_client')
 def test_sword_text_missing_book_404(mock_sword, client):
     """SWORD text ValueError (book absent) → 404 body."""
     mock_sword.return_value.get_chapter_verses.side_effect = (
@@ -162,7 +162,7 @@ def test_sword_text_missing_book_404(mock_sword, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_sword_client')
+@patch('bible.services.providers.get_default_sword_client')
 def test_sword_text_missing_chapter_404(mock_sword, client):
     """SWORD text ValueError (no verses) → 404 body."""
     mock_sword.return_value.get_chapter_verses.side_effect = (
@@ -177,7 +177,7 @@ def test_sword_text_missing_chapter_404(mock_sword, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_sword_client')
+@patch('bible.services.providers.get_default_sword_client')
 def test_sword_infra_error_returns_502(mock_sword, client):
     """A missing module zip (OSError) is a provider failure —
     it surfaces as 502 ``provider_error``, not a silent 200."""
@@ -195,7 +195,7 @@ def test_sword_infra_error_returns_502(mock_sword, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_audio_404_returns_not_in_fileset(mock_esv, client):
     """ESV audio HTTPError 404 → 404 body."""
     mock_esv.return_value.get_chapter_audio_url.side_effect = (
@@ -211,7 +211,7 @@ def test_esv_audio_404_returns_not_in_fileset(mock_esv, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_text_404_returns_not_in_fileset(mock_esv, client):
     """ESV text HTTPError 404 → 404 body."""
     mock_esv.return_value.get_chapter_with_headings.side_effect = (
@@ -226,7 +226,7 @@ def test_esv_text_404_returns_not_in_fileset(mock_esv, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_esv_client')
+@patch('bible.services.providers.get_default_esv_client')
 def test_esv_other_error_returns_502(mock_esv, client):
     """Non-404 ESV failures surface as 502 ``provider_error``."""
     mock_esv.return_value.get_chapter_audio_url.side_effect = (
@@ -243,7 +243,7 @@ def test_esv_other_error_returns_502(mock_esv, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_other_error_returns_502(mock_get_client, client):
     """Non-404 failures surface as 502 ``provider_error`` — never
     a silent 200 with an empty ``verses`` list."""
@@ -261,7 +261,7 @@ def test_dbt_other_error_returns_502(mock_get_client, client):
 
 
 @pytest.mark.django_db
-@patch('bible.serializers.get_default_dbt_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_dbt_text_success_unchanged(mock_get_client, client):
     """A normal text response is unaffected by the contract."""
     mock_get_client.return_value.get_verses.return_value = {
@@ -286,7 +286,7 @@ def test_translations_response_includes_options(
     mock_translations, client
 ):
     """The translations endpoint exposes the grouped options."""
-    mock_translations.return_value = [{
+    mock_translations.return_value = ([{
         'abbr': 'GLU8',
         'name': 'Latvian Glück 8th edition',
         'language': 'Latvian',
@@ -298,7 +298,7 @@ def test_translations_response_includes_options(
         'audio_options': [
             {'id': 'GLU8:generated:1', 'kind': 'generated'}
         ],
-    }]
+    }], False)
 
     response = client.get(
         TRANSLATIONS_URL, {'language_iso': 'lvs'}
@@ -318,9 +318,9 @@ def test_translations_response_includes_options(
 
 
 @pytest.mark.django_db
-@patch('bible.services.translation_service.get_esv_translation_listing')
-@patch('bible.services.translation_service.get_default_sword_client')
-@patch('bible.services.translation_service.get_default_dbt_client')
+@patch('bible.services.providers.get_esv_translation_listing')
+@patch('bible.services.providers.get_default_sword_client')
+@patch('bible.services.providers.get_default_dbt_client')
 def test_service_groups_dbt_filesets(
     mock_dbt, mock_sword, mock_esv
 ):
@@ -360,8 +360,11 @@ def test_service_groups_dbt_filesets(
     from bible.services.translation_service import (
         TranslationService,
     )
-    translations = TranslationService.get_live_translations('lvs')
+    translations, dbt_failed = (
+        TranslationService.get_live_translations('lvs')
+    )
 
+    assert not dbt_failed
     assert len(translations) == 1
     entry = translations[0]
     assert entry['filesets'] == [

@@ -2,12 +2,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
 
+# requirements.txt is runtime-only; dev tools live in
+# requirements-dev.txt and are intentionally not installed here.
 COPY requirements.txt .
-RUN grep -v '^debugpy' requirements.txt > /tmp/requirements-prod.txt \
-    && pip install --no-cache-dir -r /tmp/requirements-prod.txt \
-    && rm /tmp/requirements-prod.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
@@ -19,4 +21,5 @@ RUN printf 'SECRET_KEY=build\nDEBUG=False\nDATABASE_URL=sqlite:///:memory:\n' > 
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "bible_research.wsgi:application"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", \
+     "--threads", "4", "bible_research.wsgi:application"]

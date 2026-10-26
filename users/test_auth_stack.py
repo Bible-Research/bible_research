@@ -1,26 +1,19 @@
 """
 Tests exercising the production auth/middleware stack.
 
-The class is decorated with ``prod_auth_stack`` (see the root
-conftest.py), which loads the prod MIDDLEWARE plus the prod
-REST_FRAMEWORK authentication and permission classes —
-Token/Bearer auth only. DeviceAndCountryMiddleware is gone:
-anonymous requests reach the views as a real ``AnonymousUser``,
-no user rows are minted from headers, and unauthenticated
-writes are clean 401s.
+The test suite runs on the real production MIDDLEWARE and
+REST_FRAMEWORK settings (see the root conftest.py), so
+Token/Bearer auth is the default. DeviceAndCountryMiddleware
+is gone: anonymous requests reach the views as a real
+``AnonymousUser``, no user rows are minted from headers, and
+unauthenticated writes are clean 401s.
 """
-from unittest.mock import patch
-
 from django.contrib.auth import get_user_model
 from django.test import TestCase
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from annotations.models import Comment, Note, Tag
-from bible_research.authentication import BearerTokenAuthentication
-from conftest import prod_auth_stack
-from users.views import current_user
 
 ME_URL = '/api/v1/users/me/'
 REGISTER_URL = '/api/v1/users/register/'
@@ -40,18 +33,7 @@ DEVICE_HEADERS = {
     'HTTP_ACCEPT_LANGUAGE': 'en-US,en;q=0.9',
 }
 
-# @api_view copies APIView.authentication_classes onto the
-# generated WrappedAPIView at import time, so the class-level
-# APIView patch in prod_auth_stack does not reach function
-# views — patch current_user.cls directly where prod auth
-# must be exercised on me/.
-ME_AUTH_CLASSES = [
-    TokenAuthentication,
-    BearerTokenAuthentication,
-]
 
-
-@prod_auth_stack
 class ProdAuthStackTest(TestCase):
     """Prove the prod middleware + DRF auth stack end-to-end."""
 
@@ -62,12 +44,7 @@ class ProdAuthStackTest(TestCase):
     def test_anonymous_me_returns_401_and_mints_no_user(self):
         """Anonymous /me/ is a real 401 — no device user is
         provisioned to satisfy it, so no User row appears."""
-        with patch.object(
-            current_user.cls,
-            'authentication_classes',
-            ME_AUTH_CLASSES,
-        ):
-            resp = self.client.get(ME_URL, **DEVICE_HEADERS)
+        resp = self.client.get(ME_URL, **DEVICE_HEADERS)
 
         self.assertEqual(resp.status_code, 401)
         self.assertEqual(self.User.objects.count(), 0)
@@ -80,16 +57,11 @@ class ProdAuthStackTest(TestCase):
         )
         token = Token.objects.create(user=user)
 
-        with patch.object(
-            current_user.cls,
-            'authentication_classes',
-            ME_AUTH_CLASSES,
-        ):
-            resp = self.client.get(
-                ME_URL,
-                HTTP_AUTHORIZATION=f'Token {token.key}',
-                **DEVICE_HEADERS,
-            )
+        resp = self.client.get(
+            ME_URL,
+            HTTP_AUTHORIZATION=f'Token {token.key}',
+            **DEVICE_HEADERS,
+        )
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()['username'], 'tokenuser')
@@ -102,16 +74,11 @@ class ProdAuthStackTest(TestCase):
         )
         token = Token.objects.create(user=user)
 
-        with patch.object(
-            current_user.cls,
-            'authentication_classes',
-            ME_AUTH_CLASSES,
-        ):
-            resp = self.client.get(
-                ME_URL,
-                HTTP_AUTHORIZATION=f'Bearer {token.key}',
-                **DEVICE_HEADERS,
-            )
+        resp = self.client.get(
+            ME_URL,
+            HTTP_AUTHORIZATION=f'Bearer {token.key}',
+            **DEVICE_HEADERS,
+        )
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(

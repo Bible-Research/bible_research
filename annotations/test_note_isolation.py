@@ -140,8 +140,16 @@ class NoteIsolationTest(TestCase):
             storage_url='gs://test-bucket/originals/x/a.jpg',
             uploaded_by=self.user,
         )
-        resp = self.client.delete(f'{self.LIST_URL}{note.id}/')
+        with patch(
+            'annotations.services.image_storage.delete_original'
+        ) as mock_del:
+            resp = self.client.delete(f'{self.LIST_URL}{note.id}/')
         self.assertEqual(resp.status_code, 204)
+        # post_delete receiver: cascade-deleted Image rows also
+        # schedule their GCS blob for deletion.
+        mock_del.assert_called_once_with(
+            image.id, image.storage_url
+        )
         self.assertFalse(Note.objects.filter(id=note.id).exists())
         self.assertEqual(
             NoteVerse.objects.filter(note_id=note.id).count(), 0
@@ -200,7 +208,7 @@ class NoteIsolationTest(TestCase):
         # would otherwise hit the DBT provider; the serializer
         # degrades to empty text on any exception.
         with patch(
-            'annotations.serializers.get_default_dbt_client',
+            'bible.services.providers.get_default_dbt_client',
             side_effect=ValueError('DBT disabled in tests'),
         ):
             for ordering, keys in expected.items():
@@ -216,7 +224,9 @@ class NoteIsolationTest(TestCase):
                 self.assertEqual(ids, want, f'ordering={ordering}')
 
     def test_untagged_order_index(self):
-        """GET order-index/?tag_id=untagged returns 200."""
+        """GET order-index/?tag_id=untagged resolves the
+        sentinel — notes with no tag, matching GET /notes/ and
+        /comments/counts/ semantics."""
         tagged = Note.objects.create(
             user=self.user, tag=self.tag, note_text='tagged',
         )
@@ -228,15 +238,14 @@ class NoteIsolationTest(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         ids = {entry['id'] for entry in resp.json()}
-        # FIXME: order_index filters `tag_id` literally
-        # (views.py:1019) — unlike GET /notes/ and
-        # /comments/counts/ it never resolves the `untagged`
-        # sentinel, so the index silently returns empty even
-        # though the user has untagged notes. Pinned as-is;
-        # product decision needed on intended behaviour.
-        self.assertEqual(resp.json(), [])
+        # The foreign PUBLIC note has no tag and is inside the
+        # accessible scope (own ∪ public), so it legitimately
+        # appears; the tagged own note and the foreign private
+        # note must not.
+        self.assertIn(untagged.id, ids)
+        self.assertIn(self.foreign_public.id, ids)
         self.assertNotIn(tagged.id, ids)
-        self.assertNotIn(untagged.id, ids)
+        self.assertNotIn(self.foreign_private.id, ids)
 
 
 class ReorderSwapTest(TestCase):

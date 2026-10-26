@@ -1,31 +1,31 @@
+# Runtime dependencies — pinned versions; pins must never fall
+# below the floors main previously declared (GAE installs this
+# file verbatim on deploy). Install dev-only tools via
+# requirements-dev.txt.
+
 Django==6.1.2
-PyYAML
-dj-database-url
-django-cors-headers
-djangorestframework
-drf-spectacular
-requests
-pysword
-pycountry
+PyYAML==6.0.3
+dj-database-url==3.1.2
+django-cors-headers==4.9.0
+djangorestframework==3.18.3
+drf-spectacular==0.29.0
+requests==2.33.1
+sentry-sdk==2.73.0
+pysword==0.2.8
+pycountry==26.2.16
 psycopg2-binary==2.9.13
 gunicorn==26.2.0
-google-cloud-secret-manager
-google-cloud-texttospeech>=2.38.0,<3
-google-cloud-storage>=3.17.1,<4
-google-auth>=2.62.0,<3
-mutagen>=1.48.1,<2
-lameenc>=1.8.1,<2
-Pillow>=12.3.0,<13
+google-cloud-secret-manager==2.27.0
+google-cloud-texttospeech==2.38.0
+google-cloud-storage==3.17.1
+google-auth==2.62.0
+mutagen==1.48.1
+lameenc==1.9.0
+Pillow==12.3.0
 
-# Dependencies for DBT Client
-certifi >= 2026.7.22
-future; python_version<="2.7"
-six >= 1.17.0
-python_dateutil >= 2.9.0.post0
-setuptools >= 84.0.0
-urllib3 >= 2.8.0
-
-# Development
-debugpy
-pytest
-pytest-django
+# Dependencies of the vendored DBT client
+# (bible/services/dbt/dbt_client/openapi_client)
+certifi==2026.7.22
+six==1.17.0
+python-dateutil==2.9.0.post0
+urllib3==2.8.0

@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import requests
-from typing import Dict, Optional, Any
+from typing import Any, Dict, List, Optional
 from django.conf import settings
 
 # Set up logging
@@ -15,10 +15,12 @@ logger = logging.getLogger(__name__)
 # Add the generated client to the Python path
 client_path = os.path.join(os.path.dirname(__file__), 'dbt_client')
 sys.path.append(client_path)
+# Only BiblesApi is used through the generated client — the
+# search/annotations/audio-timing endpoints are called via raw
+# ``requests`` below (the generated deserializers for them are
+# buggy), so their Api classes were removed from the vendored
+# package.
 from openapi_client.api.bibles_api import BiblesApi
-from openapi_client.api.search_api import SearchApi
-from openapi_client.api.annotations_api import AnnotationsApi
-from openapi_client.api.audio_timing_api import AudioTimingApi
 from openapi_client.configuration import Configuration
 from openapi_client.api_client import ApiClient
 from openapi_client.exceptions import ApiException
@@ -79,9 +81,6 @@ class DBTClient:
         self.api_client = ApiClient(config)
 
         self.bibles_api = BiblesApi(self.api_client)
-        self.search_api = SearchApi(self.api_client)
-        self.annotations_api = AnnotationsApi(self.api_client)
-        self.audio_timing_api = AudioTimingApi(self.api_client)
 
         # Shared HTTP session so raw requests calls reuse TCP/TLS
         # connections across requests (DBT cold connect ~800ms,
@@ -321,7 +320,7 @@ class DBTClient:
         self,
         bible_id: str,
         **kwargs
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """
         Get copyright info for a Bible.
 

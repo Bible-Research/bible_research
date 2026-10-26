@@ -71,15 +71,6 @@ class ESVClient:
         r.raise_for_status()
         return r.json()
 
-    def get_chapter_verses(
-        self, book_id: str, chapter: int
-    ) -> List[Dict[str, Any]]:
-        """Return [{verse_start, verse_text}, ...] matching the
-        shape used by BiblePassageSerializer."""
-        raw = self.fetch_chapter_raw(book_id, chapter)
-        passage = (raw.get("passages") or [""])[0]
-        return _parse_passage(passage)["verses"]
-
     def get_chapter_audio_url(
         self, book_id: str, chapter: int
     ) -> str:

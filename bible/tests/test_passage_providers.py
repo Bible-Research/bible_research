@@ -39,7 +39,7 @@ class PassageProviderHTTPTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self.url = reverse('bible-passage')
 
-    @patch('bible.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_esv_passage_via_real_url(self, mock_get_client):
         """``ENGESV_API`` routes to the ESV client; verses and
         headings come back normalized at the HTTP layer."""
@@ -76,7 +76,7 @@ class PassageProviderHTTPTests(TestCase):
             'JHN', 3
         )
 
-    @patch('bible.serializers.get_default_apibible_client')
+    @patch('bible.services.providers.get_default_apibible_client')
     def test_apibible_passage_includes_fums_meta(
         self, mock_get_client
     ):
@@ -111,7 +111,7 @@ class PassageProviderHTTPTests(TestCase):
             BIBLE_ID, 'JHN', 3
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_dbt_audio_success_shape(self, mock_get_client):
         """``response_format=audio`` on a DBT fileset returns the
         audio body: ``audio_url``, ``duration_seconds`` and
@@ -168,7 +168,10 @@ class PassageProviderHTTPTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(
             resp.json(),
-            {"error": "Invalid format. Use 'text' or 'audio'"},
+            {
+                "error": "Invalid format. Use 'text' or 'audio'",
+                "error_code": "invalid_parameter",
+            },
         )
 
     def test_unknown_book_400(self):
@@ -185,7 +188,7 @@ class PassageProviderHTTPTests(TestCase):
             resp.json()['error'], 'Unknown book: UnknownBook'
         )
 
-    @patch('bible.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_omitted_fileset_id_defaults_to_engesv(
         self, mock_get_client
     ):

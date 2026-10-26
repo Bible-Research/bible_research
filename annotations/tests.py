@@ -521,7 +521,9 @@ class CommentViewSetTest(TestCase):
         self.assertEqual(data['images'], [])
 
     def test_patch_cannot_undelete_comment(self):
-        """PATCH cannot clear is_deleted; delete stays final."""
+        """PATCH on a deleted comment is rejected outright —
+        tombstones are immutable, so is_deleted can neither be
+        cleared nor the content quietly rewritten."""
         comment = Comment.objects.create(
             user=self.user,
             note=self.note,
@@ -533,10 +535,80 @@ class CommentViewSetTest(TestCase):
             {'is_deleted': False},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.json()['is_deleted'])
+        self.assertEqual(resp.status_code, 400)
         comment.refresh_from_db()
         self.assertTrue(comment.is_deleted)
+
+    def test_reply_to_deleted_parent_400(self):
+        """Replies to a soft-deleted comment are rejected —
+        a reply would hang off a '[deleted]' stub."""
+        root = Comment.objects.create(
+            user=self.user,
+            note=self.note,
+            content='',
+            is_deleted=True,
+        )
+        resp = self.client.post(
+            self.base_url,
+            {
+                'content': 'Reply to tombstone',
+                'parent_comment': root.id,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('parent_comment', resp.json())
+
+    def test_comment_content_over_10000_400(self):
+        """content is capped at 10000 chars — longer payloads
+        are rejected, not truncated."""
+        resp = self.client.post(
+            self.base_url,
+            {'content': 'x' * 10001},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('content', resp.json())
+
+    def test_note_owner_can_delete_others_comment(self):
+        """The owner of the parent note may delete a comment
+        someone else left on it (moderation, mirrors
+        ImageDestroyView's note-owner rule)."""
+        comment = Comment.objects.create(
+            user=self.other_user,
+            note=self.note,
+            content='Comment on your note',
+        )
+        # The owner deletes — the note is private so the
+        # author check alone would have 403'd.
+        resp = self.client.delete(
+            f'{self.base_url}{comment.id}/'
+        )
+        self.assertEqual(resp.status_code, 204)
+        comment.refresh_from_db()
+        self.assertTrue(comment.is_deleted)
+
+    def test_comment_on_foreign_note_still_author_only(self):
+        """On someone else's note, a third user (not author,
+        not note owner) still cannot delete."""
+        comment = Comment.objects.create(
+            user=self.other_user,
+            note=self.note,
+            content='Comment on your note',
+        )
+        third = get_user_model().objects.create_user(
+            username='third_user',
+            email='third@example.com',
+            password='pass',
+        )
+        self.client.force_authenticate(user=third)
+        resp = self.client.delete(
+            f'{self.base_url}{comment.id}/'
+        )
+        # The note is private — a third user can't even see it.
+        self.assertEqual(resp.status_code, 404)
+        comment.refresh_from_db()
+        self.assertFalse(comment.is_deleted)
 
     def test_patch_cannot_reparent_comment(self):
         """PATCH cannot re-point parent_comment (400)."""
@@ -749,15 +821,20 @@ class CommentNoteAccessTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.json()), 1)
 
-    def test_anonymous_public_note_create_403(self):
-        """Anonymous cannot write comments (auth required)."""
+    def test_anonymous_public_note_create_401(self):
+        """Anonymous cannot write comments (auth required).
+
+        401 under the production-like test settings —
+        Token/Bearer authenticators advertise
+        WWW-Authenticate so NotAuthenticated stays a 401.
+        """
         client = APIClient()
         resp = client.post(
             self.pub_url,
             {'content': 'Anon comment'},
             format='json',
         )
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 401)
 
 
 class CommentCountViewTest(TestCase):
@@ -1107,6 +1184,23 @@ class BulkNoteCreateTest(TestCase):
             Note.objects.filter(tag=self.tag).count(), 0
         )
 
+    def test_bulk_create_over_100_notes_400(self):
+        """The notes list is capped at 100 per request — an
+        unbounded payload would write thousands of rows."""
+        payload = {
+            'tag_id': self.tag.id,
+            'notes': [
+                {'note_text': f'note {i}'} for i in range(101)
+            ],
+        }
+        resp = self.client.post(
+            self.URL, payload, format='json'
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            Note.objects.filter(tag=self.tag).count(), 0
+        )
+
 
 class NoteCreateViewTest(TestCase):
     """Tests for POST /api/v1/notes/ (single note create)."""
@@ -1135,7 +1229,7 @@ class NoteCreateViewTest(TestCase):
         # 201 response; keep tests offline by making it fail fast
         # into the serializer's fallback (empty verse text).
         patcher = patch(
-            'annotations.serializers.get_default_dbt_client',
+            'bible.services.providers.get_default_dbt_client',
             side_effect=ValueError('DBT disabled in tests'),
         )
         patcher.start()
@@ -1156,6 +1250,21 @@ class NoteCreateViewTest(TestCase):
         self.assertEqual(note.note_text, 'A note on John 3:16')
         self.assertEqual(note.verses.count(), 1)
         self.assertEqual(note.verses.first().verse, 16)
+
+    def test_create_ignores_client_tag_position(self):
+        """tag_position is read-only on write: a client-supplied
+        value is ignored (ordering is owned by reorder/move)."""
+        payload = {
+            'note_text': 'position attempt',
+            'tag': self.tag.id,
+            'tag_position': 42.0,
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        note = Note.objects.get(user=self.user)
+        # Falls back to the model default (unix timestamp), not
+        # the supplied 42.0.
+        self.assertNotEqual(note.tag_position, 42.0)
 
     def test_failed_verse_resolution_leaves_no_orphan(self):
         """A non-existent verse reference returns 400 and leaves
@@ -1230,7 +1339,7 @@ class NoteUpdateVerseReferencesTest(TestCase):
         # Keep tests offline: force the serializer's verse
         # enrichment into its fallback (empty verse text).
         patcher = patch(
-            'annotations.serializers.get_default_dbt_client',
+            'bible.services.providers.get_default_dbt_client',
             side_effect=ValueError('DBT disabled in tests'),
         )
         patcher.start()
@@ -1324,7 +1433,7 @@ class LinkedNotesTest(TestCase):
         # keep tests offline by making it fail fast into the
         # serializer's fallback (empty verse text).
         patcher = patch(
-            'annotations.serializers.get_default_dbt_client',
+            'bible.services.providers.get_default_dbt_client',
             side_effect=ValueError('DBT disabled in tests'),
         )
         patcher.start()
@@ -1425,9 +1534,9 @@ class LinkedNotesTest(TestCase):
             {'book': 'John', 'chapter': 3, 'verse': 17},
         ]
         with patch(
-            'annotations.serializers.get_default_dbt_client'
+            'bible.services.providers.get_default_dbt_client'
         ) as dbt_client, patch(
-            'annotations.serializers.get_default_esv_client'
+            'bible.services.providers.get_default_esv_client'
         ) as esv_client:
             # One query for notes (+ joined tag), one prefetch
             # for verses — not one per note.
@@ -2026,16 +2135,24 @@ class ReadingPositionViewSetTest(TestCase):
         self.url = '/api/v1/reading-positions/'
 
     def test_create_position_valid_book(self):
-        """POST with a valid book name upserts a position."""
+        """POST with a valid book name upserts a position —
+        201 on first create, 200 on repeat upsert."""
         resp = self.client.post(
             self.url,
             {'book': 'John', 'chapter': 3, 'verse': 16},
             format='json',
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.json()['book'], 'John')
         self.assertEqual(resp.json()['chapter'], 3)
         self.assertEqual(resp.json()['verse'], 16)
+        resp = self.client.post(
+            self.url,
+            {'book': 'John', 'chapter': 4, 'verse': 1},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['chapter'], 4)
 
     def test_create_position_invalid_book(self):
         """POST with an unknown book name returns 400."""
@@ -2066,7 +2183,7 @@ class NoteProviderErrorTest(TestCase):
         )
         self.note.verses.add(self.verse)
 
-    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_note_includes_error_fields_on_provider_429(
         self, mock_get
     ):
@@ -2084,7 +2201,7 @@ class NoteProviderErrorTest(TestCase):
         # display which passage failed.
         self.assertEqual(data['verses'][0]['text'], '')
 
-    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_note_includes_error_fields_on_provider_failure(
         self, mock_get
     ):
@@ -2099,7 +2216,7 @@ class NoteProviderErrorTest(TestCase):
         self.assertEqual(data['error_code'], 'provider_error')
         self.assertIn('503', data['error'])
 
-    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_note_includes_not_found_on_provider_404(
         self, mock_get
     ):
@@ -2114,7 +2231,7 @@ class NoteProviderErrorTest(TestCase):
         self.assertEqual(data['error_code'], 'not_found')
         self.assertIn('404', data['error'])
 
-    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_note_includes_not_found_on_empty_dbt_data(
         self, mock_get
     ):
@@ -2132,7 +2249,7 @@ class NoteProviderErrorTest(TestCase):
         self.assertIn('error', data)
         self.assertEqual(data['verses'][0]['text'], '')
 
-    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_note_includes_not_found_on_dbt_rows_without_text(
         self, mock_get
     ):
@@ -2151,7 +2268,7 @@ class NoteProviderErrorTest(TestCase):
         self.assertEqual(data['error_code'], 'not_found')
         self.assertEqual(data['verses'][0]['text'], '')
 
-    @patch('annotations.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_note_includes_not_found_on_empty_esv_verses(
         self, mock_get
     ):
@@ -2171,8 +2288,8 @@ class NoteProviderErrorTest(TestCase):
         self.assertEqual(data['error_code'], 'not_found')
         self.assertEqual(data['verses'][0]['text'], '')
 
-    @patch('annotations.serializers.get_default_dbt_client')
-    @patch('annotations.serializers.get_default_apibible_client')
+    @patch('bible.services.providers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_apibible_client')
     def test_note_fetches_apibible_fileset_via_apibible_client(
         self, mock_get_apibible, mock_get_dbt
     ):
@@ -2205,7 +2322,7 @@ class NoteProviderErrorTest(TestCase):
         )
         mock_get_dbt.assert_not_called()
 
-    @patch('annotations.serializers.get_default_apibible_client')
+    @patch('bible.services.providers.get_default_apibible_client')
     def test_note_includes_error_fields_on_apibible_failure(
         self, mock_get
     ):
@@ -2225,7 +2342,7 @@ class NoteProviderErrorTest(TestCase):
         self.assertIn('503', data['error'])
         self.assertEqual(data['verses'][0]['text'], '')
 
-    @patch('annotations.serializers.get_default_apibible_client')
+    @patch('bible.services.providers.get_default_apibible_client')
     def test_note_includes_not_found_on_empty_apibible_verses(
         self, mock_get
     ):
@@ -2268,7 +2385,7 @@ class NoteFilesetRoutingTest(TestCase):
         )
         self.note.verses.add(self.verse)
 
-    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_dbt_fileset_id_is_forwarded(self, mock_get):
         """fileset_id=ENGKJV must reach the DBT client's
         bible_id instead of falling back to ENGESV."""
@@ -2287,12 +2404,11 @@ class NoteFilesetRoutingTest(TestCase):
         mock_client.get_verses.assert_called_once_with(
             'JHN', 1,
             bible_id='ENGKJV',
-            verse_start=1, verse_end=1,
         )
         self.assertNotIn('error', data)
         self.assertEqual(data['verses'][0]['text'], 'KJV text')
 
-    @patch('annotations.serializers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_dbt_client')
     def test_missing_fileset_id_defaults_to_engesv(self, mock_get):
         """No fileset_id in context keeps the ENGESV default."""
         mock_client = MagicMock()
@@ -2308,13 +2424,12 @@ class NoteFilesetRoutingTest(TestCase):
         mock_client.get_verses.assert_called_once_with(
             'JHN', 1,
             bible_id='ENGESV',
-            verse_start=1, verse_end=1,
         )
         self.assertNotIn('error', data)
         self.assertEqual(data['verses'][0]['text'], 'ESV text')
 
-    @patch('annotations.serializers.get_default_dbt_client')
-    @patch('annotations.serializers.get_default_sword_client')
+    @patch('bible.services.providers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_sword_client')
     def test_sword_fileset_uses_sword_client(
         self, mock_sword_get, mock_dbt_get
     ):
@@ -2340,8 +2455,8 @@ class NoteFilesetRoutingTest(TestCase):
         )
         self.assertEqual(data['headings'], [])
 
-    @patch('annotations.serializers.get_default_dbt_client')
-    @patch('annotations.serializers.get_default_sword_client')
+    @patch('bible.services.providers.get_default_dbt_client')
+    @patch('bible.services.providers.get_default_sword_client')
     def test_sword_audio_fileset_uses_sword_client(
         self, mock_sword_get, mock_dbt_get
     ):
@@ -2363,7 +2478,7 @@ class NoteFilesetRoutingTest(TestCase):
         mock_dbt_get.return_value.get_verses.assert_not_called()
         self.assertNotIn('error', data)
 
-    @patch('annotations.serializers.get_default_esv_client')
+    @patch('bible.services.providers.get_default_esv_client')
     def test_esv_fileset_returns_verse_text(self, mock_get):
         """fileset_id=ENGESV_API still routes to the ESV API
         and returns verse text plus filtered headings."""
@@ -2390,6 +2505,113 @@ class NoteFilesetRoutingTest(TestCase):
             data['headings'],
             [{'before_verse': 1, 'text': 'The Beginning'}]
         )
+
+
+class NoteEnrichmentBatchingTest(TestCase):
+    """S5: GET /notes/ enrichment is batched by
+    (fileset_id, book, chapter) through the serializer-context
+    cache — one upstream fetch per chapter, not per note — and
+    the queryset's select_related/prefetch_related keeps the
+    DB query count flat regardless of note count."""
+
+    LIST_URL = '/api/v1/notes/'
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='batch_user',
+            email='batch@example.com',
+            password='pass',
+        )
+        self.v11 = Verse.objects.create(
+            book='John', chapter=1, verse=1, dbt_book_id='JHN'
+        )
+        self.v12 = Verse.objects.create(
+            book='John', chapter=1, verse=2, dbt_book_id='JHN'
+        )
+        self.v21 = Verse.objects.create(
+            book='John', chapter=2, verse=1, dbt_book_id='JHN'
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _note(self, text, verse):
+        note = Note.objects.create(
+            user=self.user, note_text=text
+        )
+        note.verses.add(verse)
+        return note
+
+    @staticmethod
+    def _chapter_mock(*verse_nums):
+        mock_client = MagicMock()
+        mock_client.get_verses.return_value = {
+            'data': [
+                {'verse_start': n, 'verse_text': f'text {n}'}
+                for n in verse_nums
+            ]
+        }
+        return mock_client
+
+    @patch('bible.services.providers.get_default_dbt_client')
+    def test_same_chapter_fetches_once(self, mock_get):
+        """Two notes on John 1 share one upstream get_verses
+        call — the whole chapter is memoized on the serializer
+        context for the whole page."""
+        self._note('first', self.v11)
+        self._note('second', self.v12)
+        mock_client = self._chapter_mock(1, 2)
+        mock_get.return_value = mock_client
+
+        resp = self.client.get(self.LIST_URL)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_client.get_verses.assert_called_once_with(
+            'JHN', 1, bible_id='ENGESV'
+        )
+        texts = {
+            v['verse']: v['text']
+            for n in resp.json()['results']
+            for v in n['verses']
+        }
+        self.assertEqual(texts, {1: 'text 1', 2: 'text 2'})
+
+    @patch('bible.services.providers.get_default_dbt_client')
+    def test_distinct_chapters_fetch_each_once(self, mock_get):
+        """Batching is keyed by (fileset, book, chapter) — notes
+        spanning John 1 and John 2 cost exactly two calls."""
+        self._note('a', self.v11)
+        self._note('b', self.v12)
+        self._note('c', self.v21)
+        mock_client = self._chapter_mock(1, 2)
+        mock_get.return_value = mock_client
+
+        resp = self.client.get(self.LIST_URL)
+
+        self.assertEqual(resp.status_code, 200)
+        get_verses = mock_client.get_verses
+        self.assertEqual(get_verses.call_count, 2)
+        chapters = {
+            c.args[1] for c in get_verses.call_args_list
+        }
+        self.assertEqual(chapters, {1, 2})
+
+    @patch('bible.services.providers.get_default_dbt_client')
+    def test_list_query_count_is_flat(self, mock_get):
+        """select_related('tag') + prefetch_related('verses')
+        keep a full page of notes at a constant query count:
+        one COUNT for pagination, one notes SELECT, one
+        verses prefetch — not one query per note."""
+        for i in range(10):
+            self._note(f'note {i}', self.v11)
+        mock_client = self._chapter_mock(1)
+        mock_get.return_value = mock_client
+
+        with self.assertNumQueries(3):
+            resp = self.client.get(self.LIST_URL)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()['results']), 10)
 
 
 class TestNoteOrderIndex(TestCase):
@@ -3170,3 +3392,47 @@ class TagDeleteViewTest(TestCase):
         self.assertEqual(resp.json()['note_count'], 1)
         self.assertTrue(Tag.objects.filter(id=self.tag.id).exists())
         self.assertTrue(Tag.objects.filter(id=child.id).exists())
+
+    def test_delete_reparents_foreign_child_tag(self):
+        """A foreign tag parented DIRECTLY onto the deleted tag
+        (only creatable via admin/shell — the API scopes
+        parent_tag to the owner) is detached to the deleted
+        tag's parent instead of being cascade-deleted."""
+        User = get_user_model()
+        stranger = User.objects.create_user(
+            username='tagdel_stranger', password='pass',
+        )
+        foreign_child = Tag.objects.create(
+            user=stranger,
+            name='ForeignChild',
+            parent_tag=self.tag,
+        )
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 204)
+        foreign_child.refresh_from_db()
+        self.assertIsNone(foreign_child.parent_tag)
+
+    def test_delete_reparents_foreign_tag_under_descendant(self):
+        """A foreign tag attached to a same-owner DESCENDANT
+        also survives — the detach covers the whole same-owner
+        subtree, not just the deleted tag's direct children."""
+        User = get_user_model()
+        stranger = User.objects.create_user(
+            username='tagdel_stranger', password='pass',
+        )
+        child = Tag.objects.create(
+            user=self.user,
+            name='ChildTag',
+            parent_tag=self.tag,
+        )
+        foreign_grandchild = Tag.objects.create(
+            user=stranger,
+            name='ForeignGrandchild',
+            parent_tag=child,
+        )
+        resp = self.client.delete(f'{self.BASE_URL}{self.tag.id}/')
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Tag.objects.filter(id=self.tag.id).exists())
+        self.assertFalse(Tag.objects.filter(id=child.id).exists())
+        foreign_grandchild.refresh_from_db()
+        self.assertIsNone(foreign_grandchild.parent_tag)

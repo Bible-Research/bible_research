@@ -1,48 +1,42 @@
 import logging
 import re
 
+from django.core.cache import cache
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
-from google.api_core import exceptions as gcs_exceptions
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
 from bible.utils.bible_books import get_dbt_book_id
-from bible.utils.provider_errors import provider_error_fields
-from bible.services.apibible.registry import (
-    get_apibible_meta,
-    is_apibible_fileset,
+from bible.utils.error_responses import (
+    MISSING_PARAMETER,
+    bad_request,
+    not_found,
 )
-from bible.services.google_tts.registry import get_tts_config
-from bible.services.sword.client import get_default_sword_client
-from bible.services.sword.registry import (
-    audio_mode_for_fileset,
-    canonical_sword_fileset_id,
-    is_sword_fileset,
+from bible.utils.provider_errors import (
+    PassageNotFoundError,
+    TimestampsNotGeneratedError,
+    capture_internal_exception,
+    capture_provider_exception,
+    provider_error_fields,
 )
-from bible.services.esv.registry import is_esv_fileset
-from bible.services.search_grouping import (
-    fetch_apibible_matches,
-    fetch_dbt_matches,
-    fetch_esv_matches,
-    group_verses_by_book,
-    normalize_apibible_verse,
-    normalize_dbt_verse,
-    parse_esv_results,
-    scan_sword_matches,
+from bible.utils.request_params import (
+    is_valid_bible_id,
+    is_valid_book_id_list,
+    is_valid_book_name,
+    is_valid_fileset_id,
+    is_valid_language_iso,
 )
-from bible.services.storage import gcs
+from bible.services.providers import (
+    get_passage_body,
+    provider_for,
+)
 from .serializers import BiblePassageSerializer
 from .services.translation_service import TranslationService
-from .services.apibible.client import (
-    get_default_apibible_client,
-)
 from .services.dbt.client import get_default_dbt_client
-from .services.esv.client import (
-    get_default_esv_client
-)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +66,14 @@ _MAX_VERSE_NUMBER = 200
 # providers reject absurdly long queries anyway, and the local
 # SWORD scan pays per character.
 _MAX_SEARCH_QUERY_LENGTH = 200
+
+# Response-cache TTLs (S7). Translations change rarely and every
+# anonymous request used to cost a live DBT ``/bibles`` call;
+# copyright text is static per (provider, bible_id). Both get
+# ``Cache-Control: public, max-age=<ttl>`` so CDN/browser caches
+# match. Degraded/error responses are never cached.
+_TRANSLATIONS_CACHE_TTL_SECONDS = 6 * 60 * 60
+_COPYRIGHT_CACHE_TTL_SECONDS = 24 * 60 * 60
 
 
 def _parse_chapter_part(chapter_part):
@@ -119,56 +121,37 @@ def _parse_chapter_part(chapter_part):
     return chapter, sorted(verses)
 
 
-def _apibible_timecode(item):
-    """Map an API.Bible audio timecode to ``{verse_start,
-    timestamp}``.
+class SearchRateThrottle(UserRateThrottle):
+    """Scoped throttle for ``BibleSearchView``.
 
-    Timecode entries carry a ``verseId`` like ``JHN.3.16`` (some
-    payloads expose ``verse_start``/``verse``/``verse_id``
-    directly); the trailing dotted segment is the verse number.
-    API.Bible serializes numbers as strings, so both fields are
-    coerced to real ``int``/``float`` values.
+    Search is the most expensive anonymous endpoint — grouped
+    mode fans out to ~30 upstream provider calls per request —
+    so it gets a tighter scope than the generous global
+    ``anon`` rate. ``UserRateThrottle.get_cache_key`` already
+    covers both callers: authenticated key on their pk,
+    anonymous on the (proxy-aware) client IP.
     """
-    verse = (
-        item.get('verse_start')
-        or item.get('verse')
-        or item.get('verse_id')
-    )
-    if verse is not None:
-        try:
-            verse = int(verse)
-        except (TypeError, ValueError):
-            verse = None
-    if verse is None:
-        verse_id = item.get('verseId') or ''
-        try:
-            # Strip the range tail first: both "JHN.3.16-17"
-            # and "JHN.3.16-JHN.3.17" must resolve to 16.
-            verse = int(
-                str(verse_id).split('-', 1)[0].split('.')[-1]
-            )
-        except ValueError:
-            verse = None
-    timestamp = item.get('timestamp')
-    if timestamp is not None:
-        try:
-            timestamp = float(timestamp)
-        except (TypeError, ValueError):
-            timestamp = None
-    return {
-        'verse_start': verse,
-        'timestamp': timestamp,
-    }
+    scope = 'search'
 
 
-def provider_error_response(exc):
+def provider_error_response(exc, not_found_message=None):
     """Build an error ``Response`` for an upstream provider failure.
 
     Uses ``provider_error_fields`` so raw exception text — which can
     contain request URLs carrying credentials (e.g. DBT's ``?key=``
     query param) — never reaches the response body.
+
+    ``not_found_message`` overrides the default "Passage not found"
+    wording for endpoints that look up something else (e.g.
+    copyright info) — the ``error_code`` contract is unchanged.
     """
-    fields = provider_error_fields(exc)
+    fields = provider_error_fields(
+        exc, not_found_message=not_found_message
+    )
+    # Trend upstream outages in Sentry (warning-level, tagged
+    # with error_code); no-ops for not_found and when Sentry
+    # is off.
+    capture_provider_exception(exc, fields['error_code'])
     return Response(
         fields,
         status=PROVIDER_ERROR_STATUSES.get(
@@ -205,7 +188,11 @@ class BiblePassageView(APIView):
         response_format = request.query_params.get(
             'response_format', 'text'
         )
-        fileset_id = request.query_params.get('fileset_id', 'ENGESV')
+        # An explicit empty ``?fileset_id=`` falls back to the
+        # default rather than validating as garbage.
+        fileset_id = (
+            request.query_params.get('fileset_id') or 'ENGESV'
+        )
 
         logger.info(
             f"BiblePassageView.get called with passage: {passage}, "
@@ -214,12 +201,10 @@ class BiblePassageView(APIView):
 
         if not passage:
             logger.warning("Request missing required 'passage' parameter")
-            return Response(
-                {
-                    "error": "Passage parameter is required. "
-                             "Example: ?passage=John+3"
-                },
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "Passage parameter is required. "
+                "Example: ?passage=John+3",
+                code=MISSING_PARAMETER,
             )
 
         if len(passage) > _MAX_PASSAGE_LENGTH:
@@ -227,23 +212,28 @@ class BiblePassageView(APIView):
                 "Passage parameter too long: %d chars",
                 len(passage),
             )
-            return Response(
-                {
-                    "error": (
-                        f"Passage parameter is too long "
-                        f"(max {_MAX_PASSAGE_LENGTH} characters)."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                f"Passage parameter is too long "
+                f"(max {_MAX_PASSAGE_LENGTH} characters)."
             )
 
         if response_format not in ['text', 'audio']:
             logger.warning(
                 f"Invalid response_format: {response_format}"
             )
-            return Response(
-                {"error": "Invalid format. Use 'text' or 'audio'"},
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "Invalid format. Use 'text' or 'audio'"
+            )
+
+        # ``fileset_id`` selects the provider and is interpolated
+        # into upstream URL paths on the DBT branch — reject
+        # anything outside the id charset before routing.
+        if not is_valid_fileset_id(fileset_id):
+            logger.warning(
+                "Invalid fileset_id charset: %r", fileset_id
+            )
+            return bad_request(
+                "fileset_id contains invalid characters."
             )
 
         try:
@@ -291,18 +281,6 @@ class BiblePassageView(APIView):
                 )
                 raise
 
-            # Kept outside the ``int()`` try/except so this
-            # ValueError is not swallowed and re-raised as
-            # "Chapter must be a valid number".
-            if chapter <= 0:
-                logger.error(
-                    f"Invalid chapter number: {chapter} "
-                    f"(must be positive)"
-                )
-                raise ValueError(
-                    "Chapter must be a positive number"
-                )
-
             data = {
                 'book': book_id,
                 'book_name': book_name,
@@ -324,7 +302,10 @@ class BiblePassageView(APIView):
                     f"Successfully retrieved passage: "
                     f"{book_name} {chapter} ({fileset_id})"
                 )
-                body = serializer.to_representation(data)
+                # Provider dispatch + fetch + shaping live in
+                # the service layer — the serializer only
+                # validates the request boundary.
+                body = get_passage_body(serializer.validated_data)
                 # Provider failures come back with ``error`` /
                 # ``error_code`` fields — surface them with a real
                 # HTTP status so clients can branch on it. This
@@ -365,26 +346,78 @@ class BiblePassageView(APIView):
             logger.error(
                 f"Serializer validation failed: {serializer.errors}"
             )
-            return Response(
-                serializer.errors,
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "Invalid request parameters."
             )
 
+        except PassageNotFoundError:
+            # ``PassageNotFoundError`` subclasses ValueError, so
+            # it must be caught before the generic handler: a
+            # provider "no such passage" is a 404, and its text
+            # must never land in a ``bad_request`` body if
+            # provider calls move into this try block.
+            return not_found("Passage not found.")
+        except ValueError as e:
+            # Every ValueError reaching this handler carries one
+            # of the fixed client-input messages raised above or
+            # inside ``_parse_chapter_part`` — provider failures
+            # are classified inside the serializer or caught
+            # above — so the text holds no upstream URLs or
+            # credentials.
+            return bad_request(str(e))
         except Exception as e:
             logger.exception(
-                f"Error processing Bible passage request: {passage} - {e}"
+                "Unexpected error processing passage request: %s",
+                passage,
             )
-            # Provider failures never reach this handler — they
-            # are classified inside the serializer and returned
-            # above. Only client-input errors (bad passage
-            # format, unknown book, invalid chapter) land here,
-            # so embedding str(e) in the 400 body is safe.
+            # A caught 500 is a real server bug, and Sentry's
+            # DjangoIntegration only reports *uncaught*
+            # exceptions — report it explicitly at error level
+            # (``capture_provider_exception``'s warning level is
+            # for trending expected upstream outages).
+            capture_internal_exception(e)
             return Response(
-                {"error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
+                {
+                    "error": (
+                        "Unexpected error processing the passage."
+                    ),
+                    "error_code": "internal_error",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='fileset_id',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Audio fileset ID (e.g. ENGESVN2DA, '
+                'LVSGLU8C1DA, ENGNIVC1DA).'
+            ),
+            required=True,
+        ),
+        OpenApiParameter(
+            name='book',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Book name (e.g. John) — resolved to a '
+                'USFM book id.'
+            ),
+            required=True,
+        ),
+        OpenApiParameter(
+            name='chapter',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Chapter number (positive integer).',
+            required=True,
+        ),
+    ],
+)
 class AudioTimestampView(APIView):
     """Return audio timestamps for a chapter."""
 
@@ -396,13 +429,21 @@ class AudioTimestampView(APIView):
         chapter = request.query_params.get('chapter')
 
         if not all([fileset_id, book, chapter]):
-            return Response(
-                {
-                    "error":
-                    "fileset_id, book, and chapter "
-                    "are required."
-                },
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "fileset_id, book, and chapter are required.",
+                code=MISSING_PARAMETER,
+            )
+
+        # ``fileset_id`` selects the provider and ``book`` is
+        # resolved to a book id interpolated upstream — validate
+        # both charsets before routing.
+        if not is_valid_fileset_id(fileset_id):
+            return bad_request(
+                "fileset_id contains invalid characters."
+            )
+        if not is_valid_book_name(book):
+            return bad_request(
+                "book contains invalid characters."
             )
 
         # A non-numeric chapter is a client error — reject with
@@ -413,9 +454,8 @@ class AudioTimestampView(APIView):
         except (TypeError, ValueError):
             chapter_num = 0
         if chapter_num < 1:
-            return Response(
-                {"error": "chapter must be a positive integer."},
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "chapter must be a positive integer."
             )
 
         try:
@@ -423,90 +463,23 @@ class AudioTimestampView(APIView):
             # (e.g. "John" -> "JHN")
             book_id = get_dbt_book_id(book)
             if not book_id:
-                return Response(
-                    {"error": f"Unknown book: {book}"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return bad_request(f"Unknown book: {book}")
 
-            if is_sword_fileset(fileset_id):
-                canon = canonical_sword_fileset_id(fileset_id)
-                voice_name = get_tts_config(canon)["voice_name"]
-                # Audio fileset id selects the artifact layout:
-                # LVSGLU8C1DA -> audio/ (verse mode),
-                # LVSGLU8C2DA -> audio_chapter/ (chapter mode).
-                audio_mode = audio_mode_for_fileset(fileset_id)
-                try:
-                    payload = gcs.read_timestamps_json(
-                        canon, book_id, int(chapter), voice_name,
-                        mode=audio_mode,
-                    )
-                except gcs_exceptions.NotFound:
-                    return Response(
-                        {
-                            "error": (
-                                "Timestamps not yet generated for "
-                                "this chapter."
-                            ),
-                            "error_code": "not_found",
-                        },
-                        status=status.HTTP_404_NOT_FOUND,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    # Auth / network / malformed-JSON errors are not
-                    # a missing resource -- surface them as 502 so
-                    # clients don't mistake them for a 404.
-                    logger.exception(
-                        "Failed to read timestamps for %s %s %s",
-                        canon, book_id, chapter,
-                    )
-                    return provider_error_response(exc)
-                return Response({"data": payload.get("data", [])})
-
-            if is_apibible_fileset(fileset_id):
-                meta = get_apibible_meta(fileset_id)
-                audio = (
-                    get_default_apibible_client()
-                    .get_chapter_audio(
-                        meta["audio_bible_id"],
-                        book_id,
-                        chapter_num,
-                    )
-                )
-                timecodes = audio.get("timecodes") or []
-                if not timecodes:
-                    return Response(
-                        {
-                            "error": (
-                                "Timestamps not yet generated for "
-                                "this chapter."
-                            ),
-                            "error_code": "not_found",
-                        },
-                        status=status.HTTP_404_NOT_FOUND,
-                    )
-                return Response({
-                    "data": [
-                        _apibible_timecode(tc)
-                        for tc in timecodes
-                    ]
-                })
-
-            dbt_client = get_default_dbt_client()
-            result = dbt_client.get_timestamps(
-                fileset_id, book_id, chapter_num
+            # Provider dispatch lives in the facade: SWORD reads
+            # the generated GCS sidecar, API.Bible maps its
+            # timecodes, everything else hits DBT timestamps.
+            data = provider_for(fileset_id).get_timestamps(
+                book_id, chapter_num
             )
-            timestamps = [
-                {
-                    "verse_start": item.get(
-                        "verse_start"
-                    ),
-                    "timestamp": item.get(
-                        "timestamp"
-                    ),
-                }
-                for item in (result.get("data") or [])
-            ]
-            return Response({"data": timestamps})
+            return Response({"data": data})
+        except TimestampsNotGeneratedError:
+            # The audio exists but its timestamps artifact was
+            # not generated yet (GCS sidecar missing, or an
+            # empty API.Bible timecodes list).
+            return not_found(
+                "Timestamps not yet generated for "
+                "this chapter."
+            )
         except Exception as e:
             logger.exception(
                 "Error fetching timestamps: %s", e
@@ -514,8 +487,31 @@ class AudioTimestampView(APIView):
             return provider_error_response(e)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='bible_id',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Bible/fileset id (e.g. ENGESV, LVSGLU8, '
+                'ENGNIV_API) or a listing abbr (GLU8, NIV). '
+                'Named ``bible_id`` for historical reasons — '
+                'it accepts the same id space as '
+                '``fileset_id`` on the other endpoints.'
+            ),
+            required=True,
+        ),
+    ],
+)
 class CopyrightView(APIView):
-    """Return copyright info for a Bible translation."""
+    """Return copyright info for a Bible translation.
+
+    Successful responses are cached for
+    ``_COPYRIGHT_CACHE_TTL_SECONDS`` — copyright text is static —
+    and carry ``Cache-Control: public`` for CDN/browser caches.
+    Error and client-input responses are never cached.
+    """
 
     permission_classes = [AllowAny]
 
@@ -523,56 +519,53 @@ class CopyrightView(APIView):
         bible_id = request.query_params.get('bible_id')
 
         if not bible_id:
-            return Response(
-                {"error": "bible_id is required."},
-                status=status.HTTP_400_BAD_REQUEST
+            return bad_request(
+                "bible_id is required.",
+                code=MISSING_PARAMETER,
+            )
+        # ``bible_id`` is interpolated into upstream URL paths
+        # on the DBT branch — validate the charset first.
+        if not is_valid_bible_id(bible_id):
+            return bad_request(
+                "bible_id contains invalid characters."
             )
 
         try:
-            if is_apibible_fileset(bible_id):
-                meta = get_apibible_meta(bible_id)
-                bible = (
-                    get_default_apibible_client()
-                    .get_bible(meta['bible_id'])
+            # Non-DBT ids resolve through the facade: ESV/SWORD
+            # (and abbrs like GLU8/NIV) answer from registry
+            # license metadata instead of 404ing through DBT;
+            # API.Bible still fetches the live copyright
+            # statement; everything else proxies DBT.
+            provider = provider_for(bible_id)
+            # The cache key covers every input that changes the
+            # output: the resolved provider and the raw id.
+            cache_key = (
+                f"v1:copyright:"
+                f"{type(provider).__name__}:{bible_id}"
+            )
+            cached = cache.get(cache_key)
+            if cached is not None:
+                response = Response(cached)
+            else:
+                data = provider.get_copyright()
+                body = {"data": data}
+                cache.set(
+                    cache_key, body,
+                    _COPYRIGHT_CACHE_TTL_SECONDS,
                 )
-                copyright_text = (
-                    bible.get('copyrightStatement') or ''
-                )
-                return Response({
-                    "data": [{
-                        "id": bible_id,
-                        "type": "text_plain",
-                        "size": "C",
-                        "copyright": copyright_text,
-                        "copyright_date": "",
-                        "copyright_description": copyright_text,
-                    }]
-                })
-
-            dbt_client = get_default_dbt_client()
-            result = dbt_client.get_copyright(bible_id)
-
-            filesets = []
-            for item in (result or []):
-                cr = item.get("copyright") or {}
-                filesets.append({
-                    "id": item.get("id"),
-                    "type": item.get("type"),
-                    "size": item.get("size"),
-                    "copyright": cr.get("copyright", ""),
-                    "copyright_date": cr.get(
-                        "copyright_date", ""
-                    ),
-                    "copyright_description": cr.get(
-                        "copyright_description", ""
-                    ),
-                })
-            return Response({"data": filesets})
+                response = Response(body)
+            response['Cache-Control'] = (
+                f"public, max-age="
+                f"{_COPYRIGHT_CACHE_TTL_SECONDS}"
+            )
+            return response
         except Exception as e:
             logger.exception(
                 "Error fetching copyright: %s", e
             )
-            return provider_error_response(e)
+            return provider_error_response(
+                e, not_found_message='Copyright not found'
+            )
 
 
 @extend_schema(
@@ -679,6 +672,11 @@ class BibleSearchView(APIView):
     """
 
     permission_classes = [AllowAny]
+    # Replaces the global anon throttle: grouped mode fans out to
+    # ~30 upstream calls per request, so search gets a tighter
+    # scope covering both anonymous (per-IP) and authenticated
+    # (per-user) callers.
+    throttle_classes = [SearchRateThrottle]
 
     def get(self, request, format=None):
         query = request.query_params.get('query')
@@ -689,24 +687,25 @@ class BibleSearchView(APIView):
         # turns the local scan into a whole-Bible crawl.
         query = (query or '').strip()
         if not query:
-            return Response(
-                {"error": "query parameter is required."},
-                status=status.HTTP_400_BAD_REQUEST,
+            return bad_request(
+                "query parameter is required.",
+                code=MISSING_PARAMETER,
             )
         if len(query) > _MAX_SEARCH_QUERY_LENGTH:
-            return Response(
-                {
-                    "error": (
-                        f"query must be at most "
-                        f"{_MAX_SEARCH_QUERY_LENGTH} characters."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+            return bad_request(
+                f"query must be at most "
+                f"{_MAX_SEARCH_QUERY_LENGTH} characters."
             )
         if not fileset_id:
-            return Response(
-                {"error": "fileset_id parameter is required."},
-                status=status.HTTP_400_BAD_REQUEST,
+            return bad_request(
+                "fileset_id parameter is required.",
+                code=MISSING_PARAMETER,
+            )
+        # ``fileset_id`` selects the provider and reaches
+        # upstream URL paths on the DBT/API.Bible branches.
+        if not is_valid_fileset_id(fileset_id):
+            return bad_request(
+                "fileset_id contains invalid characters."
             )
 
         # ``group_by`` is validated and dispatched before
@@ -714,258 +713,105 @@ class BibleSearchView(APIView):
         # in grouped mode, so e.g. ``page=abc`` must not 400.
         group_by = request.query_params.get('group_by')
         if group_by and group_by != 'book':
-            return Response(
-                {"error": "group_by must be 'book'."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return bad_request("group_by must be 'book'.")
 
         sort_by = request.query_params.get('sort_by')
         books = request.query_params.get('books')
+        # ``books`` is a comma-separated USFM id list forwarded
+        # to providers — reject anything else.
+        if books and not is_valid_book_id_list(books):
+            return bad_request(
+                "books must be comma-separated 3-letter "
+                "book ids (e.g. JHN,ROM)."
+            )
 
         try:
+            # Provider dispatch lives in the facade — grouped
+            # mode skips pagination parsing entirely (``page``
+            # is meaningless there).
             if group_by == 'book':
-                return self._grouped_search(
-                    fileset_id, query, books
+                payload = provider_for(
+                    fileset_id
+                ).search_grouped(
+                    query, books, sort_by=sort_by
                 )
+                return Response({'data': payload})
 
             try:
                 limit = int(
                     request.query_params.get('limit', 15)
                 )
             except (TypeError, ValueError):
-                return Response(
-                    {"error": "limit must be an integer."},
-                    status=status.HTTP_400_BAD_REQUEST,
+                return bad_request(
+                    "limit must be an integer."
                 )
             try:
                 page = int(
                     request.query_params.get('page', 1)
                 )
             except (TypeError, ValueError):
-                return Response(
-                    {"error": "page must be an integer."},
-                    status=status.HTTP_400_BAD_REQUEST,
+                return bad_request(
+                    "page must be an integer."
                 )
             # Non-positive pagination params are client errors —
             # 400 instead of sending e.g. a negative ``offset``
             # to API.Bible.
             if limit < 1 or page < 1:
-                return Response(
-                    {
-                        "error": (
-                            "limit and page must be "
-                            "positive integers."
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
+                return bad_request(
+                    "limit and page must be positive integers."
                 )
 
-            if is_esv_fileset(fileset_id):
-                return self._esv_search(query, limit, page)
-            if is_apibible_fileset(fileset_id):
-                return self._apibible_search(
-                    fileset_id, query, limit, page
-                )
-            if is_sword_fileset(fileset_id):
-                return self._sword_search(
-                    fileset_id, query, limit, page, books
-                )
-            return self._dbt_search(
-                fileset_id, query, limit, page,
-                sort_by, books,
+            # Each provider returns the normalized
+            # ``{verses, meta}`` payload.
+            payload = provider_for(fileset_id).search(
+                query, limit, page,
+                sort_by=sort_by, books=books,
             )
+            return Response({'data': payload})
         except Exception as e:
             logger.exception(
                 "Error in BibleSearchView: %s", e
             )
             return provider_error_response(e)
 
-    def _esv_search(self, query, limit, page):
-        """Search using ESV API passage search endpoint."""
-        esv_client = get_default_esv_client()
 
-        # Call ESV API search
-        result = esv_client.search(query, page, limit)
-
-        # Transform ESV API response to match our format
-        verses = parse_esv_results(result.get('results', []))
-
-        # Build pagination metadata
-        pagination = {
-            'total': result.get('total_results', 0),
-            'count': len(verses),
-            'per_page': limit,
-            'current_page': result.get('page', page),
-            'total_pages': result.get('total_pages', 1),
-        }
-
-        return Response({
-            'data': {
-                'verses': verses,
-                'meta': {
-                    'pagination': pagination
-                }
-            }
-        })
-
-    def _apibible_search(self, fileset_id, query, limit, page):
-        """Search using API.Bible's offset-based search endpoint."""
-        meta = get_apibible_meta(fileset_id)
-        client = get_default_apibible_client()
-        offset = (page - 1) * limit
-        result = client.search(
-            meta['bible_id'], query,
-            offset=offset, limit=limit,
-        )
-        data = result.get('data') or {}
-        verses = [
-            normalize_apibible_verse(v)
-            for v in data.get('verses') or []
-        ]
-        total = data.get('total') or 0
-        total_pages = (
-            (total + limit - 1) // limit if limit else 1
-        )
-        return Response({
-            'data': {
-                'verses': verses,
-                'meta': {
-                    'pagination': {
-                        'total': total,
-                        'count': len(verses),
-                        'per_page': limit,
-                        'current_page': page,
-                        'total_pages': total_pages,
-                    }
-                },
-            }
-        })
-
-    def _grouped_search(self, fileset_id, query, books):
-        """Return every match grouped by book (``group_by=book``).
-
-        Response shape: ``data.groups`` = per-book groups in
-        canonical order; ``data.meta`` = ``{total, truncated}``
-        where ``truncated`` is True when a safety cap cut
-        results off.
-        """
-        if is_esv_fileset(fileset_id):
-            verses, total, truncated = fetch_esv_matches(
-                get_default_esv_client(), query
-            )
-        elif is_apibible_fileset(fileset_id):
-            meta = get_apibible_meta(fileset_id)
-            verses, total, truncated = fetch_apibible_matches(
-                get_default_apibible_client(),
-                meta['bible_id'], query,
-            )
-        elif is_sword_fileset(fileset_id):
-            verses = scan_sword_matches(
-                get_default_sword_client(),
-                fileset_id, query, books,
-            )
-            total, truncated = len(verses), False
-        else:
-            verses, total, truncated = fetch_dbt_matches(
-                get_default_dbt_client(),
-                fileset_id, query, books,
-            )
-        return Response({
-            'data': {
-                'groups': group_verses_by_book(verses),
-                'meta': {
-                    'total': total,
-                    'truncated': truncated,
-                },
-            }
-        })
-
-    def _dbt_search(
-        self, fileset_id, query, limit, page, sort_by, books
-    ):
-        dbt_client = get_default_dbt_client()
-        result = dbt_client.search(
-            fileset_id, query,
-            limit=limit, page=page,
-            sort_by=sort_by, books=books,
-        )
-        raw_verses = result.get('verses') or {}
-        verse_items = raw_verses.get('data') or []
-        normalized = [
-            normalize_dbt_verse(v)
-            for v in verse_items
-        ]
-        # Pagination lives in result['meta'] (documented schema) or
-        # result['verses']['meta'] (observed b4.dbt.io behaviour).
-        # Normalise to a clean { pagination: { ... } } shape and
-        # strip internal DBT 'links' so callers only ever use our
-        # own API to paginate.
-        raw_meta = (
-            result.get('meta')
-            or raw_verses.get('meta')
-            or {}
-        )
-        pagination = raw_meta.get('pagination') or {}
-        meta = {
-            'pagination': {
-                'total': pagination.get('total'),
-                'count': pagination.get('count'),
-                'per_page': pagination.get('per_page'),
-                'current_page': (
-                    pagination.get('current_page')
-                ),
-                'total_pages': (
-                    pagination.get('total_pages')
-                ),
-            }
-        } if pagination else {}
-        return Response({
-            'data': {
-                'verses': normalized,
-                'meta': meta,
-            }
-        })
-
-    def _sword_search(
-        self, fileset_id, query, limit, page, books
-    ):
-        matches = scan_sword_matches(
-            get_default_sword_client(),
-            fileset_id, query, books,
-        )
-        total = len(matches)
-        start = (page - 1) * limit
-        page_items = matches[start:start + limit]
-        total_pages = (
-            (total + limit - 1) // limit if limit else 1
-        )
-        return Response({
-            'data': {
-                'verses': page_items,
-                'meta': {
-                    'pagination': {
-                        'total': total,
-                        'count': len(page_items),
-                        'per_page': limit,
-                        'current_page': page,
-                        'total_pages': total_pages,
-                    }
-                },
-            }
-        })
-
-
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='language_iso',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Filter by ISO 639-2/639-3 language code '
+                '(e.g. eng, lvs). Omit to list all '
+                'translations.'
+            ),
+            required=False,
+        ),
+    ],
+)
 class TranslationListView(APIView):
     """
-    Lists available Bible translations by fetching live from DBT API.
+    Lists available Bible translations, merging the live DBT
+    ``/bibles`` list with the bundled registry translations.
+
+    Successful responses are cached per ``language_iso`` for
+    ``_TRANSLATIONS_CACHE_TTL_SECONDS`` and carry
+    ``Cache-Control: public`` — an anonymous request used to cost
+    a live DBT call every time.
+
+    A DBT outage does not fail the request: the service falls
+    back to the static registry entries and the response carries
+    ``"degraded": true`` (never cached). A failure outside the
+    DBT fetch still surfaces as 502 ``provider_error``.
 
     Query Parameters:
         - language_iso: Filter by ISO language code
                        (e.g., 'eng', 'lvs')
 
     Example:
-        /api/v1/translations/
-        /api/v1/translations/?language_iso=eng
+        /api/v1/bible/translations/
+        /api/v1/bible/translations/?language_iso=eng
     """
 
     permission_classes = [AllowAny]
@@ -976,32 +822,78 @@ class TranslationListView(APIView):
             f"TranslationListView.get called with "
             f"language_iso: {language_iso or 'all'}"
         )
+        # ISO codes are 2-3 letters; anything else is garbage
+        # that would be forwarded to the DBT language filter.
+        if language_iso and not is_valid_language_iso(language_iso):
+            return bad_request(
+                "language_iso must be a 2-3 letter ISO code."
+            )
+
+        # The cache key covers every input that changes the
+        # output: the iso filter (case-insensitive; ''/missing
+        # both mean "all").
+        cache_key = (
+            f"v1:translations:"
+            f"{(language_iso or '').lower() or 'all'}"
+        )
+        cached = cache.get(cache_key)
+        if cached is not None:
+            response = Response(cached)
+            response['Cache-Control'] = (
+                f"public, max-age="
+                f"{_TRANSLATIONS_CACHE_TTL_SECONDS}"
+            )
+            return response
 
         try:
-            translations = TranslationService.get_live_translations(
-                language_iso
+            translations, dbt_failed = (
+                TranslationService.get_live_translations(
+                    language_iso
+                )
             )
             logger.info(
                 f"Found {len(translations)} translations "
                 f"for language_iso: {language_iso or 'all'}"
             )
 
+            # Defensive mapping: a malformed service row must
+            # degrade to null fields, not KeyError → a
+            # misleading 502 provider_error.
             response_data = [
                 {
-                    'abbr': t['abbr'],
-                    'name': t['name'],
-                    'language': t['language'],
-                    'language_iso': t['iso'],
-                    'filesets': t['filesets'],
-                    'text_options': t.get('text_options', []),
-                    'audio_options': t.get('audio_options', []),
+                    'abbr': t.get('abbr'),
+                    'name': t.get('name'),
+                    'language': t.get('language'),
+                    'language_iso': t.get('iso'),
+                    'filesets': t.get('filesets') or [],
+                    'text_options': t.get('text_options') or [],
+                    'audio_options': t.get('audio_options') or [],
                 }
                 for t in translations
             ]
             logger.debug(
                 f"Returning {len(response_data)} translations"
             )
-            return Response({'results': response_data})
+            body = {
+                'results': response_data,
+                'degraded': dbt_failed,
+            }
+            # Degraded responses are intentionally cached neither
+            # server-side nor downstream — they must recover as
+            # soon as DBT does.
+            response = Response(body)
+            if dbt_failed:
+                response['Cache-Control'] = 'no-store'
+            else:
+                cache.set(
+                    cache_key, body,
+                    _TRANSLATIONS_CACHE_TTL_SECONDS,
+                )
+                response['Cache-Control'] = (
+                    f"public, max-age="
+                    f"{_TRANSLATIONS_CACHE_TTL_SECONDS}"
+                )
+            return response
 
         except Exception as e:
             logger.exception(
@@ -1051,18 +943,16 @@ class LanguageListView(APIView):
                 try:
                     page = int(page)
                 except (TypeError, ValueError):
-                    return Response(
-                        {"error": "page must be an integer."},
-                        status=status.HTTP_400_BAD_REQUEST,
+                    return bad_request(
+                        "page must be an integer."
                     )
             limit = request.query_params.get('limit')
             if limit is not None:
                 try:
                     limit = int(limit)
                 except (TypeError, ValueError):
-                    return Response(
-                        {"error": "limit must be an integer."},
-                        status=status.HTTP_400_BAD_REQUEST,
+                    return bad_request(
+                        "limit must be an integer."
                     )
             # Non-positive pagination params are client errors —
             # 400 instead of sending e.g. a negative ``page`` to
@@ -1071,14 +961,8 @@ class LanguageListView(APIView):
                 (page is not None and page < 1)
                 or (limit is not None and limit < 1)
             ):
-                return Response(
-                    {
-                        "error": (
-                            "limit and page must be "
-                            "positive integers."
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
+                return bad_request(
+                    "limit and page must be positive integers."
                 )
 
             dbt_client = get_default_dbt_client()
@@ -1100,9 +984,9 @@ class LanguageListView(APIView):
                 for item in (result.get('data') or [])
             ]
             # Normalise to a clean { pagination: { ... } } shape
-            # and whitelist the documented fields, like
-            # _dbt_search, so a missing meta.pagination emits {}
-            # rather than null.
+            # and whitelist the documented fields, like the
+            # facade's DBT search, so a missing meta.pagination
+            # emits {} rather than null.
             pagination = (result.get('meta') or {}).get(
                 'pagination'
             ) or {}

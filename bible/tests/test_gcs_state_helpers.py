@@ -43,6 +43,15 @@ class _FakeBlob:
         }
         self.generation = new_gen
 
+    def upload_from_file(self, file_obj, content_type=None):
+        existing = self._store.get(self.name)
+        new_gen = (existing["gen"] + 1) if existing else 1
+        self._store[self.name] = {
+            "data": file_obj.read(),
+            "gen": new_gen,
+        }
+        self.generation = new_gen
+
 
 class _FakeBucket:
     def __init__(self):
@@ -352,3 +361,96 @@ def test_signed_url_cache_keys_include_mode(fake_bucket, monkeypatch):
 
     assert url_verse != url_chapter
     assert sign_calls["n"] == 2
+
+
+def test_signed_url_cache_is_bounded_lru(fake_bucket, monkeypatch):
+    """The audio signed-URL cache mirrors the image one: a hard
+    bound evicts the least-recently-used entry so memory cannot
+    grow without limit on long-running workers (S7)."""
+    gcs._signed_url_cache.clear()
+    monkeypatch.setattr(gcs, "_SIGNED_URL_CACHE_MAX", 2)
+
+    class _FakeCreds:
+        service_account_email = "svc@example.iam.gserviceaccount.com"
+        token = "tok"
+
+        def refresh(self, _request):
+            pass
+
+    monkeypatch.setattr(
+        gcs.google.auth, "default",
+        lambda scopes=None: (_FakeCreds(), "proj"),
+    )
+    sign_calls = {"n": 0}
+
+    def fake_generate_signed_url(self, **_):
+        sign_calls["n"] += 1
+        return f"https://signed/{sign_calls['n']}"
+
+    _FakeBlob.generate_signed_url = fake_generate_signed_url
+
+    url_ch1 = gcs.signed_audio_url(
+        "LVSGLU8", "JHN", 1, "v", ttl_seconds=300,
+    )
+    gcs.signed_audio_url(
+        "LVSGLU8", "JHN", 2, "v", ttl_seconds=300,
+    )
+    # Third distinct key evicts chapter 1 (LRU).
+    gcs.signed_audio_url(
+        "LVSGLU8", "JHN", 3, "v", ttl_seconds=300,
+    )
+    assert len(gcs._signed_url_cache) == 2
+
+    url_ch1_again = gcs.signed_audio_url(
+        "LVSGLU8", "JHN", 1, "v", ttl_seconds=300,
+    )
+    # Evicted -> re-signed, not the cached URL.
+    assert url_ch1_again != url_ch1
+    assert sign_calls["n"] == 4
+
+
+def test_read_timestamps_json_caches_download(fake_bucket):
+    """The immutable ``_timestamps.json`` payload is cached: a
+    second read is served without another GCS download (S7)."""
+    _, ts_path = gcs.chapter_object_paths(
+        "LVSGLU8", "JHN", 3, "v", mode="verse",
+    )
+    payload = {"data": [{"verse_start": 1, "timestamp": 0.0}]}
+    fake_bucket._store[ts_path] = {
+        "data": json.dumps(payload).encode(),
+        "gen": 1,
+    }
+
+    first = gcs.read_timestamps_json("LVSGLU8", "JHN", 3, "v")
+    # Corrupt the stored object — a cached read must not see it.
+    fake_bucket._store[ts_path]["data"] = b"corrupt"
+    second = gcs.read_timestamps_json("LVSGLU8", "JHN", 3, "v")
+
+    assert first == payload
+    assert second == payload
+
+
+def test_upload_chapter_artifacts_invalidates_cache(fake_bucket):
+    """Re-generating a chapter must drop the cached timestamps
+    payload so readers never see the stale artifact."""
+    _, ts_path = gcs.chapter_object_paths(
+        "LVSGLU8", "JHN", 3, "v", mode="verse",
+    )
+    fake_bucket._store[ts_path] = {
+        "data": json.dumps({"data": "old"}).encode(),
+        "gen": 1,
+    }
+    assert gcs.read_timestamps_json(
+        "LVSGLU8", "JHN", 3, "v"
+    ) == {"data": "old"}
+
+    gcs.upload_chapter_artifacts(
+        "LVSGLU8", "JHN", 3, b"mp3-bytes",
+        {"data": "new"}, "v", mode="verse",
+    )
+
+    # The upload enriches the payload with ``file_size_bytes`` —
+    # assert on the key that proves the re-download happened.
+    assert gcs.read_timestamps_json(
+        "LVSGLU8", "JHN", 3, "v"
+    )["data"] == "new"

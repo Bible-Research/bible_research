@@ -3,10 +3,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework import status
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.test import APIClient
-
-from users.views import current_user
 
 User = get_user_model()
 
@@ -45,7 +42,11 @@ class RegisterUserTest(TestCase):
         )
         self.assertEqual(
             set(response.data['user'].keys()),
-            {'id', 'username', 'email', 'date_joined'},
+            {'id', 'username', 'email', 'date_joined',
+             'account_kind'},
+        )
+        self.assertEqual(
+            response.data['user']['account_kind'], 'registered'
         )
         self.assertEqual(response.data['user']['username'], 'newuser')
         self.assertEqual(
@@ -74,21 +75,13 @@ class RegisterUserTest(TestCase):
             response.status_code, status.HTTP_201_CREATED
         )
 
-        # The pytest settings define no REST_FRAMEWORK defaults,
-        # so the @api_view-wrapped view knows only Session +
-        # Basic auth; patch in TokenAuthentication so the issued
-        # token is really exercised through the request.
-        with patch.object(
-            current_user.cls,
-            'authentication_classes',
-            [TokenAuthentication],
-        ):
-            me = self.client.get(
-                ME_URL,
-                HTTP_AUTHORIZATION=(
-                    'Token ' + response.data['token']
-                ),
-            )
+        # The pytest settings mirror production, so the issued
+        # token is exercised through the real
+        # TokenAuthentication/BearerTokenAuthentication stack.
+        me = self.client.get(
+            ME_URL,
+            HTTP_AUTHORIZATION='Token ' + response.data['token'],
+        )
 
         self.assertEqual(me.status_code, status.HTTP_200_OK)
         self.assertEqual(me.data['username'], 'newuser')
@@ -110,6 +103,51 @@ class RegisterUserTest(TestCase):
         )
 
         response = self._register()
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('username', response.data)
+
+    def test_register_duplicate_username_iexact_400(self):
+        """Uniqueness is case-insensitive: login uses iexact,
+        so 'NewUser' must not coexist with 'newuser'."""
+        User.objects.create_user(
+            username='NewUser', password='whatever-123'
+        )
+
+        response = self._register()
+
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn('username', response.data)
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_register_username_with_whitespace_400(self):
+        """Usernames containing whitespace are rejected — they
+        served the removed device-middleware impersonation and
+        have no legitimate purpose."""
+        for username in ('has space', 'lead user', 'trail\tuser'):
+            with self.subTest(username=username):
+                response = self._register(username=username)
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_400_BAD_REQUEST,
+                )
+                self.assertIn('username', response.data)
+        self.assertFalse(User.objects.exists())
+
+    def test_register_integrity_error_400_not_500(self):
+        """A UniqueValidator→insert race hits the DB unique
+        constraint — the IntegrityError maps to 400, not 500."""
+        from django.db import IntegrityError
+
+        with patch.object(
+            User.objects, 'create_user',
+            side_effect=IntegrityError('UNIQUE username'),
+        ):
+            response = self._register()
 
         self.assertEqual(
             response.status_code, status.HTTP_400_BAD_REQUEST
@@ -247,19 +285,37 @@ class CurrentUserTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             set(response.data.keys()),
-            {'id', 'username', 'email', 'date_joined'},
+            {'id', 'username', 'email', 'date_joined',
+             'account_kind'},
         )
         self.assertEqual(response.data['username'], 'meuser')
         self.assertEqual(response.data['email'], 'me@example.com')
+        self.assertEqual(
+            response.data['account_kind'], 'registered'
+        )
 
-    def test_me_unauthenticated_403(self):
-        """Anonymous requests are denied: the view's explicit
-        @permission_classes([IsAuthenticated]) yields 403 under
-        the pytest settings (no authenticator supplies a
-        WWW-Authenticate header here)."""
+    def test_me_guest_account_kind(self):
+        """The legacy 'guest' account reports
+        ``account_kind: 'guest'`` so clients stop string-matching
+        the username."""
+        guest = User.objects.create_user(
+            username='guest', password='whatever-123'
+        )
+        self.client.force_authenticate(user=guest)
+
+        response = self.client.get(ME_URL)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['account_kind'], 'guest')
+
+    def test_me_unauthenticated_401(self):
+        """Anonymous requests are denied with 401 — the pytest
+        settings now mirror production, where Token/Bearer
+        authentication supplies the WWW-Authenticate header
+        DRF needs to answer 401 instead of 403."""
         response = self.client.get(ME_URL)
 
         self.assertEqual(
             response.status_code,
-            status.HTTP_403_FORBIDDEN,
+            status.HTTP_401_UNAUTHORIZED,
         )
