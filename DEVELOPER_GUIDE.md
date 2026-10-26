@@ -233,6 +233,18 @@ The project uses two special accounts:
   `GET /api/v1/comments/counts/` carry
   `permission_classes = [AllowAny]`.
 
+**Throttling**: a global `AnonRateThrottle` caps anonymous
+traffic at 300 requests/minute per client IP; authenticated
+requests are exempt except where a view opts into a scope.
+`POST /api/token/` (5/min per username), `POST
+/api/v1/users/register/` (10/min per client), and
+`GET /api/v1/bible/search/` (30/min, applied to anonymous and
+authenticated callers alike) carry tighter scoped rates —
+grouped search fans out to ~30 upstream provider calls per
+request. Throttle counters use the per-process locmem cache,
+so on GAE the effective limits scale roughly with running
+instances and reset on every restart/deploy.
+
 ---
 
 ## API Endpoints
@@ -309,7 +321,8 @@ POST /api/v1/users/register/
     "id": 3,
     "username": "newuser",
     "email": "user@example.com",
-    "date_joined": "2026-03-01T07:11:10Z"
+    "date_joined": "2026-03-01T07:11:10Z",
+    "account_kind": "registered"
   },
   "token": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0",
   "message": "User registered successfully"
@@ -317,6 +330,12 @@ POST /api/v1/users/register/
 ```
 **Notes**:
 - Email is optional
+- Usernames may not contain whitespace (HTTP 400), and
+  uniqueness is case-insensitive — login matches usernames
+  with `iexact`, so `Alice`/`alice` cannot coexist
+- `account_kind` is `guest` for the legacy read-only
+  account, `registered` otherwise — clients should branch on
+  it instead of string-matching `username == 'guest'`
 - Password must pass Django's `AUTH_PASSWORD_VALIDATORS`:
   at least 8 characters, not entirely numeric, not a common
   password, and not too similar to the username/email.
@@ -341,7 +360,8 @@ Authorization: Token <your-token>
   "id": 3,
   "username": "newuser",
   "email": "user@example.com",
-  "date_joined": "2026-03-01T07:11:10Z"
+  "date_joined": "2026-03-01T07:11:10Z",
+  "account_kind": "registered"
 }
 ```
 
@@ -434,7 +454,7 @@ GET /api/v1/bible/?passage=John+3&response_format=audio&
   verse numbers for `response_format=text`; audio responses are
   always chapter-granular and ignore the selector. A selector
   outside the chapter's verses returns `404` with
-  `error_code` `not_found`. The parameter is bounded: at most
+  `error_code` `book_not_in_fileset`. The parameter is bounded: at most
   100 characters total, 25 verse segments, and verse numbers
   1–200 — larger values return `400`.
 - `response_format`: "text" or "audio" (default: "text")
@@ -445,13 +465,6 @@ GET /api/v1/bible/?passage=John+3&response_format=audio&
     (API.Bible NIV)
   - For audio: Use audio fileset codes like "ENGESVN2DA",
     "LVSGLU8C1DA", "ENGNIVC1DA"
-
-ESV note: the `ENGESV_API` provider requests whole chapters
-upstream as an explicit `Book C:1-200` range rather than a bare
-`Book C` ref — api.esv.org parses a bare chapter ref as `C:1`
-for single-chapter books (Obadiah, Philemon, 2/3 John, Jude)
-and returns only verse 1. The out-of-range end verse clamps to
-the real chapter end.
 
 API.Bible text responses additionally carry a `meta` object with
 the upstream FUMS fields (`fums`, `fumsId`, `fumsJsInclude`,
@@ -478,18 +491,32 @@ can fall back to another fileset:
 
 This covers a DBT 404 (or empty `data`) from
 `v4_bible_filesets_show_chapter`, SWORD misses (a book/chapter
-outside the module, or generated audio not yet uploaded), and
-ESV API 404s for both text and audio requests.
+outside the module, or generated audio not yet uploaded),
+ESV API 404s for both text and audio requests, and API.Bible
+misses (upstream 404s, empty chapters, or missing audio
+resources reported as `PassageNotFoundError`). Every provider's
+"fileset lacks this book/chapter" outcome is normalized to the
+single `book_not_in_fileset` code the frontend's fileset
+fallback keys on.
 
 Other provider failures surface as `error` + `error_code` with a
 real HTTP status (built by `bible/utils/provider_errors.py`):
-`rate_limited` → 429, `not_found` (missing passage content, e.g.
-an empty ESV body) → 404, anything else → `provider_error` →
-502. Raw exception text is never embedded in `error` — upstream
-exception messages can contain request URLs with credentials
-(DBT's `?key=` query param); only the exception class name is
-surfaced. The React app branches on `error_code`, so these
-fields stay stable.
+`rate_limited` → 429, `not_found` → 404, anything else →
+`provider_error` → 502. Raw exception text is never embedded in
+`error` — upstream exception messages can contain request URLs
+with credentials (DBT's `?key=` query param); only the exception
+class name is surfaced. The React app branches on `error_code`,
+so these fields stay stable.
+
+**Client-input 400s** on all `bible/` endpoints carry the same
+contract — `{"error", "error_code"}` built by
+`bible/utils/error_responses.py`: `missing_parameter` when a
+required query param is absent, `invalid_parameter` when one is
+malformed. `fileset_id` (passage/search/timestamps), `bible_id`
+(copyright), `language_iso` (translations) and `book`
+(timestamps) are charset/length-validated at the view boundary
+before provider routing, so garbage ids can never reach the DBT
+branch or an upstream URL path.
 
 #### List Available Translations
 ```
@@ -566,7 +593,9 @@ Grouping rules (see `bible/services/fileset_groups.py`):
 
 **Query Parameters**:
 - `language_iso` (optional): Filter by ISO language code
-  (e.g., "eng", "lvs")
+  (e.g., "eng", "lvs"). Must match `^[a-zA-Z]{2,3}$` —
+  anything else returns `400` with
+  `error_code: "invalid_parameter"`.
 
 **Example**:
 ```
@@ -1167,7 +1196,11 @@ DELETE /api/v1/images/{image_id}/
 Multipart upload with a single `file` field. Note images:
 only the note's owner may upload; reads follow the note's
 accessibility scope. Comment images: only the comment's
-author may upload. `DELETE /images/{id}/` is allowed for the
+author may upload. On both nested routes the parent note or
+comment is resolved through `get_accessible_notes_qs`, so an
+inaccessible (private foreign) parent returns `404` —
+identical to a nonexistent one — instead of a 403 that would
+leak its existence. `DELETE /images/{id}/` is allowed for the
 uploader, the parent note's owner, or the parent comment's
 author. A soft-deleted comment's image list returns `[]`
 (the same tombstone contract as the comment payload itself —

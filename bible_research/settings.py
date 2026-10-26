@@ -381,10 +381,19 @@ REST_FRAMEWORK = {
     # client IP — not the shared forwarding-rule IP or the
     # client-spoofable XFF prefix.
     'NUM_PROXIES': 2,
-    # Scoped throttle rates — only /api/token/ and
-    # /api/v1/users/register/ opt in via throttle_classes; no
-    # global DEFAULT_THROTTLE_CLASSES is configured.
+    # Global anonymous throttle — generous on purpose: it bounds
+    # credential-free abuse of endpoints that spend paid
+    # provider quota without impeding reading/paging. Views with
+    # their own ``throttle_classes`` (search, token, register)
+    # replace this list entirely.
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+    ],
     'DEFAULT_THROTTLE_RATES': {
+        'anon': '300/min',
+        # BibleSearchView opts in via throttle_classes — grouped
+        # mode fans out to ~30 upstream calls per request.
+        'search': '30/min',
         'token': '5/min',
         'register': '10/min',
     },

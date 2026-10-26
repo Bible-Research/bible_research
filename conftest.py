@@ -118,7 +118,12 @@ def pytest_configure():
                 # (GAE appends client IP, then a fixed
                 # forwarding-rule IP).
                 'NUM_PROXIES': 2,
+                'DEFAULT_THROTTLE_CLASSES': [
+                    'rest_framework.throttling.AnonRateThrottle',
+                ],
                 'DEFAULT_THROTTLE_RATES': {
+                    'anon': '10000/min',
+                    'search': '1000/min',
                     'token': '1000/min',
                     'register': '1000/min',
                 },
@@ -157,12 +162,17 @@ PROD_REST_FRAMEWORK = {
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'NUM_PROXIES': 2,
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+    ],
     # Mirrors production's rates for fidelity; note that
     # SimpleRateThrottle.THROTTLE_RATES is bound once at
     # rest_framework.throttling import time (to the pytest
     # settings above), so in practice the generous test rates
     # apply even under this override.
     'DEFAULT_THROTTLE_RATES': {
+        'anon': '300/min',
+        'search': '30/min',
         'token': '5/min',
         'register': '10/min',
     },

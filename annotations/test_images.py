@@ -274,7 +274,26 @@ class NoteImageAPITest(TestCase):
         )
         self.assertEqual(Image.objects.count(), 1)
 
-    def test_non_owner_upload_returns_403(self):
+    def test_non_owner_upload_private_note_returns_404(self):
+        """Upload to a private foreign note 404s — _get_note
+        resolves through get_accessible_notes_qs, so
+        inaccessible notes are indistinguishable from
+        nonexistent ones (no existence oracle)."""
+        self.client.force_authenticate(user=self.other)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._upload_url(),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(Image.objects.count(), 0)
+
+    def test_non_owner_upload_public_note_returns_403(self):
+        """A public note IS accessible, so the owner check runs
+        and a foreign uploader still gets 403."""
+        self.note.public = True
+        self.note.save(update_fields=['public'])
         self.client.force_authenticate(user=self.other)
         with _mock_bucket():
             resp = self.client.post(
@@ -326,14 +345,18 @@ class NoteImageAPITest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.data), 1)
 
-    def test_list_other_user_private_note_returns_403(self):
+    def test_list_other_user_private_note_returns_404(self):
+        """A private foreign note 404s like a nonexistent one —
+        no existence oracle (S10)."""
         self.client.force_authenticate(user=self.other)
         resp = self.client.get(self._upload_url())
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 404)
 
-    def test_unauthenticated_list_private_note_returns_403(self):
+    def test_unauthenticated_list_private_note_returns_404(self):
+        """Anonymous callers see public notes only — a private
+        note's image list 404s instead of revealing it via 403."""
         resp = self.client.get(self._upload_url())
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 404)
 
     def test_unauthenticated_list_public_note_returns_200(self):
         """Anon may read images on public notes (plan scope)."""
@@ -429,7 +452,24 @@ class CommentImageAPITest(TestCase):
         img = Image.objects.get(pk=resp.data["id"])
         self.assertEqual(img.comment_id, self.comment.id)
 
-    def test_non_author_upload_returns_403(self):
+    def test_non_author_upload_private_note_returns_404(self):
+        """A comment on a private foreign note 404s for upload —
+        _get_comment resolves through get_accessible_notes_qs
+        (no existence oracle, S10)."""
+        self.client.force_authenticate(user=self.other)
+        with _mock_bucket():
+            resp = self.client.post(
+                self._upload_url(),
+                {"file": _make_file()},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_non_author_upload_public_note_returns_403(self):
+        """On a public note the comment is accessible, so the
+        author check runs and a foreign uploader gets 403."""
+        self.note.public = True
+        self.note.save(update_fields=['public'])
         self.client.force_authenticate(user=self.other)
         with _mock_bucket():
             resp = self.client.post(
@@ -970,21 +1010,18 @@ class NoteImageEdgeCasesTest(TestCase):
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(Image.objects.count(), 0)
 
-    def test_note_images_list_private_foreign_403(self):
-        """PIN: GET images on another user's PRIVATE note → 403.
+    def test_note_images_list_private_foreign_404(self):
+        """GET images on another user's PRIVATE note → 404.
 
-        FIXME: existence oracle — NoteImageViewSet._get_note is
-        unscoped (views.py:1587-1590), so list() reaches the
-        accessibility check and raises PermissionDenied (403),
-        revealing the note exists. CommentViewSet._get_note
-        scopes to get_accessible_notes_qs and 404s instead
-        (views.py:1344-1353). Flagged for product decision.
+        NoteImageViewSet._get_note resolves through
+        get_accessible_notes_qs, so an inaccessible note is
+        indistinguishable from a nonexistent one — matching
+        CommentViewSet._get_note (no existence oracle).
         """
         self.client.force_authenticate(user=self.other)
         resp = self.client.get(self._images_url(self.note.id))
-        self.assertEqual(resp.status_code, 403)
-        # A truly nonexistent note 404s — the 403 above leaks
-        # that THIS note exists.
+        self.assertEqual(resp.status_code, 404)
+        # Identical to the response for a truly nonexistent note.
         resp = self.client.get(
             self._images_url("NOTDOESNOTEXIST01")
         )

@@ -168,7 +168,10 @@ class PassageProviderHTTPTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(
             resp.json(),
-            {"error": "Invalid format. Use 'text' or 'audio'"},
+            {
+                "error": "Invalid format. Use 'text' or 'audio'",
+                "error_code": "invalid_parameter",
+            },
         )
 
     def test_unknown_book_400(self):
