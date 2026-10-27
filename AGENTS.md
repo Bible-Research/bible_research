@@ -121,6 +121,33 @@ React app branches on `error_code`. Never embed `str(exc)` in
 `error` — exception text can contain request URLs with
 credentials.
 
+## Sentry event streams
+
+Project `bible-research-api` (org `bible-research`, de.sentry.io);
+init lives in `bible_research/settings.py` and is DSN-gated — no
+DSN, no traffic. What each stream means:
+
+- `DjangoIntegration` captures unhandled 500s at level error —
+  real bugs.
+- `capture_internal_exception` (in
+  `bible/utils/provider_errors.py`) reports caught server bugs at
+  level error, tagged `error_code:internal_error` — real bugs,
+  agent-fixable.
+- `capture_provider_exception` reports upstream outages at level
+  warning, tagged `error_code` in {`rate_limited`,
+  `provider_error`} — the `_CAPTURED_ERROR_CODES` allowlist, so
+  `not_found`/`book_not_in_fileset` are never sent. Trend-only;
+  NOT auto-fix candidates.
+- `LoggingIntegration(event_level=None)` — log records are
+  breadcrumbs only, never events.
+- `sentry_before_send` (`bible_research/utils.py`) strips
+  `request.data` on `/api/token` and `/api/v1/users/` paths
+  (password-bearing bodies).
+
+The agent-fix queue for this project is `is:unresolved
+level:error environment:production` — warning-level provider
+events are excluded by the level filter.
+
 ## Auth quirks
 
 - Token auth only: `bible_research/authentication.py` holds DRF
