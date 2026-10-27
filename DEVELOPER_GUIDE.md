@@ -125,7 +125,14 @@ DRF throttling and these provider-data caches:
   copyrighted translations share a 480-verse budget per work —
   `ENGESV` (DBT) and `ENGESV_API` draw from the same `esv`
   budget; `ApiBibleProvider` is excluded entirely because FUMS
-  `meta` tokens must be reported per display.
+  `meta` tokens must be reported per display. One behavior
+  delta the wrapper introduces: a text request
+  (`response_format` unset/`'text'`) against a DBT *audio*
+  (`*DA`) fileset now 404s `book_not_in_fileset` — the
+  composed path serves only verse text, where the old
+  `DbtProvider.get_passage` returned an audio payload for any
+  format. The frontend always sends `response_format=audio`
+  for audio filesets, so nothing user-facing changes.
 
 All locmem cache keys carry a `v1:` namespace prefix (the
 in-process LRUs above are module-level `OrderedDict`s, not

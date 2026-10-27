@@ -307,6 +307,12 @@ class _CachingProvider(Provider):
         super().__init__(inner.fileset_id)
 
     @property
+    def inner(self):
+        """The wrapped provider — e.g. so ``type()`` keys keep
+        distinguishing the concrete provider class."""
+        return self._inner
+
+    @property
     def audio_codec(self):
         return self._inner.audio_codec
 

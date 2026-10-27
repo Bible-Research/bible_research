@@ -74,7 +74,8 @@ def canonical_fileset_id(fileset_id):
     SWORD abbrs and audio ids (``GLU8``, ``LVSGLU8C1DA``)
     collapse to the text module id so every alias shares one
     entry; ESV ids canonicalize through their registry; DBT ids
-    pass through unchanged.
+    have no registry and are uppercased so ``engkjv`` and
+    ``ENGKJV`` share one entry and budget group.
     """
     canon = canonical_sword_fileset_id(fileset_id)
     if canon is not None:
@@ -82,7 +83,7 @@ def canonical_fileset_id(fileset_id):
     canon = canonical_esv_fileset_id(fileset_id)
     if canon is not None:
         return canon
-    return fileset_id
+    return fileset_id.upper() if fileset_id else fileset_id
 
 
 def cache_translation_group(fileset_id):
@@ -128,6 +129,9 @@ def get_or_fetch(fileset_id, book_id, chapter, fetch):
                     raise value
                 return value
             del _cache[key]
+    # fetch() runs outside the lock on purpose: holding it
+    # across a ~1s upstream call would serialize every request,
+    # while a concurrent cold miss only costs a duplicate fetch.
     try:
         payload = fetch()
     except PassageNotFoundError as exc:
