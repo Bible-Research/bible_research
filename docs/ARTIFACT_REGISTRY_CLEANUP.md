@@ -2,174 +2,109 @@
 
 ## Overview
 
-This document explains the automated cleanup workflow for GCP Artifact
-Registry images used by the audio-generator Cloud Run Job.
+This document explains the automated cleanup of GCP Artifact Registry
+images — both the `gae-standard` repository (App Engine deploy
+images) and the `audio-generator` repository (Cloud Run Job image).
 
 ## Problem
 
-GCP's free tier has storage quotas for Artifact Registry. While GCP has
-built-in cleanup policies, they can take up to 24 hours to delete old
-images. During active development with multiple deployments per day,
-this delay can cause storage quota issues.
+GCP's free tier has storage quotas for Artifact Registry. Every App
+Engine deploy leaves a permanent `operation-*` image under
+`gae-standard/app/default`, every `deploy.yml` run pushes an
+`audio-generator:<git-sha>` image, and Cloud Build cache images
+collect under `gae-standard/build-cache/*`. Without cleanup the repos
+grow without bound (~1.7 GB observed within weeks).
 
-## Solution
+## Solution — two layers
 
-The `.github/workflows/cleanup-artifacts.yml` workflow automatically
-deletes old Docker images immediately after deployments, keeping only
-the most recent tagged image.
+1. **`.github/workflows/cleanup-artifacts.yml`** deletes stale images
+   immediately — after every successful deploy, daily at 2 AM UTC,
+   and on manual trigger.
+2. **Terraform `cleanup_policies`** (`terraform/artifact_registry.tf`)
+   are the daily-evaluated backstop: `DELETE` every version not
+   matched by a `KEEP` policy (no `older_than` floor), keep only the
+   newest `app/` version in `gae-standard` and the newest 2
+   `audio-generator` versions in `audio-generator`.
+   `cleanup_policy_dry_run = false` is set explicitly — dry-run
+   policies only log and never delete.
 
-## How It Works
+## What the workflow keeps
 
-### Triggers
+- `gae-standard`: the **single newest `app/default` image** by
+  `createTime`. Everything else — older deploy images,
+  `build-cache/*`, images of any other package — is deleted. GAE
+  does not re-pull old images at runtime; rollback means redeploying.
+- `audio-generator`: the newest `audio-generator` image **plus the
+  digest the Cloud Run Job is currently pinned to**. Deleting the
+  referenced digest makes `terraform apply` 404 on the job update and
+  can break the monthly TTS run. PR-preview images
+  (`bible-research` package) are left to the Terraform DELETE policy
+  — Cloud Run materializes the image at deploy time, so removal on
+  the next daily evaluation is safe.
 
-The workflow runs in three scenarios:
+## Critical implementation details
 
-1. **After successful deployments** - Triggered by the "Deploy to App
-   Engine" workflow completion
-2. **Daily schedule** - Runs at 2 AM UTC via cron
-3. **Manual trigger** - Can be run manually via GitHub Actions UI
+### Never sort tag listings
 
-### Cleanup Logic
+`gcloud artifacts docker tags list` returns **NULL**
+`UPDATE_TIME`/`CREATE_TIME` for tag resources, so a
+`--sort-by=~UPDATE_TIME` flag silently does nothing and the API
+returns tags oldest-first. The previous workflow kept the *first*
+row — i.e. the OLDEST image — and deleted everything newer,
+including the digest the Cloud Run Job had been pinned to seconds
+earlier (which then broke `terraform apply`). "Newest" must be
+computed from `gcloud artifacts docker images list` (`createTime` +
+`version` fields), sorted locally.
 
-The workflow follows this critical sequence:
+### Delete by digest with --delete-tags
 
-1. **List all tagged images** sorted by update time (newest first)
-2. **Keep only the most recent tag** (the first one)
-3. **Delete old tags first** using `gcloud artifacts docker tags
-   delete`
-4. **Delete untagged images** using `gcloud artifacts docker images
-   delete`
+Deleting `image@digest --delete-tags` removes the digest and all of
+its tags in one call; the old tag-then-image dance is unnecessary.
 
-### Why Delete Tags First?
+### Terraform gotchas encountered
 
-**CRITICAL**: GCP will reject deletion attempts on images that have
-tags with error:
+- `most_recent_versions.keep_count` is **per package** — an
+  unscoped KEEP policy preserves one version of `build-cache/*`
+  (and any other stray package) forever. Scope KEEP with
+  `condition { package_name_prefixes = [...] }`.
+- `older_than` floors leave up to ~2 days of accumulation (age +
+  daily eval cadence). Omit it to delete any unkept version.
+- `iam.serviceAccounts.delete` addresses SAs by **numeric unique
+  ID** (`projects/-/serviceAccounts/<uid>`), so an
+  `endsWith("…@…gserviceaccount.com")` IAM Condition never matches
+  — the scoped `serviceAccountAdmin` grant in `iam.tf` must include
+  `managed_sa_unique_ids` clauses or apply 403s.
+- The Cloud Run Job's `ignore_changes` on `image` does not protect
+  `terraform apply` from a stale referenced digest: the provider
+  still sends the (refreshed) live image value in update payloads,
+  and the API rejects missing images. Fix by re-pinning the job
+  (`gcloud run jobs update --image=<existing-digest>`).
+
+## Manual cleanup
+
+To run immediately: GitHub Actions → "Cleanup Artifact Registry" →
+Run workflow. Or ad-hoc:
+
+```bash
+REGISTRY=europe-west3-docker.pkg.dev/bible-research-489314
+gcloud artifacts docker images list "${REGISTRY}/gae-standard" \
+  --include-tags
+gcloud artifacts docker images delete \
+  "${REGISTRY}/gae-standard/app/default@sha256:<digest>" \
+  --delete-tags --quiet
 ```
-ERROR: Cannot delete image [...] because it is tagged.
-Existing tags are: [...]
-```
-
-The workflow must always delete tags before attempting to delete the
-underlying images.
-
-## Implementation Details
-
-### Authentication
-
-Uses the same Workload Identity Federation setup as the deployment
-workflow:
-- Provider: `github-actions` workload identity pool
-- Service Account: `github-deployer@bible-research-489314.iam.gserviceaccount.com`
-
-### Required Permissions
-
-The service account needs:
-- `roles/artifactregistry.writer` or equivalent
-- Permission to delete images and tags in Artifact Registry
-
-### Error Handling
-
-The workflow uses strict error handling:
-
-- `set -e` - Exit on any error
-- **Tag deletion failures** → Workflow fails (RED status)
-- **Untagged image deletion failures** → Warning only (GCP may
-  auto-clean)
-- Failure counter tracks issues
-- Exit code 1 if any critical operations fail
-
-### Output
-
-**Success (Green):**
-```
-Found 8 tagged image(s) in registry
-Deleting 7 old tagged image(s)...
-Deleting tag: europe-west3-docker.pkg.dev/.../audio-generator:abc123
-Successfully deleted tag
-...
-Deleting untagged images...
-Successfully deleted untagged image
-Cleanup complete! All old images deleted successfully.
-
-Remaining tagged images:
-TAG        VERSION            UPDATE_TIME
-xyz789     sha256:def456     2026-09-21T08:00:00
-```
-
-**Failure (Red):**
-```
-ERROR: Failed to delete tag abc123
-ERROR: 3 tag deletion(s) failed
-```
-
-## Benefits
-
-1. **Cost Savings** - Stay within GCP free tier quotas
-2. **Immediate Cleanup** - Don't wait 24h for GCP's auto-cleanup
-3. **Automated** - Runs after every deployment and on schedule
-4. **Reliable** - Proper error handling and failure detection
-5. **Transparent** - Clear logging of what's being deleted
 
 ## Monitoring
 
-Check the workflow status in GitHub Actions:
-- Green = All old images deleted successfully
-- Red = Tag deletion failed (needs investigation)
-- Yellow = Workflow skipped (deployment failed)
-
-## Manual Cleanup
-
-To manually trigger cleanup:
-
-1. Go to GitHub Actions
-2. Select "Cleanup Artifact Registry" workflow
-3. Click "Run workflow"
-4. Select branch (usually `main`)
-5. Click "Run workflow"
-
-## Troubleshooting
-
-### "Cannot delete image because it is tagged"
-
-This means the workflow tried to delete an image before deleting its
-tags. This should not happen with the current implementation, but if
-it does:
-
-1. Check the workflow logs
-2. Verify tags are being deleted first
-3. Check for race conditions with concurrent deployments
-
-### "NOT_FOUND" errors
-
-This usually means:
-- Image was already deleted (auto-cleanup)
-- Incorrect image reference format
-- Image digest changed
-
-These are treated as warnings for untagged images.
-
-### Permission denied
-
-The service account needs `roles/artifactregistry.writer`. Check IAM
-permissions:
-
-```bash
-gcloud projects get-iam-policy bible-research-489314 \
-  --flatten="bindings[].members" \
-  --filter="bindings.members:github-deployer@*"
-```
+- Green = stale images deleted (or none existed)
+- Red = auth/API failure (needs investigation)
+- Skipped = triggering deployment failed
 
 ## Related Files
 
-- `.github/workflows/cleanup-artifacts.yml` - The cleanup workflow
-- `.github/workflows/deploy.yml` - Main deployment workflow
-- `docs/DELETE_IMAGES_VIA_GH.md` - Original requirement
-
-## Future Improvements
-
-Potential enhancements:
-
-1. **Keep N images** - Instead of just 1, keep the last N deployments
-2. **Size-based cleanup** - Delete based on total storage size
-3. **Slack notifications** - Alert on cleanup failures
-4. **Metrics** - Track storage savings over time
+- `.github/workflows/cleanup-artifacts.yml` — the cleanup workflow
+- `terraform/artifact_registry.tf` — repo + cleanup policies
+- `terraform/iam.tf` — scoped SA-admin condition
+- `.github/workflows/deploy.yml` — image producer + job pinner
+- `docs/APP_ENGINE_VERSION_CLEANUP.md` — GAE *version* cleanup
+  (serving versions, not images)

@@ -1,5 +1,19 @@
 locals {
   appspot_email = "${var.project_id}@appspot.gserviceaccount.com"
+
+  # Some IAM operations (notably ``iam.serviceAccounts.delete``)
+  # address service accounts by numeric unique ID — the request
+  # resource is ``projects/-/serviceAccounts/<unique-id>``, which
+  # the email-based ``endsWith`` clauses below can never match.
+  # Keep these in sync with the managed SAs; run
+  # ``gcloud iam service-accounts list --format='value(uniqueId)'``
+  # to refresh after recreating an account.
+  managed_sa_unique_ids = [
+    "103872082169766087815",   # audio-generator
+    "100199889854403046928",   # github-deployer
+    "111270081806219228031",   # thumbnail-worker
+    "110192253908821077884",   # appspot default runtime SA
+  ]
 }
 
 resource "google_service_account" "github_deployer" {
@@ -150,14 +164,18 @@ resource "google_project_iam_member" "github_deployer_service_account_admin_scop
 
   condition {
     title       = "Terraform-managed SAs only"
-    description = "Limits serviceAccountAdmin to SAs defined in this Terraform config. Uses endsWith so it matches both project-id and project-number resource-name forms emitted by IAM."
-    expression  = <<-EOT
-      resource.name.endsWith("/serviceAccounts/audio-generator@${var.project_id}.iam.gserviceaccount.com") ||
-      resource.name.endsWith("/serviceAccounts/audio-scheduler@${var.project_id}.iam.gserviceaccount.com") ||
-      resource.name.endsWith("/serviceAccounts/github-deployer@${var.project_id}.iam.gserviceaccount.com") ||
-      resource.name.endsWith("/serviceAccounts/thumbnail-worker@${var.project_id}.iam.gserviceaccount.com") ||
-      resource.name.endsWith("/serviceAccounts/${local.appspot_email}")
-    EOT
+    description = "Scoped to config-managed service accounts."
+    expression  = join(" || ", [
+      for suffix in concat(
+        [
+          "audio-generator@${var.project_id}.iam.gserviceaccount.com",
+          "github-deployer@${var.project_id}.iam.gserviceaccount.com",
+          "thumbnail-worker@${var.project_id}.iam.gserviceaccount.com",
+          local.appspot_email,
+        ],
+        local.managed_sa_unique_ids,
+      ) : "resource.name.endsWith(\"/serviceAccounts/${suffix}\")"
+    ])
   }
 
   depends_on = [
