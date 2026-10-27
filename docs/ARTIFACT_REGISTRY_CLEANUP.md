@@ -22,11 +22,10 @@ grow without bound (~1.7 GB observed within weeks).
    and on manual trigger.
 2. **Terraform `cleanup_policies`** (`terraform/artifact_registry.tf`)
    are the daily-evaluated backstop: `DELETE` every version not
-   matched by a `KEEP` policy (no `older_than` floor), keep only the
-   newest `app/` version in `gae-standard` and the newest 2
-   `audio-generator` versions in `audio-generator`.
-   `cleanup_policy_dry_run = false` is set explicitly — dry-run
-   policies only log and never delete.
+   matched by a `KEEP` policy (no `older_than` floor), keeping the
+   newest version per package in `gae-standard` and the newest 2 in
+   `audio-generator`. `cleanup_policy_dry_run = false` is set
+   explicitly — dry-run policies only log and never delete.
 
 ## What the workflow keeps
 
@@ -38,9 +37,9 @@ grow without bound (~1.7 GB observed within weeks).
   digest the Cloud Run Job is currently pinned to**. Deleting the
   referenced digest makes `terraform apply` 404 on the job update and
   can break the monthly TTS run. PR-preview images
-  (`bible-research` package) are left to the Terraform DELETE policy
-  — Cloud Run materializes the image at deploy time, so removal on
-  the next daily evaluation is safe.
+  (`bible-research` package) older than 2h are deleted outright —
+  Cloud Run materializes the image at deploy time; the age floor
+  only guards the push → `gcloud run deploy` window.
 
 ## Critical implementation details
 
@@ -63,10 +62,11 @@ its tags in one call; the old tag-then-image dance is unnecessary.
 
 ### Terraform gotchas encountered
 
-- `most_recent_versions.keep_count` is **per package** — an
-  unscoped KEEP policy preserves one version of `build-cache/*`
-  (and any other stray package) forever. Scope KEEP with
-  `condition { package_name_prefixes = [...] }`.
+- `most_recent_versions.keep_count` is **per package**, and a
+  policy's `condition` and `most_recent_versions` are **mutually
+  exclusive** (API `oneof`) — keep counts cannot be scoped to
+  specific packages. The workflow's per-package deletion is what
+  stops `build-cache/*` and stray packages from accumulating.
 - `older_than` floors leave up to ~2 days of accumulation (age +
   daily eval cadence). Omit it to delete any unkept version.
 - `iam.serviceAccounts.delete` addresses SAs by **numeric unique
