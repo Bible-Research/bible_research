@@ -1028,6 +1028,19 @@ Notes with no verse links keep the same response shape:
 expanded tag object when set — clients never have to sniff
 for absent keys or a raw tag PK.
 
+Every note payload also embeds a read-only `images` array —
+the same objects the nested images routes return
+(`id`, `storage_url`, `signed_url`, `content_type`,
+`size_bytes`, `comment`, `note`, `uploaded_by`,
+`created_at`), empty when the note has no attachments. It is
+emitted on every note read path (`GET /notes/`,
+`GET /notes/{id}/`, `POST /notes/linked/`, and write
+responses) and is served by `prefetch_related('images')`,
+so clients render thumbnails without a per-note
+`GET /notes/{id}/images/` fetch. Uploads are capped at
+`IMAGE_MAX_PER_NOTE` (10) images per note and the field is
+ignored on write — attach via `POST /notes/{id}/images/`.
+
 **Examples**:
 ```
 # Get first page with custom ordering (default)
@@ -1349,8 +1362,15 @@ DELETE /api/v1/images/{image_id}/
 Multipart upload with a single `file` field. Note images:
 only the note's owner may upload; reads follow the note's
 accessibility scope. Comment images: only the comment's
-author may upload. On both nested routes the parent note or
-comment is resolved through `get_accessible_notes_qs`, so an
+author may upload. Caps are `IMAGE_MAX_PER_NOTE` (10) and
+`IMAGE_MAX_PER_COMMENT` (5) — a further upload past the cap
+returns `400` on `file`. Note and comment payloads embed
+their `images` arrays directly, so the nested `GET` routes
+are mainly for refreshing expired `signed_url`s
+(`IMAGE_SIGNED_URL_TTL_SECONDS`, 600 s — `null` when
+signing fails, never a raw `gs://` URI). On both nested
+routes the parent note or comment is resolved through
+`get_accessible_notes_qs`, so an
 inaccessible (private foreign) parent returns `404` —
 identical to a nonexistent one — instead of a 403 that would
 leak its existence. `DELETE /images/{id}/` returns `404`

@@ -1539,8 +1539,8 @@ class LinkedNotesTest(TestCase):
             'bible.services.providers.get_default_esv_client'
         ) as esv_client:
             # One query for notes (+ joined tag), one prefetch
-            # for verses — not one per note.
-            with self.assertNumQueries(2):
+            # each for verses and images — not one per note.
+            with self.assertNumQueries(3):
                 resp = self._post(refs)
         dbt_client.assert_not_called()
         esv_client.assert_not_called()
@@ -2598,16 +2598,17 @@ class NoteEnrichmentBatchingTest(TestCase):
 
     @patch('bible.services.providers.get_default_dbt_client')
     def test_list_query_count_is_flat(self, mock_get):
-        """select_related('tag') + prefetch_related('verses')
-        keep a full page of notes at a constant query count:
-        one COUNT for pagination, one notes SELECT, one
-        verses prefetch — not one query per note."""
+        """select_related('tag') + prefetch_related('verses',
+        'images') keep a full page of notes at a constant query
+        count: one COUNT for pagination, one notes SELECT, one
+        verses prefetch, one images prefetch — not one query
+        per note."""
         for i in range(10):
             self._note(f'note {i}', self.v11)
         mock_client = self._chapter_mock(1)
         mock_get.return_value = mock_client
 
-        with self.assertNumQueries(3):
+        with self.assertNumQueries(4):
             resp = self.client.get(self.LIST_URL)
 
         self.assertEqual(resp.status_code, 200)

@@ -12,11 +12,12 @@ from django.test.utils import CaptureQueriesContext
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from annotations.models import Comment, Image, Note
+from annotations.models import Comment, Image, Note, NoteVerse, Tag
 from annotations.services.image_storage import (
     FileTooLarge,
     upload_original,
 )
+from bible.models import Verse
 
 User = get_user_model()
 
@@ -1185,3 +1186,162 @@ class NoteImageEdgeCasesTest(TestCase):
         self.assertFalse(
             Image.objects.filter(pk=image_id).exists()
         )
+
+
+class NoteInlineImagesTest(TestCase):
+    """Tests for images embedded in NoteSerializer payloads.
+
+    Mirrors CommentInlineImagesTest: every note read path
+    (list, retrieve, linked) carries a read-only ``images``
+    array of ImageSerializer objects, served by one
+    prefetch — never an N+1 per note.
+    """
+
+    LIST_URL = "/api/v1/notes/"
+    LINKED_URL = "/api/v1/notes/linked/"
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="note_inline_user",
+            email="note_inline@example.com",
+            password="pass",
+        )
+        self.note = Note.objects.create(
+            user=self.user,
+            note_text="Note for inline image tests",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _detail_url(self):
+        return f"/api/v1/notes/{self.note.id}/"
+
+    def _make_image(self, note=None):
+        return Image.objects.create(
+            note=note or self.note,
+            uploaded_by=self.user,
+            storage_url=(
+                "gs://test-bucket/originals/x/source.png"
+            ),
+            content_type="image/png",
+            size_bytes=100,
+        )
+
+    @patch(
+        "annotations.services.image_storage.signed_image_url",
+        return_value="https://signed.example.com/img",
+    )
+    def test_list_embeds_images(self, _mock_sign):
+        """GET /notes/ results carry the images array."""
+        self._make_image()
+        self._make_image()
+        resp = self.client.get(self.LIST_URL)
+        self.assertEqual(resp.status_code, 200)
+        results = resp.json()["results"]
+        self.assertEqual(len(results), 1)
+        images = results[0]["images"]
+        self.assertEqual(len(images), 2)
+        for key in (
+            "id", "storage_url", "signed_url",
+            "content_type", "size_bytes", "created_at",
+        ):
+            self.assertIn(key, images[0])
+        self.assertTrue(images[0]["id"].startswith("IMG_"))
+        self.assertEqual(
+            images[0]["signed_url"],
+            "https://signed.example.com/img",
+        )
+
+    def test_list_empty_images_array_when_none(self):
+        """A note with no attachments still emits images: []."""
+        resp = self.client.get(self.LIST_URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["results"][0]["images"], [])
+
+    @patch(
+        "annotations.services.image_storage.signed_image_url",
+        return_value="https://signed.example.com/img",
+    )
+    def test_retrieve_embeds_images(self, _mock_sign):
+        """GET /notes/<pk>/ embeds images like the list does."""
+        self._make_image()
+        resp = self.client.get(self._detail_url())
+        self.assertEqual(resp.status_code, 200)
+        images = resp.json()["images"]
+        self.assertEqual(len(images), 1)
+        self.assertEqual(
+            images[0]["signed_url"],
+            "https://signed.example.com/img",
+        )
+
+    def test_retrieve_empty_images_array_when_none(self):
+        resp = self.client.get(self._detail_url())
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["images"], [])
+
+    @patch(
+        "annotations.services.image_storage.signed_image_url",
+        return_value="https://signed.example.com/img",
+    )
+    def test_linked_embeds_images(self, _mock_sign):
+        """POST /notes/linked/ results carry images too.
+
+        The linked action sets include_verse_text=False, so no
+        provider call happens and no DBT mock is needed.
+        """
+        verse = Verse.objects.create(
+            book="John", chapter=3, verse=16,
+        )
+        NoteVerse.objects.create(note=self.note, verse=verse)
+        self._make_image()
+        resp = self.client.post(
+            self.LINKED_URL,
+            {
+                "verse_references": [
+                    {"book": "John", "chapter": 3, "verse": 16},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["count"], 1)
+        images = data["results"][0]["images"]
+        self.assertEqual(len(images), 1)
+        self.assertTrue(images[0]["id"].startswith("IMG_"))
+
+    def test_images_prefetch_is_bounded(self):
+        """A page of notes with images costs exactly one
+        images query — prefetch_related('images'), not one
+        query per note or per image."""
+        other = Note.objects.create(
+            user=self.user,
+            note_text="Second note",
+        )
+        for note in (self.note, other):
+            self._make_image(note)
+            self._make_image(note)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.get(self.LIST_URL)
+        self.assertEqual(resp.status_code, 200)
+        image_queries = [
+            q for q in ctx.captured_queries
+            if '"annotations_image"' in q['sql']
+        ]
+        self.assertEqual(len(image_queries), 1)
+
+    def test_write_path_ignores_images_key(self):
+        """POST /notes/ with an 'images' key is silently
+        ignored — the field is read-only."""
+        tag = Tag.objects.create(user=self.user, name="ImgTag")
+        resp = self.client.post(
+            self.LIST_URL,
+            {
+                "note_text": "Note with a fake images key",
+                "tag": tag.id,
+                "images": [{"id": "IMG_FAKE"}],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.json()["images"], [])

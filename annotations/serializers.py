@@ -263,11 +263,70 @@ class LinkedNotesRequestSerializer(serializers.Serializer):
     )
 
 
+class ImageSerializer(serializers.ModelSerializer):
+    """
+    Read/write serializer for Image attachments.
+
+    ``signed_url`` is a computed short-lived GET URL served to clients
+    so they never read directly from a public bucket. Generation
+    requires ADC on GCP; when signing fails (local/test environments
+    without credentials) ``signed_url`` is ``None`` — never the raw
+    ``gs://`` URI, which browsers cannot fetch.
+    """
+
+    signed_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Image
+        fields = [
+            'id',
+            'storage_url',
+            'signed_url',
+            'content_type',
+            'size_bytes',
+            'comment',
+            'note',
+            'uploaded_by',
+            'created_at',
+        ]
+        # 'comment'/'note' are set by the viewset from the nested
+        # route — letting clients write them would allow silent
+        # re-parenting of an existing image.
+        read_only_fields = [
+            'id',
+            'storage_url',
+            'signed_url',
+            'content_type',
+            'size_bytes',
+            'comment',
+            'note',
+            'uploaded_by',
+            'created_at',
+        ]
+
+    def get_signed_url(self, obj):
+        try:
+            from annotations.services.image_storage import (
+                signed_image_url,
+            )
+            return signed_image_url(obj.id, obj.storage_url)
+        except Exception as e:
+            # Signing runs on our credentials against our
+            # bucket — a failure is our infrastructure breaking
+            # (or a code bug), not a routine upstream blip, so
+            # it reports at error level like a genuine 500. The
+            # field still degrades to None for the client.
+            capture_internal_exception(e)
+            return None
+
+
 class NoteSerializer(serializers.ModelSerializer):
     """Serializes Note model data.
     - For POST/PUT: Accepts tag UUID and a list of verse
       references (book, chapter, verse).
-    - For GET: Displays full tag object and full verse objects.
+    - For GET: Displays full tag object and full verse objects,
+      plus the note's attached ``images`` (read-only; upload via
+      ``POST /api/v1/notes/<pk>/images/``).
     """
     tag = serializers.PrimaryKeyRelatedField(
         queryset=Tag.objects.all(),
@@ -294,6 +353,10 @@ class NoteSerializer(serializers.ModelSerializer):
             "owns this note. Always false for anonymous readers."
         ),
     )
+    # Mirrors CommentSerializer — every note payload embeds its
+    # image attachments; upload/delete happen on the nested
+    # notes/<pk>/images/ and images/<pk>/ routes.
+    images = ImageSerializer(many=True, read_only=True)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -317,13 +380,14 @@ class NoteSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'note_text', 'public', 'created_at',
             'updated_at', 'tag', 'tag_position', 'verse_references',
-            'is_owner'
+            'is_owner', 'images'
         ]
         # tag_position is managed exclusively by reorder/move —
         # a client-supplied value on write can collide with the
         # unique_tag_position_per_tag constraint and 500.
         read_only_fields = [
             'id', 'created_at', 'updated_at', 'tag_position',
+            'images',
         ]
 
     def validate_verse_references(self, value):
@@ -771,63 +835,6 @@ class CommentAuthorSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'username']
         read_only_fields = ['id', 'username']
-
-
-class ImageSerializer(serializers.ModelSerializer):
-    """
-    Read/write serializer for Image attachments.
-
-    ``signed_url`` is a computed short-lived GET URL served to clients
-    so they never read directly from a public bucket. Generation
-    requires ADC on GCP; when signing fails (local/test environments
-    without credentials) ``signed_url`` is ``None`` — never the raw
-    ``gs://`` URI, which browsers cannot fetch.
-    """
-
-    signed_url = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Image
-        fields = [
-            'id',
-            'storage_url',
-            'signed_url',
-            'content_type',
-            'size_bytes',
-            'comment',
-            'note',
-            'uploaded_by',
-            'created_at',
-        ]
-        # 'comment'/'note' are set by the viewset from the nested
-        # route — letting clients write them would allow silent
-        # re-parenting of an existing image.
-        read_only_fields = [
-            'id',
-            'storage_url',
-            'signed_url',
-            'content_type',
-            'size_bytes',
-            'comment',
-            'note',
-            'uploaded_by',
-            'created_at',
-        ]
-
-    def get_signed_url(self, obj):
-        try:
-            from annotations.services.image_storage import (
-                signed_image_url,
-            )
-            return signed_image_url(obj.id, obj.storage_url)
-        except Exception as e:
-            # Signing runs on our credentials against our
-            # bucket — a failure is our infrastructure breaking
-            # (or a code bug), not a routine upstream blip, so
-            # it reports at error level like a genuine 500. The
-            # field still degrades to None for the client.
-            capture_internal_exception(e)
-            return None
 
 
 class CommentSerializer(serializers.ModelSerializer):
