@@ -23,8 +23,10 @@ env:
   GCP_REGION: europe-west3
   WIF_PROVIDER: projects/670506724494/locations/global/workloadIdentityPools/github-actions/providers/github
   DEPLOY_SA: github-deployer@bible-research-489314.iam.gserviceaccount.com
+  AUDIO_JOB_NAME: audio-generator
   AUDIO_IMAGE_REPO: audio-generator
   AUDIO_IMAGE_NAME: audio-generator
+  GAE_IMAGE_REPO: gae-standard
 
 jobs:
   cleanup:
@@ -49,95 +51,120 @@ jobs:
 
       - name: Cleanup old Artifact Registry images
         run: |
-          set -e  # Exit on any error
+          set -euo pipefail
 
-          REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AUDIO_IMAGE_REPO}"
-          SERVICE="${AUDIO_IMAGE_NAME}"
+          REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}"
 
-          echo "Cleaning up old images in ${REGISTRY}/${SERVICE}"
+          # Newest image digest under a package path, by createTime.
+          # NOTE: digests come from the *image* listing — `gcloud
+          # artifacts docker tags list` returns NULL create/update
+          # times for tag resources, which made the previous
+          # `--sort-by=~UPDATE_TIME` a silent no-op that kept the
+          # OLDEST image and deleted fresh deploys.
+          newest_digest() {
+            gcloud artifacts docker images list "$1" \
+              --format="value(createTime,version)" \
+              --project="${GCP_PROJECT_ID}" 2>/dev/null \
+              | sort -r | head -n1 | cut -f2
+          }
 
-          # List all tags sorted by update time (newest first)
-          TAGS=$(gcloud artifacts docker tags list \
-            "${REGISTRY}/${SERVICE}" \
-            --format="value(tag,version)" \
-            --sort-by=~UPDATE_TIME \
-            --project="${GCP_PROJECT_ID}")
-
-          if [ -z "$TAGS" ]; then
-            echo "No tagged images found. Nothing to clean up."
-            exit 0
-          fi
-
-          # Count total tags
-          TAG_COUNT=$(echo "$TAGS" | wc -l)
-          echo "Found ${TAG_COUNT} tagged image(s) in registry"
-
-          if [ "$TAG_COUNT" -le 1 ]; then
-            echo "Only 1 or fewer images exist. Nothing to delete."
-            exit 0
-          fi
-
-          # Keep first tag (newest), delete rest
-          TAGS_TO_DELETE=$(echo "$TAGS" | tail -n +2)
-          DELETE_COUNT=$((TAG_COUNT - 1))
-          echo "Deleting ${DELETE_COUNT} old tagged image(s)..."
-
-          # Track failures and deleted digests
-          FAILED=0
-          declare -a DELETED_DIGESTS
-
-          # Delete old tags
-          while IFS=$'\t' read -r tag version; do
-            if [ -n "$tag" ]; then
-              echo "Deleting tag: ${REGISTRY}/${SERVICE}:${tag}"
-              if ! gcloud artifacts docker tags delete \
-                "${REGISTRY}/${SERVICE}:${tag}" \
-                --quiet \
-                --project="${GCP_PROJECT_ID}" 2>&1; then
-                echo "ERROR: Failed to delete tag ${tag}"
-                FAILED=$((FAILED + 1))
-              else
-                echo "Successfully deleted tag"
-                DELETED_DIGESTS+=("$version")
-              fi
-            fi
-          done <<< "$TAGS_TO_DELETE"
-
-          # Delete untagged images (best effort - GCP may auto-clean)
-          echo ""
-          echo "Deleting untagged images..."
-          for digest in "${DELETED_DIGESTS[@]}"; do
-            if gcloud artifacts docker images delete \
-              "${REGISTRY}/${SERVICE}@${digest}" \
-              --quiet \
+          delete_image() {
+            echo "Deleting $1"
+            if gcloud artifacts docker images delete "$1" \
+              --delete-tags --quiet \
               --project="${GCP_PROJECT_ID}" 2>&1; then
-              echo "Successfully deleted untagged image"
+              echo "  deleted"
             else
-              echo "WARNING: Could not delete ${digest}"
-              echo "(may have been auto-cleaned by GCP)"
+              echo "  WARNING: could not delete (already gone?)"
             fi
-          done
+          }
 
-          # Fail if tag deletions failed
-          if [ $FAILED -gt 0 ]; then
-            echo ""
-            echo "ERROR: ${FAILED} tag deletion(s) failed"
-            exit 1
+          # --- gae-standard -------------------------------------------------
+          # Every App Engine deploy leaves an operation-* image under
+          # app/<service>; build-cache/* holds the Cloud Build cache.
+          # Keep ONLY the single newest app/default image — rollback is
+          # a redeploy, which builds a fresh image anyway.
+          GAE_REPO="${REGISTRY}/${GAE_IMAGE_REPO}"
+          KEEP_GAE=$(newest_digest "${GAE_REPO}/app/default")
+          echo "Keeping ${GAE_REPO}/app/default@${KEEP_GAE:-<none>}"
+
+          gcloud artifacts docker images list "${GAE_REPO}" \
+            --format="value(package,version)" \
+            --project="${GCP_PROJECT_ID}" \
+            | while IFS=$'\t' read -r pkg ver; do
+                ref="${pkg}@${ver}"
+                keep_ref="${GAE_REPO}/app/default@${KEEP_GAE}"
+                if [ -n "${KEEP_GAE}" ] && [ "${ref}" = "${keep_ref}" ]; then
+                  continue
+                fi
+                delete_image "${ref}"
+              done
+
+          # --- audio-generator ----------------------------------------------
+          # Keep the newest image AND the digest the Cloud Run Job is
+          # currently pinned to — deleting the referenced digest breaks
+          # the monthly TTS run and makes `terraform apply` 404 on the
+          # job update.
+          AUDIO_REPO="${REGISTRY}/${AUDIO_IMAGE_REPO}/${AUDIO_IMAGE_NAME}"
+          KEEP_AUDIO=$(newest_digest "${AUDIO_REPO}")
+          echo "Keeping ${AUDIO_REPO}@${KEEP_AUDIO:-<none>}"
+
+          JOB_FIELD='spec.template.spec.template.spec.containers[0].image'
+          JOB_IMAGE=$(gcloud run jobs describe "${AUDIO_JOB_NAME}" \
+            --region="${GCP_REGION}" --project="${GCP_PROJECT_ID}" \
+            --format="value(${JOB_FIELD})" 2>/dev/null || true)
+          JOB_DIGEST=""
+          case "${JOB_IMAGE}" in
+            *@sha256:*) JOB_DIGEST="${JOB_IMAGE##*@}" ;;
+          esac
+          if [ -n "${JOB_DIGEST}" ]; then
+            echo "Keeping job-pinned digest ${JOB_DIGEST}"
           fi
 
+          gcloud artifacts docker images list "${AUDIO_REPO}" \
+            --format="value(version)" \
+            --project="${GCP_PROJECT_ID}" \
+            | while IFS= read -r ver; do
+                if [ "${ver}" = "${KEEP_AUDIO}" ] || \
+                   [ "${ver}" = "${JOB_DIGEST}" ]; then
+                  continue
+                fi
+                delete_image "${AUDIO_REPO}@${ver}"
+              done
+
+          # --- stale PR-preview images ---------------------------------------
+          # deploy-pr-preview.yml pushes bible-research:pr-<n> images
+          # into the same repo. Cloud Run materializes the image at
+          # deploy time, so old preview images are dead weight — but
+          # only delete ones older than 2h so an in-flight
+          # push -> `gcloud run deploy` is never raced.
+          PREVIEW_REPO="${REGISTRY}/${AUDIO_IMAGE_REPO}/bible-research"
+          CUTOFF=$(date -u -d '2 hours ago' '+%Y-%m-%dT%H:%M:%S')
+          gcloud artifacts docker images list "${PREVIEW_REPO}" \
+            --format="value(createTime,version)" \
+            --project="${GCP_PROJECT_ID}" 2>/dev/null \
+            | while IFS=$'\t' read -r created ver; do
+                if [ -n "${ver}" ] && [[ "${created}" < "${CUTOFF}" ]]
+                then
+                  delete_image "${PREVIEW_REPO}@${ver}"
+                fi
+              done
+
           echo ""
-          echo "Cleanup complete! All old images deleted successfully."
+          echo "Cleanup complete."
 
       - name: Show remaining images
         if: always()
         run: |
-          REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AUDIO_IMAGE_REPO}"
-          SERVICE="${AUDIO_IMAGE_NAME}"
+          REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}"
 
-          echo ""
-          echo "Remaining tagged images:"
-          gcloud artifacts docker tags list \
-            "${REGISTRY}/${SERVICE}" \
-            --format="table(tag,version,UPDATE_TIME)" \
-            --sort-by=~UPDATE_TIME \
-            --project="${GCP_PROJECT_ID}" || echo "No images found"
+          for REPO in "${GAE_IMAGE_REPO}" "${AUDIO_IMAGE_REPO}"; do
+            echo ""
+            echo "=== ${REPO} ==="
+            gcloud artifacts docker images list \
+              "${REGISTRY}/${REPO}" \
+              --include-tags \
+              --format="table(image,version,createTime,tags)" \
+              --sort-by=~CREATE_TIME \
+              --project="${GCP_PROJECT_ID}" || echo "No images found"
+          done
