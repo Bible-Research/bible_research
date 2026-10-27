@@ -138,15 +138,20 @@ DSN, no traffic. What each stream means:
   `provider_error`} — the `_CAPTURED_ERROR_CODES` allowlist, so
   `not_found`/`book_not_in_fileset` are never sent. Trend-only;
   NOT auto-fix candidates.
-- `LoggingIntegration(event_level=None)` — log records are
-  breadcrumbs only, never events.
+- `LoggingIntegration(level=INFO, event_level=None)` — INFO+
+  log records are breadcrumbs only, never events; DEBUG is
+  dropped entirely.
 - `sentry_before_send` (`bible_research/utils.py`) strips
   `request.data` on `/api/token` and `/api/v1/users/` paths
   (password-bearing bodies).
 
 The agent-fix queue for this project is `is:unresolved
 level:error environment:production` — warning-level provider
-events are excluded by the level filter.
+events are excluded by the level filter. Events carry
+`environment:production` on GCP and `development` elsewhere,
+with `release` = `GAE_VERSION`, so the environment filter
+skips dev noise and `resolvedInNextRelease` resolves an issue
+at the next GAE deploy.
 
 ## Auth quirks
 
