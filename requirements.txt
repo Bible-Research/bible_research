@@ -27,5 +27,5 @@ Pillow==13.0.0
 # (bible/services/dbt/dbt_client/openapi_client)
 certifi==2026.10.23
 six==1.17.0
-python-dateutil==2.9.0.post0
+python-dateutil==3.0.0
 urllib3==2.8.0
