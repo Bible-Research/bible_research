@@ -108,8 +108,28 @@ DRF throttling and these provider-data caches:
 - Signed audio URLs (`gcs.signed_audio_url`) live in a bounded
   in-process LRU (2048 entries, evicts oldest), expiring 60 s
   before the URL's real TTL.
+- Chapter text (`bible/services/chapter_cache.py`) — every
+  text-capable provider except API.Bible comes back from
+  `provider_for` wrapped in `_CachingProvider`, which serves
+  `get_chapter`/`get_passage(format='text')` from a
+  process-wide LRU keyed by `(canonical_fileset_id, book_id,
+  chapter)` (registry aliases like `GLU8`/`LVSGLU8C1DA` share
+  the `LVSGLU8` entry). Entries live 24 h; `PassageNotFoundError`
+  coverage misses are negative-cached for 5 min so fileset-
+  fallback probing cannot re-penalize upstream. Verse-range
+  hints are never sent upstream on a miss — a narrowed payload
+  must not fill the whole-chapter entry — and audio payloads
+  are never cached (their URLs expire). Size bound: 500
+  chapters (~3 MB). Per-license safety: public-domain filesets
+  (`ENGKJV`, `LVSGLU8`) are bounded only by that LRU, while
+  copyrighted translations share a 480-verse budget per work —
+  `ENGESV` (DBT) and `ENGESV_API` draw from the same `esv`
+  budget; `ApiBibleProvider` is excluded entirely because FUMS
+  `meta` tokens must be reported per display.
 
-All cache keys carry a `v1:` namespace prefix.
+All locmem cache keys carry a `v1:` namespace prefix (the
+in-process LRUs above are module-level `OrderedDict`s, not
+Django cache entries).
 
 ### Project Structure
 ```
@@ -120,6 +140,7 @@ bible_research/
 │   ├── serializers.py     # Request-validation boundary only
 │   ├── services/          # Provider clients and facade
 │   │   ├── providers.py   # fileset_id routing facade
+│   │   ├── chapter_cache.py  # in-process chapter text LRU
 │   │   ├── dbt/          # DBT API client
 │   │   ├── esv/          # ESV API client + registry
 │   │   ├── apibible/     # API.Bible client + registry
@@ -984,8 +1005,10 @@ uses it to decide whether a shared note is editable.
   Enrichment is batched: the whole chapter is fetched once per
   `(fileset_id, book, chapter)` per page through a serializer
   context cache, so a page of notes on one passage costs one
-  upstream call. Defaults to `ENGESV` (DBT). SWORD
-  translations return no `headings`.
+  provider call — and chapter payloads come from the
+  process-wide chapter cache (see Caching above) unless the
+  fileset is API.Bible-backed. Defaults to `ENGESV` (DBT).
+  SWORD translations return no `headings`.
 - `ordering` (optional): Sort order
   - `custom` (default): Custom order ascending
   - `-custom`: Custom order descending

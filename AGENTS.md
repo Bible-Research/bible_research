@@ -49,6 +49,18 @@ other ids proxy DBT. Note enrichment batches by
 (fileset, book, chapter) through a serializer-context cache —
 one upstream call per chapter per page, not per note.
 
+`provider_for` wraps ESV/SWORD/DBT providers in
+`_CachingProvider`: whole-chapter text is served from the
+process-wide LRU in `bible/services/chapter_cache.py` (24h TTL,
+500-entry bound, 5-min negative caching of
+`PassageNotFoundError`, per-translation verse budgets for
+licensor caps — `ENGESV`/`ENGESV_API` share `esv`, public-domain
+`ENGKJV`/`LVSGLU8` are exempt). Verse-range hints are never
+forwarded upstream on a miss (a narrowed fetch must not fill
+the chapter entry); `ApiBibleProvider` is returned unwrapped
+(FUMS `meta` tokens must be reported per display). Returned
+payloads are shared — never mutate them.
+
 Known fileset ids: `ENGKJV` (KJV), `ENGESV_API` (ESV), `LVSGLU8`
 (Latvian Glück text), `LVSGLU8C1DA` (Latvian Glück generated audio,
 verse-synthesis mode), `LVSGLU8C2DA` (same audio, chapter-synthesis
