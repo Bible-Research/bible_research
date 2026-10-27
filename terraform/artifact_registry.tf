@@ -21,17 +21,16 @@ resource "google_artifact_registry_repository" "gae_standard" {
     }
   }
 
-  # 2. KEEP Policy: protect only the most recent deploy image, and
-  # only inside app/* — keep_count is per-package, so scoping the
-  # KEEP policy to app/ leaves build-cache/* (and any other stray
-  # package) always deletable. Rollback means redeploying, which
-  # builds a fresh image anyway.
+  # 2. KEEP Policy: protect only the most recent version per package
+  # (rollback means redeploying, which builds a fresh image anyway).
+  # NOTE: ``condition`` and ``most_recent_versions`` are mutually
+  # exclusive in one policy (API oneof) — keep_count cannot be
+  # scoped to app/*, so build-cache/* also keeps its newest version.
+  # The cleanup-artifacts workflow deletes it anyway on every run;
+  # this policy is only the daily-evaluated backstop.
   cleanup_policies {
     id     = "keep-latest-1"
     action = "KEEP"
-    condition {
-      package_name_prefixes = ["app/"]
-    }
     most_recent_versions {
       keep_count = 1
     }
@@ -67,18 +66,16 @@ resource "google_artifact_registry_repository" "audio_generator" {
     }
   }
 
-  # 2. KEEP Policy: protect the most recent 2 versions — the Cloud
-  # Run Job is pinned to the newest, and the spare covers the window
-  # where a job update lags one deploy behind. Scoped to the
-  # audio-generator package: keep_count is per-package, and without
-  # the prefix a stray package (e.g. ``bible-research`` PR-preview
-  # images from deploy-pr-preview.yml) would keep 2 versions forever.
+  # 2. KEEP Policy: protect the most recent 2 versions per package —
+  # the Cloud Run Job is pinned to the newest, and the spare covers
+  # the window where a job update lags one deploy behind.
+  # NOTE: ``condition`` and ``most_recent_versions`` are mutually
+  # exclusive in one policy (API oneof), so this also shields 2
+  # versions of stray packages like ``bible-research`` PR previews —
+  # the cleanup-artifacts workflow purges those on every run.
   cleanup_policies {
     id     = "keep-latest-2"
     action = "KEEP"
-    condition {
-      package_name_prefixes = ["audio-generator"]
-    }
     most_recent_versions {
       keep_count = 2
     }

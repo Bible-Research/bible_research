@@ -132,6 +132,24 @@ jobs:
                 delete_image "${AUDIO_REPO}@${ver}"
               done
 
+          # --- stale PR-preview images ---------------------------------------
+          # deploy-pr-preview.yml pushes bible-research:pr-<n> images
+          # into the same repo. Cloud Run materializes the image at
+          # deploy time, so old preview images are dead weight — but
+          # only delete ones older than 2h so an in-flight
+          # push -> `gcloud run deploy` is never raced.
+          PREVIEW_REPO="${REGISTRY}/${AUDIO_IMAGE_REPO}/bible-research"
+          CUTOFF=$(date -u -d '2 hours ago' '+%Y-%m-%dT%H:%M:%S')
+          gcloud artifacts docker images list "${PREVIEW_REPO}" \
+            --format="value(createTime,version)" \
+            --project="${GCP_PROJECT_ID}" 2>/dev/null \
+            | while IFS=$'\t' read -r created ver; do
+                if [ -n "${ver}" ] && [[ "${created}" < "${CUTOFF}" ]]
+                then
+                  delete_image "${PREVIEW_REPO}@${ver}"
+                fi
+              done
+
           echo ""
           echo "Cleanup complete."
 
