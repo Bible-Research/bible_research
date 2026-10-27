@@ -499,6 +499,22 @@ class TagViewSet(viewsets.ModelViewSet):
                     'notes_updated': {'type': 'integer'},
                 },
             },
+            400: {
+                'type': 'object',
+                'properties': {
+                    'error': {
+                        'type': 'string',
+                        'enum': ['validation_error'],
+                    },
+                    'message': {'type': 'string'},
+                },
+            },
+            404: {
+                'type': 'object',
+                'properties': {
+                    'detail': {'type': 'string'},
+                },
+            },
         },
     )
     @action(detail=True, methods=['post'], url_path='set-public')

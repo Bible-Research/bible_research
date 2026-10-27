@@ -209,3 +209,4 @@ class PatchPublicFlagTest(TestCase):
         )
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.json()['public'], True)
+        self.assertEqual(resp.json()['note_count'], 0)
