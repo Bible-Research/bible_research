@@ -21,7 +21,7 @@ google-cloud-storage==3.17.1
 google-auth==2.62.0
 mutagen==1.48.1
 lameenc==1.9.0
-Pillow==12.3.0
+Pillow==13.0.0
 
 # Dependencies of the vendored DBT client
 # (bible/services/dbt/dbt_client/openapi_client)
