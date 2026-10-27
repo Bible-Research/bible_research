@@ -7,19 +7,27 @@ resource "google_artifact_registry_repository" "gae_standard" {
   description   = "App Engine Standard deployment images - Cost Optimized"
   format        = "DOCKER"
 
-  # 1. DELETE Policy: Target ALL images older than 1 day
+  # Policies must actively delete, not just log intended actions.
+  cleanup_policy_dry_run = false
+
+  # 1. DELETE Policy: every version not protected by a KEEP policy.
+  # No older_than floor — stale deploy images and build-cache/*
+  # packages are removed at the next (~daily) policy evaluation.
   cleanup_policies {
-    id     = "delete-old-versions"
+    id     = "delete-unkept-versions"
     action = "DELETE"
     condition {
-      tag_state  = "ANY"
-      older_than = "86400s" # 24 Hours
+      tag_state = "ANY"
     }
   }
 
-  # 2. KEEP Policy: Protect only the most recent version from
-  # deletion — old deploy images are removed after 24 h. Rollback
-  # means redeploying, which builds a fresh image anyway.
+  # 2. KEEP Policy: protect only the most recent version per package
+  # (rollback means redeploying, which builds a fresh image anyway).
+  # NOTE: ``condition`` and ``most_recent_versions`` are mutually
+  # exclusive in one policy (API oneof) — keep_count cannot be
+  # scoped to app/*, so build-cache/* also keeps its newest version.
+  # The cleanup-artifacts workflow deletes it anyway on every run;
+  # this policy is only the daily-evaluated backstop.
   cleanup_policies {
     id     = "keep-latest-1"
     action = "KEEP"
@@ -47,17 +55,24 @@ resource "google_artifact_registry_repository" "audio_generator" {
   description   = "audio-generator Cloud Run Job image - Cost Optimized"
   format        = "DOCKER"
 
-  # 1. DELETE Policy: Target ALL images older than 1 day
+  cleanup_policy_dry_run = false
+
+  # 1. DELETE Policy: every version not protected by a KEEP policy.
   cleanup_policies {
-    id     = "delete-old-versions"
+    id     = "delete-unkept-versions"
     action = "DELETE"
     condition {
-      tag_state  = "ANY"
-      older_than = "86400s" # 24 Hours
+      tag_state = "ANY"
     }
   }
 
-  # 2. KEEP Policy: Protect the most recent 2 versions from deletion
+  # 2. KEEP Policy: protect the most recent 2 versions per package —
+  # the Cloud Run Job is pinned to the newest, and the spare covers
+  # the window where a job update lags one deploy behind.
+  # NOTE: ``condition`` and ``most_recent_versions`` are mutually
+  # exclusive in one policy (API oneof), so this also shields 2
+  # versions of stray packages like ``bible-research`` PR previews —
+  # the cleanup-artifacts workflow purges those on every run.
   cleanup_policies {
     id     = "keep-latest-2"
     action = "KEEP"
