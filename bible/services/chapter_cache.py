@@ -45,9 +45,9 @@ TTL_SECONDS = 24 * 60 * 60
 NEGATIVE_TTL_SECONDS = 5 * 60
 # ~4-6 KB per parsed chapter -> ~3 MB worst case on F1's 256 MB.
 MAX_ENTRIES = 500
-# Per-translation-group verse budget (Crossway's 500-verse ESV
-# cap minus a safety margin); public-domain filesets are exempt.
-VERSE_BUDGET = 480
+# Per-translation-group verse budget matching Crossway's
+# 500-verse ESV cap; public-domain filesets are exempt.
+VERSE_BUDGET = 500
 
 # Filesets whose texts are public domain — no licensor storage
 # cap applies.

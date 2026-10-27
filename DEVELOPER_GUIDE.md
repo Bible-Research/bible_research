@@ -122,7 +122,7 @@ DRF throttling and these provider-data caches:
   are never cached (their URLs expire). Size bound: 500
   chapters (~3 MB). Per-license safety: public-domain filesets
   (`ENGKJV`, `LVSGLU8`) are bounded only by that LRU, while
-  copyrighted translations share a 480-verse budget per work —
+  copyrighted translations share a 500-verse budget per work —
   `ENGESV` (DBT) and `ENGESV_API` draw from the same `esv`
   budget; `ApiBibleProvider` is excluded entirely because FUMS
   `meta` tokens must be reported per display. One behavior

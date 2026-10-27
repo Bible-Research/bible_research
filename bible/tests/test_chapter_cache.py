@@ -278,7 +278,7 @@ def test_negative_entry_expires_quickly():
 def test_verse_budget_evicts_group_oldest():
     """Caching more than ``VERSE_BUDGET`` verses for one
     translation group evicts that group's oldest chapters."""
-    _fill('ENGWEB', 'GEN', [1, 2, 3], 200)  # 600 > 480
+    _fill('ENGWEB', 'GEN', [1, 2, 3], 200)  # 600 > 500
 
     refetch = _Fetch(_payload(1))
     chapter_cache.get_or_fetch('ENGWEB', 'GEN', 1, refetch)
@@ -299,7 +299,7 @@ def test_esv_budget_shared_across_fileset_ids():
         == 'esv'
     )
     _fill('ENGESV', 'GEN', [1, 2], 200)
-    _fill('ENGESV_API', 'GEN', [1], 200)  # 600 > 480
+    _fill('ENGESV_API', 'GEN', [1], 200)  # 600 > 500
 
     refetch = _Fetch(_payload(1))
     chapter_cache.get_or_fetch('ENGESV', 'GEN', 1, refetch)
@@ -314,7 +314,7 @@ def test_public_domain_filesets_skip_the_budget():
             chapter_cache.cache_translation_group(fileset_id)
             is None
         )
-    _fill('ENGKJV', 'GEN', [1, 2, 3], 200)  # 600 > 480 anyway
+    _fill('ENGKJV', 'GEN', [1, 2, 3], 200)  # 600 > 500 anyway
     for chapter in (1, 2, 3):
         check = _Fetch(_payload(1))
         chapter_cache.get_or_fetch(
