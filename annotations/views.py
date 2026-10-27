@@ -320,9 +320,14 @@ class TagViewSet(viewsets.ModelViewSet):
         # user here — anonymous callers can no longer reach
         # create.
         try:
-            serializer.save(user=user)
+            tag = serializer.save(user=user)
         except IntegrityError as exc:
             self._duplicate_tag_error(exc)
+        # The read-only note_count IntegerField skips itself
+        # when the instance lacks the Count annotation; a
+        # fresh tag has zero notes, so set it here to keep
+        # the key present in the 201 payload.
+        tag.note_count = 0
         logger.info(
             f"Created tag '{tag_name}' "
             f"for user {user.username}"
@@ -504,9 +509,12 @@ class TagViewSet(viewsets.ModelViewSet):
         Flip the tag's `public` flag AND cascade it to every
         note DIRECTLY under the tag, atomically — descendant
         tags and their notes are untouched. Re-privatizing is
-        symmetric: every note under the tag goes private too
-        (`notes_updated` reports how many rows flipped).
-        Idempotent. Ownership/404 come from get_queryset.
+        symmetric: every note under the tag goes private too.
+        `notes_updated` reports rows MATCHED by the UPDATE —
+        QuerySet.update() counts matched rows, not changed
+        ones, so an idempotent repeat returns the tag's note
+        count again rather than 0. Idempotent. Ownership/404
+        come from get_queryset.
         """
         tag = self.get_object()
         if not isinstance(request.data, dict):

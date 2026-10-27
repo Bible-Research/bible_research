@@ -140,10 +140,12 @@ class TagSerializer(serializers.ModelSerializer):
     # CharField trims surrounding whitespace by default
     # (trim_whitespace=True), so '  Name  ' stores as 'Name'.
     name = serializers.CharField(max_length=100)
-    # Annotated by TagViewSet.get_queryset (Count over 'notes');
-    # read-only — the value never comes from request data. When
-    # a Tag is serialized without the annotation (e.g. nested
-    # inside a note payload), the key is simply omitted.
+    # Annotated by TagViewSet.get_queryset (Count over 'notes')
+    # and set to 0 on the fresh instance in perform_create so
+    # the 201 payload carries the key too; read-only — the
+    # value never comes from request data. When a Tag is
+    # serialized without either (e.g. nested inside a note
+    # payload), the key is simply omitted.
     note_count = serializers.IntegerField(read_only=True)
 
     class Meta:

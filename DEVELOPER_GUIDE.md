@@ -905,9 +905,11 @@ Every tag payload carries:
   PATCH flips only the flag; it does NOT change any existing
   notes (the cascade lives in `set-public`, below).
 - `note_count` — read-only integer, notes attached DIRECTLY
-  to the tag (subtree totals are aggregated client-side).
-  Anonymous retrieves count public notes only, so a shared
-  tag's badge cannot leak private notes.
+  to the tag (subtree totals are aggregated client-side);
+  tag creates report `0`. Anonymous retrieves count public
+  notes only, so a shared tag's badge cannot leak private
+  notes. A tag nested inside a note payload carries no
+  count and omits the key.
 
 #### Get Tag by ID
 ```
@@ -983,8 +985,10 @@ Content-Type: application/json
 Flips the tag's `public` flag AND every note DIRECTLY under
 the tag to the same flag, atomically — descendant tags and
 their notes are untouched. Toggling back to private is
-symmetric (every note under the tag goes private again), so
-`notes_updated` reports the number of note rows flipped:
+symmetric (every note under the tag goes private again).
+`notes_updated` reports the number of note rows MATCHED by
+the update — an idempotent repeat therefore returns the same
+count again rather than 0:
 
 ```json
 {

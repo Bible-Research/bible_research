@@ -67,7 +67,8 @@ class SetPublicTest(TestCase):
 
     def test_set_private_flips_notes_back(self):
         """Toggling private is symmetric — every note under the
-        tag goes private again; notes_updated reports the flip."""
+        tag goes private again; notes_updated reports rows
+        matched by the UPDATE."""
         self.client.post(
             self._url(self.tag), {'public': True}, format='json'
         )
@@ -84,7 +85,9 @@ class SetPublicTest(TestCase):
 
     def test_idempotent_repeat_call(self):
         """Repeating the same set-public leaves the same end
-        state — the action is idempotent."""
+        state — the action is idempotent. notes_updated counts
+        rows MATCHED by the UPDATE (not rows changed), so the
+        repeat still reports the tag's full note count."""
         self.client.post(
             self._url(self.tag), {'public': True}, format='json'
         )
@@ -92,6 +95,7 @@ class SetPublicTest(TestCase):
             self._url(self.tag), {'public': True}, format='json'
         )
         self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['notes_updated'], 2)
         self.tag.refresh_from_db()
         self.assertTrue(self.tag.public)
         for note in (self.note1, self.note2):
