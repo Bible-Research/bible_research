@@ -538,10 +538,13 @@ class CopyrightView(APIView):
             # statement; everything else proxies DBT.
             provider = provider_for(bible_id)
             # The cache key covers every input that changes the
-            # output: the resolved provider and the raw id.
+            # output: the resolved provider (unwrapped from
+            # _CachingProvider so the class component still
+            # distinguishes it) and the raw id.
+            concrete = getattr(provider, 'inner', provider)
             cache_key = (
                 f"v1:copyright:"
-                f"{type(provider).__name__}:{bible_id}"
+                f"{type(concrete).__name__}:{bible_id}"
             )
             cached = cache.get(cache_key)
             if cached is not None:

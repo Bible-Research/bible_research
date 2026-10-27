@@ -27,6 +27,8 @@ import pytest
 from django.conf import settings
 from django.core.cache import cache
 
+from bible.services import chapter_cache
+
 
 def pytest_configure():
     """Apply the test-run deltas over production settings."""
@@ -93,3 +95,18 @@ def _isolated_locmem_cache():
     cache.clear()
     yield
     cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_chapter_cache():
+    """Give every test an empty in-process chapter cache.
+
+    ``chapter_cache`` holds provider chapter payloads
+    process-wide — like locmem, a hit from an earlier test would
+    skip a later test's mocked upstream call, and a
+    negative-cached ``PassageNotFoundError`` would keep
+    surfacing a stale coverage miss.
+    """
+    chapter_cache.clear()
+    yield
+    chapter_cache.clear()

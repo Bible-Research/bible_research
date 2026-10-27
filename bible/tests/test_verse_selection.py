@@ -127,7 +127,11 @@ class VerseSelectionSerializerTests(TestCase):
         )
 
     @patch('bible.services.providers.get_default_esv_client')
-    def test_esv_narrows_upstream_and_filters(self, mock_get):
+    def test_esv_fetches_whole_chapter_and_filters(self, mock_get):
+        """The verse selector is applied client-side: the
+        caching provider always fetches the whole chapter
+        upstream (a narrowed response must never fill the
+        whole-chapter cache entry)."""
         mock_client = MagicMock()
         mock_client.get_chapter_with_headings.return_value = {
             'verses': [
@@ -149,9 +153,7 @@ class VerseSelectionSerializerTests(TestCase):
         )
 
         mock_client.get_chapter_with_headings\
-            .assert_called_once_with(
-                'JHN', 3, verse_start=16, verse_end=18
-            )
+            .assert_called_once_with('JHN', 3)
         self.assertEqual(
             [v['verse'] for v in result['verses']],
             [16, 17, 18],
@@ -184,7 +186,12 @@ class VerseSelectionSerializerTests(TestCase):
         self.assertEqual(len(result['verses']), 1)
 
     @patch('bible.services.providers.get_default_sword_client')
-    def test_sword_narrows_and_filters(self, mock_get):
+    def test_sword_fetches_whole_chapter_and_filters(
+        self, mock_get
+    ):
+        """Like the ESV path, the SWORD provider is asked for
+        the whole chapter so the shared cache entry is never a
+        narrowed subset; the selector is applied client-side."""
         mock_client = MagicMock()
         mock_client.get_chapter_verses.return_value = [
             {'verse_start': 16, 'verse_text': 'text 16'},
@@ -201,7 +208,6 @@ class VerseSelectionSerializerTests(TestCase):
 
         mock_client.get_chapter_verses.assert_called_once_with(
             'LVSGLU8', 'JHN', 3,
-            verse_start=16, verse_end=17,
         )
         self.assertEqual(
             [v['verse'] for v in result['verses']],

@@ -43,6 +43,7 @@ import logging
 from django.conf import settings
 from google.api_core import exceptions as gcs_exceptions
 
+from bible.services import chapter_cache
 from bible.services.apibible.client import (
     get_default_apibible_client,
 )
@@ -95,14 +96,22 @@ def provider_for(fileset_id):
 
     Dispatch order is load-bearing and preserved from the old
     inline chains: ESV → API.Bible → SWORD → everything else DBT.
+
+    Text-capable providers come back wrapped in
+    ``_CachingProvider`` so whole-chapter payloads are served
+    from the in-process chapter cache
+    (``bible/services/chapter_cache.py``). ``ApiBibleProvider``
+    stays unwrapped: its FUMS ``meta`` token must be reported
+    per display, so serving a cached response would risk
+    under-reporting (license requirement).
     """
     if is_esv_fileset(fileset_id):
-        return ESVProvider(fileset_id)
+        return _CachingProvider(ESVProvider(fileset_id))
     if is_apibible_fileset(fileset_id):
         return ApiBibleProvider(fileset_id)
     if is_sword_fileset(fileset_id):
-        return SwordProvider(fileset_id)
-    return DbtProvider(fileset_id)
+        return _CachingProvider(SwordProvider(fileset_id))
+    return _CachingProvider(DbtProvider(fileset_id))
 
 
 class Provider:
@@ -269,6 +278,111 @@ def _fallback(value, default):
     """``value`` unless it is ``None`` — distinguishes "absent"
     from a legitimate ``0`` where ``or`` would misfire."""
     return value if value is not None else default
+
+
+class _CachingProvider(Provider):
+    """Chapter-text caching wrapper around a concrete provider.
+
+    ``get_chapter`` and ``get_passage(format='text')`` are
+    served from ``chapter_cache``; the ``verse_start``/
+    ``verse_end`` narrowing hints are accepted for signature
+    parity but never forwarded — a ranged upstream fetch (ESV
+    sends the range to api.esv.org) cached as a full chapter
+    would poison subsequent whole-chapter reads. Callers
+    (``get_passage_body``'s ``_select_verses``, the note
+    serializer) already filter verses client-side, so returning
+    the full chapter stays contract-correct.
+
+    ``response_format='audio'`` delegates straight to the inner
+    provider — upstream audio URLs expire (API.Bible
+    ``resourceUrl``, GCS signed URLs) and are never cached.
+    Every other capability delegates to the inner provider
+    (the base ``Provider`` stubs would shadow its methods, so
+    the pass-throughs are explicit; ``__getattr__`` covers
+    anything else).
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        super().__init__(inner.fileset_id)
+
+    @property
+    def inner(self):
+        """The wrapped provider — e.g. so ``type()`` keys keep
+        distinguishing the concrete provider class."""
+        return self._inner
+
+    @property
+    def audio_codec(self):
+        return self._inner.audio_codec
+
+    @property
+    def audio_kind(self):
+        return self._inner.audio_kind
+
+    def __getattr__(self, name):
+        # Only fires for attributes the wrapper itself lacks —
+        # the base ``Provider`` stubs would shadow the inner
+        # provider's implementations, so every capability it
+        # defines is delegated explicitly below instead.
+        inner = self.__dict__.get('_inner')
+        if inner is None:
+            raise AttributeError(name)
+        return getattr(inner, name)
+
+    def get_chapter(self, book_id, chapter,
+                    verse_start=None, verse_end=None):
+        """Return the normalized chapter payload, serving it
+        from (and filling) the in-process chapter cache."""
+        return chapter_cache.get_or_fetch(
+            self._inner.fileset_id,
+            book_id,
+            chapter,
+            lambda: self._inner.get_chapter(book_id, chapter),
+        )
+
+    def get_passage(
+        self, book_id, chapter, response_format,
+        verse_start=None, verse_end=None,
+    ):
+        if response_format == 'audio':
+            return self._inner.get_passage(
+                book_id, chapter, response_format,
+                verse_start=verse_start, verse_end=verse_end,
+            )
+        # Run the base ``Provider.get_passage`` composition over
+        # the cached chapter so ``DbtProvider`` — whose own
+        # ``get_passage`` fetches raw rows directly and would
+        # otherwise bypass the cache — is served from it too.
+        return Provider.get_passage(
+            self, book_id, chapter, response_format,
+            verse_start=verse_start, verse_end=verse_end,
+        )
+
+    # Explicit pass-throughs — inheriting the base stubs would
+    # shadow the inner provider's real implementations.
+    def get_audio(self, book_id, chapter):
+        return self._inner.get_audio(book_id, chapter)
+
+    def get_timestamps(self, book_id, chapter):
+        return self._inner.get_timestamps(book_id, chapter)
+
+    def get_copyright(self):
+        return self._inner.get_copyright()
+
+    def search(self, query, limit, page, sort_by=None,
+               books=None):
+        return self._inner.search(
+            query, limit, page, sort_by=sort_by, books=books
+        )
+
+    def search_grouped(self, query, books=None, sort_by=None):
+        return self._inner.search_grouped(
+            query, books=books, sort_by=sort_by
+        )
+
+    def translation_listing(self, language_iso=None):
+        return self._inner.translation_listing(language_iso)
 
 
 class ESVProvider(Provider):

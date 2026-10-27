@@ -214,6 +214,8 @@ class PassageProviderHTTPTests(TestCase):
             body['verses'],
             [{'verse': 16, 'text': 'For God...'}],
         )
+        # Text passages compose over the chapter cache, whose
+        # DBT fetch passes the chapter as int.
         client.get_verses.assert_called_once_with(
-            'JHN', '3', bible_id='ENGESV'
+            'JHN', 3, bible_id='ENGESV'
         )
