@@ -407,6 +407,23 @@ def test_cache_key_includes_bible_id(mock_get_client, client):
 
 @pytest.mark.django_db
 @patch('bible.services.providers.get_default_dbt_client')
+def test_cache_key_names_inner_provider(mock_get_client, client):
+    """``provider_for`` wraps DBT providers in
+    ``_CachingProvider`` — the locmem key must still name the
+    concrete provider class, not the wrapper."""
+    mock_get_client.return_value.get_copyright.return_value = []
+
+    with patch('bible.views.cache') as mock_cache:
+        mock_cache.get.return_value = None
+        client.get(COPYRIGHT_URL, {'bible_id': 'ENGESV'})
+
+    key = mock_cache.set.call_args[0][0]
+    assert 'DbtProvider' in key
+    assert '_CachingProvider' not in key
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
 def test_error_response_not_cached(mock_get_client, client):
     """A provider failure must not poison the cache — the next
     request retries upstream."""

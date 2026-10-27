@@ -333,6 +333,25 @@ def test_translation_group_mapping():
     assert groups('LATBSLV') == 'LATBSLV'
 
 
+def test_lowercase_dbt_id_shares_entry_and_exemption():
+    """Non-registry fileset ids key case-insensitively —
+    ``engkjv`` hits the ``ENGKJV`` entry and keeps the
+    public-domain budget exemption."""
+    assert (
+        chapter_cache.canonical_fileset_id('engkjv') == 'ENGKJV'
+    )
+    assert (
+        chapter_cache.cache_translation_group('engkjv') is None
+    )
+
+    fetch = _Fetch(_payload(1))
+    chapter_cache.get_or_fetch('ENGKJV', 'JHN', 3, fetch)
+    check = _Fetch(_payload(1))
+    chapter_cache.get_or_fetch('engkjv', 'JHN', 3, check)
+    assert fetch.calls == 1
+    assert check.calls == 0
+
+
 def test_lru_bound_evicts_oldest_entry():
     """The global cap bounds memory: past ``MAX_ENTRIES``
     chapters the oldest entry goes."""
