@@ -105,12 +105,14 @@ class TagIsolationTest(TestCase):
         self.assertEqual(
             set(resp.json()),
             {
-                'id', 'name', 'parent_tag',
-                'created_at', 'updated_at',
+                'id', 'name', 'parent_tag', 'public',
+                'note_count', 'created_at', 'updated_at',
             },
         )
         self.assertNotIn('user', resp.json())
         self.assertEqual(resp.json()['name'], 'Owner tag')
+        self.assertEqual(resp.json()['public'], False)
+        self.assertEqual(resp.json()['note_count'], 0)
 
     def test_parent_tag_rejects_foreign_tag(self):
         """A foreign tag as parent_tag is rejected with 400 —

@@ -140,12 +140,17 @@ class TagSerializer(serializers.ModelSerializer):
     # CharField trims surrounding whitespace by default
     # (trim_whitespace=True), so '  Name  ' stores as 'Name'.
     name = serializers.CharField(max_length=100)
+    # Annotated by TagViewSet.get_queryset (Count over 'notes');
+    # read-only — the value never comes from request data. When
+    # a Tag is serialized without the annotation (e.g. nested
+    # inside a note payload), the key is simply omitted.
+    note_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Tag
         fields = [
-            'id', 'user', 'name', 'parent_tag',
-            'created_at', 'updated_at',
+            'id', 'user', 'name', 'parent_tag', 'public',
+            'note_count', 'created_at', 'updated_at',
         ]
         # 'read_only_fields' makes sure 'id', 'created_at', 'updated_at' are
         # automatically handled by Django and not expected in user input.
@@ -294,6 +299,9 @@ class NoteSerializer(serializers.ModelSerializer):
             "owns this note. Always false for anonymous readers."
         ),
     )
+    # Declared so an omitted 'public' key is absent from
+    # validated_data — create() then inherits the tag's flag.
+    public = serializers.BooleanField(required=False)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -350,6 +358,13 @@ class NoteSerializer(serializers.ModelSerializer):
         # Resolve all references before any write so a missing
         # verse fails without leaving an orphan Note row behind.
         verse_map = resolve_verse_refs(verse_references_data)
+        # An omitted 'public' flag inherits the tag's publicity —
+        # an explicit false is honored (per-note opt-out). The
+        # default applies at creation only; update() never
+        # re-derives it.
+        if 'public' not in validated_data:
+            tag = validated_data.get('tag')
+            validated_data['public'] = bool(tag and tag.public)
         # Create the Note row and its NoteVerse links in one
         # transaction so a failed write rolls the Note back.
         with transaction.atomic():
@@ -574,9 +589,10 @@ class BulkNoteItemSerializer(serializers.Serializer):
         allow_blank=True,
         default='',
     )
+    # No default: an omitted flag stays absent from
+    # validated_data so create() can inherit tag.public.
     public = serializers.BooleanField(
         required=False,
-        default=False,
     )
     verse_references = NoteVerseReferenceSerializer(
         many=True,
@@ -650,7 +666,9 @@ class BulkNoteCreateSerializer(serializers.Serializer):
         note_instances = [
             Note(
                 note_text=nd.get('note_text', ''),
-                public=nd.get('public', False),
+                # Omitted flag inherits the tag's publicity;
+                # an explicit false is honored.
+                public=nd.get('public', tag.public),
                 tag=tag,
                 user=user,
             )

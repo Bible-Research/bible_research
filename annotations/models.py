@@ -55,6 +55,13 @@ class Tag(models.Model):
         related_name='children',
         help_text="The parent tag in a hierarchical structure (optional)."
     )
+    public = models.BooleanField(
+        default=False,
+        help_text=(
+            "If True, new notes under this tag default to "
+            "public=True and the tag's notes are shareable."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

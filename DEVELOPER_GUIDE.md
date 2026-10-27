@@ -887,6 +887,28 @@ Authorization: Token <your-token>
 
 Anonymous callers get `200` with an empty array (`[]`).
 
+Every tag payload carries:
+
+```json
+{
+  "id": "TAG123456789ABCDE",
+  "name": "Love",
+  "parent_tag": null,
+  "public": false,
+  "note_count": 7,
+  "created_at": "…",
+  "updated_at": "…"
+}
+```
+
+- `public` — boolean, writable on create and PATCH. A plain
+  PATCH flips only the flag; it does NOT change any existing
+  notes (the cascade lives in `set-public`, below).
+- `note_count` — read-only integer, notes attached DIRECTLY
+  to the tag (subtree totals are aggregated client-side).
+  Anonymous retrieves count public notes only, so a shared
+  tag's badge cannot leak private notes.
+
 #### Get Tag by ID
 ```
 GET /api/v1/tags/{tag_id}/
@@ -942,7 +964,38 @@ Content-Type: application/json
 
 Re-parenting is validated against cycles: a tag cannot be its
 own parent nor be moved underneath one of its own descendants
-(both return `400`).
+(both return `400`). `parent_tag` may be set to another own
+tag id or `null` (move to root); a same-named sibling under
+the target parent (or a same-named top-level tag when moving
+to root) returns `400`.
+
+#### Set Tag Publicity (cascade)
+```
+POST /api/v1/tags/{tag_id}/set-public/
+Authorization: Token <your-token>
+Content-Type: application/json
+
+{
+  "public": true
+}
+```
+
+Flips the tag's `public` flag AND every note DIRECTLY under
+the tag to the same flag, atomically — descendant tags and
+their notes are untouched. Toggling back to private is
+symmetric (every note under the tag goes private again), so
+`notes_updated` reports the number of note rows flipped:
+
+```json
+{
+  "tag": { "id": "TAG…", "public": true, "note_count": 12, … },
+  "notes_updated": 12
+}
+```
+
+Missing or non-boolean `public` returns `400`
+`{"error": "validation_error", "message": "…"}`; foreign or
+nonexistent tags return `404`. The action is idempotent.
 
 #### Delete Tag
 ```
@@ -1004,6 +1057,15 @@ uses it to decide whether a shared note is editable.
 **Query Parameters**:
 - `tag_id` (required): Tag ID to filter notes. The sentinel
   `tag_id=untagged` lists notes with no tag instead.
+- `include_descendants` (optional, default `false`): with a
+  real `tag_id`, merges in notes from every descendant tag —
+  `count` and pagination cover the merged set, and the
+  `custom`/`-custom` orderings fall back to `-created_at`/
+  `created_at` (tag_position is per-tag and meaningless
+  across tags). Ignored for `tag_id=untagged` and when
+  `tag_id` is absent; a nonexistent tag id returns an empty
+  list. `notes/order-index/`, `notes/reorder/`, and
+  `notes/move/` stay strictly per-tag.
 - `fileset_id` (optional): Bible translation used to enrich
   each note's `verses[].text` — same provider routing as the
   passage endpoint (`ENGESV_API` → ESV API, SWORD ids like
@@ -1126,10 +1188,18 @@ deduplicated before linking (book match is case-insensitive), and
 `tag_position` is read-only on this endpoint — ordering is
 managed exclusively by `notes/reorder/` and `notes/move/`.
 
+`public` is optional on create: when OMITTED the note inherits
+its tag's `public` flag (an untagged note defaults to `false`).
+An explicit `public: false` under a public tag is honored —
+per-note opt-out stays possible. On PATCH the flag is an
+explicit write: the tag default never applies and moving a
+note between tags does not flip it.
+
 Bulk creation goes through `POST /api/v1/notes/bulk/` with
 `{"tag_id": "TAG...", "notes": [...]}` — up to 100 notes per
 request (`400` beyond that), returning `201` with the created
-notes.
+notes. Per-item `public` is optional the same way: an omitted
+flag inherits `tag.public` instead of landing `false`.
 
 #### Get Note by ID
 ```

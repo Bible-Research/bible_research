@@ -1,7 +1,11 @@
 import logging
 import math
 
-from drf_spectacular.utils import extend_schema, OpenApiParameter
+from drf_spectacular.utils import (
+    extend_schema,
+    extend_schema_view,
+    OpenApiParameter,
+)
 from rest_framework.decorators import action
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import viewsets, status as drf_status
@@ -216,6 +220,14 @@ class TagViewSet(viewsets.ModelViewSet):
     Authenticated users see and manage their own tags. Anonymous
     users can retrieve a tag only when it carries at least one
     public note (share pages, issue #9).
+
+    Every tag payload carries a read-only `note_count` — the
+    number of notes attached DIRECTLY to the tag (subtree
+    totals are aggregated client-side); anonymous retrieves
+    count public notes only. `public` is writable on create and
+    PATCH (flag only, no note cascade); POST
+    /api/v1/tags/<pk>/set-public/ flips the flag and cascades it
+    to the tag's own notes.
     """
     serializer_class = TagSerializer
 
@@ -247,14 +259,24 @@ class TagViewSet(viewsets.ModelViewSet):
         if user.is_authenticated:
             return Tag.objects.filter(
                 user=user
+            ).annotate(
+                # Direct notes only — subtree totals are
+                # aggregated client-side.
+                note_count=Count('notes')
             ).order_by('name')
 
         # Anonymous retrieve exposes a tag only when at least
         # one of its notes is public, so share pages can render
-        # the tag name without leaking private-only tags.
+        # the tag name without leaking private-only tags. The
+        # count is filtered the same way — a badge must not
+        # leak the existence of private notes.
         if self.action == 'retrieve':
             return Tag.objects.filter(
                 notes__public=True
+            ).annotate(
+                note_count=Count(
+                    'notes', filter=Q(notes__public=True)
+                )
             ).distinct()
         return Tag.objects.none()
 
@@ -454,7 +476,88 @@ class TagViewSet(viewsets.ModelViewSet):
             f"successfully deleted"
         )
 
+    @extend_schema(
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'public': {'type': 'boolean'},
+                },
+                'required': ['public'],
+            },
+        },
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'tag': {'type': 'object'},
+                    'notes_updated': {'type': 'integer'},
+                },
+            },
+        },
+    )
+    @action(detail=True, methods=['post'], url_path='set-public')
+    def set_public(self, request, pk=None):
+        """
+        POST /api/v1/tags/<pk>/set-public/  {"public": true}
 
+        Flip the tag's `public` flag AND cascade it to every
+        note DIRECTLY under the tag, atomically — descendant
+        tags and their notes are untouched. Re-privatizing is
+        symmetric: every note under the tag goes private too
+        (`notes_updated` reports how many rows flipped).
+        Idempotent. Ownership/404 come from get_queryset.
+        """
+        tag = self.get_object()
+        if not isinstance(request.data, dict):
+            return _validation_error(
+                'Request body must be a JSON object.'
+            )
+        make_public = request.data.get('public', None)
+        if not isinstance(make_public, bool):
+            return _validation_error(
+                "'public' must be a boolean."
+            )
+        with transaction.atomic():
+            tag.public = make_public
+            tag.save(update_fields=['public', 'updated_at'])
+            notes_updated = Note.objects.filter(
+                tag=tag, user=request.user
+            ).update(public=make_public)
+        logger.info(
+            f"User {request.user.username} set tag "
+            f"'{tag.name}' (ID: {tag.id}) public={make_public}; "
+            f"{notes_updated} note(s) updated"
+        )
+        return Response({
+            'tag': TagSerializer(
+                tag, context={'request': request}
+            ).data,
+            'notes_updated': notes_updated,
+        })
+
+
+@extend_schema_view(
+    list=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='include_descendants',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                description=(
+                    'With tag_id=<tag pk>, merge in notes from '
+                    'every descendant tag (default false). '
+                    'Ignored for tag_id=untagged and when '
+                    'tag_id is absent. In merged mode the '
+                    'custom orderings fall back to recency '
+                    '(custom → -created_at, -custom → '
+                    'created_at) since tag_position is per-tag.'
+                ),
+                required=False,
+            ),
+        ],
+    ),
+)
 class NoteViewSet(viewsets.ModelViewSet):
     """
     API endpoint that allows notes to be created, viewed, updated, or deleted.
@@ -463,6 +566,8 @@ class NoteViewSet(viewsets.ModelViewSet):
 
     Additional filtering:
     - GET /api/v1/notes/?tag_id={tag_id} - List notes filtered by tag ID
+    - GET /api/v1/notes/?tag_id={tag_id}&include_descendants=true
+      - Merge notes from the tag's whole subtree
     - GET /api/v1/notes/?public=true - List both public and private notes
     - GET /api/v1/notes/?ordering={ordering} - Sort notes
     - GET /api/v1/notes/?page={page} - Paginate results
@@ -583,7 +688,9 @@ class NoteViewSet(viewsets.ModelViewSet):
             f"successfully deleted"
         )
 
-    def _apply_ordering(self, queryset, ordering_param):
+    def _apply_ordering(
+        self, queryset, ordering_param, include_descendants=False
+    ):
         """
         Apply ordering to queryset based on ordering parameter.
 
@@ -594,6 +701,12 @@ class NoteViewSet(viewsets.ModelViewSet):
         - -created: created_at DESC
         - verse: first verse ASC
         - -verse: first verse DESC
+
+        *include_descendants* marks a merged subtree listing
+        (?include_descendants=true): tag_position is per-tag and
+        meaningless across a merged set, so 'custom' falls back
+        to -created_at and '-custom' to created_at. The verse/
+        created orderings are unchanged.
         """
         from bible.utils.bible_books import BOOK_ORDER_MAP
         from django.db.models import Min, Case, When, IntegerField
@@ -628,9 +741,13 @@ class NoteViewSet(viewsets.ModelViewSet):
                 )
 
         elif ordering_param == 'custom':
+            if include_descendants:
+                return queryset.order_by('-created_at')
             return _canonical_note_order(queryset)
 
         elif ordering_param == '-custom':
+            if include_descendants:
+                return queryset.order_by('created_at')
             return queryset.order_by(
                 F('tag_position').desc(nulls_first=True),
                 'created_at'
@@ -644,6 +761,8 @@ class NoteViewSet(viewsets.ModelViewSet):
 
         else:
             # Default to custom ordering
+            if include_descendants:
+                return queryset.order_by('-created_at')
             return _canonical_note_order(queryset)
 
     def get_queryset(self):
@@ -663,6 +782,10 @@ class NoteViewSet(viewsets.ModelViewSet):
           by its ID
         - GET /api/v1/notes/?tag_id=<tag_id> - Filter by
           tag ID; `tag_id=untagged` lists notes with no tag
+        - GET /api/v1/notes/?tag_id=<tag_id>&
+          include_descendants=true - Merge in notes from every
+          descendant tag (custom ordering falls back to
+          recency in merged mode)
         - GET /api/v1/notes/?ordering=<ordering> - Sort order
           (custom, -custom, created, -created, verse, -verse)
         - GET /api/v1/notes/?page=<page> - Page number
@@ -681,12 +804,23 @@ class NoteViewSet(viewsets.ModelViewSet):
         ordering_param = self.request.query_params.get(
             'ordering', 'custom'
         )
+        # ?include_descendants=true widens the tag_id filter to
+        # the tag's whole subtree. It is ignored (not an error)
+        # for tag_id=untagged and when tag_id is absent.
+        include_descendants = (
+            self.request.query_params.get(
+                'include_descendants', ''
+            ).lower() == 'true'
+            and tag_id is not None
+            and tag_id != UNTAGGED_TAG_ID
+        )
 
         logger.info(
             f"NoteViewSet.get_queryset called for user: "
             f"{user.username if user.is_authenticated else 'Anonymous'} "
             f"| note_pk: {note_pk} | tag_id: {tag_id} "
-            f"| ordering: {ordering_param}"
+            f"| ordering: {ordering_param} "
+            f"| include_descendants: {include_descendants}"
         )
 
         if note_pk or tag_id:
@@ -739,8 +873,28 @@ class NoteViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(tag__isnull=True)
             logger.debug("Filtering untagged notes")
         elif tag_id:
-            queryset = queryset.filter(tag_id=tag_id)
-            logger.debug(f"Filtering by tag_id: {tag_id}")
+            if include_descendants:
+                # Merged subtree view: the tag's own notes plus
+                # every descendant tag's notes. A missing tag id
+                # yields an empty list, not a 500. subtree_tag_ids
+                # bounds the descent to the tag owner's rows, so
+                # shared foreign tags can't pull in the caller's
+                # tags — and get_accessible_notes_qs above still
+                # limits what the caller may see.
+                tag = Tag.objects.filter(pk=tag_id).first()
+                subtree_ids = (
+                    subtree_tag_ids(tag, user=tag.user)
+                    if tag is not None
+                    else set()
+                )
+                queryset = queryset.filter(tag_id__in=subtree_ids)
+                logger.debug(
+                    f"Filtering by tag subtree: {tag_id} "
+                    f"({len(subtree_ids)} tag(s))"
+                )
+            else:
+                queryset = queryset.filter(tag_id=tag_id)
+                logger.debug(f"Filtering by tag_id: {tag_id}")
 
         if note_pk:
             queryset = queryset.filter(id=note_pk)
@@ -748,7 +902,7 @@ class NoteViewSet(viewsets.ModelViewSet):
 
         # Apply ordering based on parameter
         final_queryset = self._apply_ordering(
-            queryset, ordering_param
+            queryset, ordering_param, include_descendants
         )
         # NoteSerializer expands ``tag`` and iterates ``verses``
         # per note — eager-load both relations so a page of
