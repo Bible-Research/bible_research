@@ -9,10 +9,10 @@ locals {
   # ``gcloud iam service-accounts list --format='value(uniqueId)'``
   # to refresh after recreating an account.
   managed_sa_unique_ids = [
-    "103872082169766087815",   # audio-generator
-    "100199889854403046928",   # github-deployer
-    "111270081806219228031",   # thumbnail-worker
-    "110192253908821077884",   # appspot default runtime SA
+    "103872082169766087815", # audio-generator
+    "100199889854403046928", # github-deployer
+    "111270081806219228031", # thumbnail-worker
+    "110192253908821077884", # appspot default runtime SA
   ]
 }
 
@@ -165,7 +165,7 @@ resource "google_project_iam_member" "github_deployer_service_account_admin_scop
   condition {
     title       = "Terraform-managed SAs only"
     description = "Scoped to config-managed service accounts."
-    expression  = join(" || ", [
+    expression = join(" || ", [
       for suffix in concat(
         [
           "audio-generator@${var.project_id}.iam.gserviceaccount.com",
