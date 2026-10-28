@@ -113,12 +113,12 @@ jobs:
           echo "immutable_image=${IMMUTABLE}" >> "${GITHUB_OUTPUT}"
 
       # ``all-jobs`` is the master ``run_all_jobs`` entry point (it
-      # replaced the standalone ``audio-generator`` job). It is
-      # created by terraform, so
-      # skip the update only when the Job does not exist yet — a
-      # describe failure is tolerated for NOT_FOUND only; other
-      # describe failures (auth, transient API error) emit a warning
-      # instead of silently leaving a stale image.
+      # replaced the standalone ``audio-generator`` job). The Job
+      # is created by terraform; skip the update only when it does
+      # not exist yet — a describe failure is tolerated for
+      # NOT_FOUND only; other describe failures (auth, transient
+      # API error) emit a warning instead of silently leaving a
+      # stale image.
       - name: Sync all-jobs Cloud Run Job image
         run: |
           set -euo pipefail

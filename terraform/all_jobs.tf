@@ -46,11 +46,12 @@ resource "google_cloud_run_v2_job" "all_jobs" {
         # ``Deploy to App Engine`` GitHub Actions workflow (see
         # .github/workflows/deploy.yml), which then runs
         # ``gcloud run jobs update all-jobs`` to point this Job at
-        # the freshly pushed immutable digest. The
-        # ``ignore_changes`` lifecycle below tells Terraform not to
-        # fight the CI writer, so the public ``gcr.io/cloudrun/hello``
-        # placeholder keeps the very first ``terraform apply``
-        # working before CI has pushed anything.
+        # the freshly pushed immutable digest.
+        # The ``ignore_changes`` lifecycle below tells Terraform
+        # not to fight the CI writer, so the public
+        # ``gcr.io/cloudrun/hello`` placeholder keeps the very
+        # first ``terraform apply`` working before CI has pushed
+        # anything.
         image = "gcr.io/cloudrun/hello"
 
         command = [
