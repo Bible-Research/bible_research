@@ -78,8 +78,9 @@ versions, preventing accumulation.
 5. **Deploy to App Engine** with `--stop-previous-version`
 6. **🆕 Cleanup old versions** (NEW STEP)
 7. **Show recent serving versions**
-8. **Build and push audio-generator image**
-9. **Update Cloud Run Job**
+8. **Build and push job image** (to the `audio-generator`
+   Artifact Registry repo)
+9. **Update `all-jobs` Cloud Run Job**
 
 ### What Changed in `gcloud app deploy`
 

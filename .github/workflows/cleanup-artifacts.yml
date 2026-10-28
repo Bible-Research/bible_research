@@ -23,7 +23,7 @@ env:
   GCP_REGION: europe-west3
   WIF_PROVIDER: projects/670506724494/locations/global/workloadIdentityPools/github-actions/providers/github
   DEPLOY_SA: github-deployer@bible-research-489314.iam.gserviceaccount.com
-  AUDIO_JOB_NAME: audio-generator
+  JOB_NAME: all-jobs
   AUDIO_IMAGE_REPO: audio-generator
   AUDIO_IMAGE_NAME: audio-generator
   GAE_IMAGE_REPO: gae-standard
@@ -110,7 +110,7 @@ jobs:
           echo "Keeping ${AUDIO_REPO}@${KEEP_AUDIO:-<none>}"
 
           JOB_FIELD='spec.template.spec.template.spec.containers[0].image'
-          JOB_IMAGE=$(gcloud run jobs describe "${AUDIO_JOB_NAME}" \
+          JOB_IMAGE=$(gcloud run jobs describe "${JOB_NAME}" \
             --region="${GCP_REGION}" --project="${GCP_PROJECT_ID}" \
             --format="value(${JOB_FIELD})" 2>/dev/null || true)
           JOB_DIGEST=""
