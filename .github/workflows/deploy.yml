@@ -119,3 +119,14 @@ jobs:
             --image="${{ steps.audio_image.outputs.immutable_image }}" \
             --region="${GCP_REGION}" \
             --project="${GCP_PROJECT_ID}"
+
+      # ``all-jobs`` runs the same image (it is the master
+      # ``run_all_jobs`` entry point). It is created by terraform, so
+      # tolerate it missing until that apply lands.
+      - name: Sync all-jobs Cloud Run Job image
+        run: |
+          gcloud run jobs update all-jobs \
+            --image="${{ steps.audio_image.outputs.immutable_image }}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            || echo "Job all-jobs not yet created (terraform pending)"
