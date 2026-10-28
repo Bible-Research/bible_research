@@ -11,7 +11,11 @@ resource "google_cloud_run_v2_job" "all_jobs" {
   template {
     template {
       service_account = google_service_account.audio_generator.email
-      timeout         = "3600s"
+      # 5400s — headroom for serial sub-job growth over the
+      # single-job 3600s template this file was copied from; the
+      # master runs its JOBS entries serially, so the cap must
+      # cover the sum of sub-job runtimes.
+      timeout         = "5400s"
       max_retries     = 0
 
       containers {

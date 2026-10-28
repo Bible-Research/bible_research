@@ -158,3 +158,18 @@ class TestSelection:
         assert mock_call.call_count == 2
         assert "job_a" in str(exc.value)
         assert "job_b" not in str(exc.value)
+
+    def test_system_exit_entry_does_not_stop_later_entries(self):
+        """A sub-job calling sys.exit() must not abort the pass."""
+        jobs = [
+            ("job_a", [], "daily"),
+            ("job_b", [], "daily"),
+        ]
+        with patch.object(run_all_jobs, "JOBS", jobs):
+            with patch(f"{_CMD}.call_command") as mock_call:
+                mock_call.side_effect = [SystemExit(1), None]
+                with pytest.raises(CommandError) as exc:
+                    call_command("run_all_jobs")
+        assert mock_call.call_count == 2
+        assert "job_a" in str(exc.value)
+        assert "job_b" not in str(exc.value)

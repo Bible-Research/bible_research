@@ -1692,6 +1692,20 @@ unchanged. The translations listing emits both audio filesets.
 `AUDIO_BUCKET_NAME`, `AUDIO_SIGNED_URL_TTL_SECONDS`,
 `MONTHLY_TTS_CHAR_LIMIT`, `LOCK_STALE_HOURS`.
 
+**Master job** (`run_all_jobs`): the `all-jobs` Cloud Run Job
+(`terraform/all_jobs.tf`) runs `manage.py run_all_jobs`, which
+executes the entries in the `JOBS` table of
+`bible/management/commands/run_all_jobs.py` sequentially — each
+entry is a `(label, argv, schedule)` tuple gated by a UTC
+schedule predicate (`daily`, `weekly:<dow>`, `dom:N` /
+`dom:odd`, `last_day_of_month`, `manual`). A failing entry is
+logged and skipped, and the run exits non-zero naming the
+failures. `--only LABEL` runs one entry ignoring its schedule,
+`--force` runs all entries, `--dry-run` prints what would run.
+It currently lists `generate_chapter_audio` on `dom:3` (the
+monthly audio pass). The deploy workflow pins the Job to the
+freshly built image via `gcloud run jobs update all-jobs`.
+
 ### Generated Audio (Gemini API free tier, local)
 
 `manage.py generate_gemini_audio` synthesizes the same LVSGLU8
@@ -2071,6 +2085,6 @@ For questions or issues:
 
 ---
 
-**Last Updated**: 2026-03-01
+**Last Updated**: 2026-10-28
 
 [bible-brain]: https://www.faithcomesbyhearing.com/bible-brain/api-reference

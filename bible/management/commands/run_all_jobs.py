@@ -1,9 +1,10 @@
 """Master Cloud Run Job entry point.
 
 Runs the sub-jobs listed in ``JOBS`` sequentially, in listed order.
-Each entry is one line — comment a line out to disable that job.
-This file is the single source of truth for which jobs the
-``all-jobs`` Cloud Run Job executes.
+Each entry is a ``(label, argv, schedule)`` tuple — comment the
+whole tuple out to disable that job. This file is the single
+source of truth for which jobs the ``all-jobs`` Cloud Run Job
+executes.
 """
 import calendar
 import logging
@@ -117,9 +118,12 @@ class Command(BaseCommand):
         failed = []
         for label, argv, _schedule in entries:
             self.stdout.write(f"running: {label} {' '.join(argv)}")
+            # Catch SystemExit too — a sub-job that calls
+            # sys.exit() must not abort the whole pass.
+            # KeyboardInterrupt still propagates and stops the run.
             try:
                 call_command(label, *argv)
-            except Exception:
+            except (Exception, SystemExit):
                 logger.exception("sub-job %s failed", label)
                 failed.append(label)
 

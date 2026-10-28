@@ -122,11 +122,19 @@ jobs:
 
       # ``all-jobs`` runs the same image (it is the master
       # ``run_all_jobs`` entry point). It is created by terraform, so
-      # tolerate it missing until that apply lands.
+      # skip the update only when the Job does not exist yet — a
+      # describe failure is tolerated, but a real update failure
+      # (auth, transient API error, bad image ref) fails the step.
       - name: Sync all-jobs Cloud Run Job image
         run: |
-          gcloud run jobs update all-jobs \
-            --image="${{ steps.audio_image.outputs.immutable_image }}" \
+          set -euo pipefail
+          if gcloud run jobs describe all-jobs \
             --region="${GCP_REGION}" \
-            --project="${GCP_PROJECT_ID}" \
-            || echo "Job all-jobs not yet created (terraform pending)"
+            --project="${GCP_PROJECT_ID}" > /dev/null 2>&1; then
+            gcloud run jobs update all-jobs \
+              --image="${{ steps.audio_image.outputs.immutable_image }}" \
+              --region="${GCP_REGION}" \
+              --project="${GCP_PROJECT_ID}"
+          else
+            echo "Job all-jobs not yet created (terraform pending)"
+          fi
