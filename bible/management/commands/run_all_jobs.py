@@ -41,7 +41,8 @@ def _last_day_of_month(today: date) -> bool:
 
 
 def _manual(today: date) -> bool:
-    """Never runs in a scheduled pass — only via ``--only``."""
+    """Never runs in a scheduled pass — only via ``--only`` or
+    ``--force`` (both ignore schedules)."""
     return False
 
 
@@ -119,11 +120,17 @@ class Command(BaseCommand):
         for label, argv, _schedule in entries:
             self.stdout.write(f"running: {label} {' '.join(argv)}")
             # Catch SystemExit too — a sub-job that calls
-            # sys.exit() must not abort the whole pass.
+            # sys.exit() must not abort the whole pass. A clean
+            # exit (code 0 or None) is not a failure.
             # KeyboardInterrupt still propagates and stops the run.
             try:
                 call_command(label, *argv)
-            except (Exception, SystemExit):
+            except (Exception, SystemExit) as exc:
+                if (
+                    isinstance(exc, SystemExit)
+                    and exc.code in (None, 0)
+                ):
+                    continue
                 logger.exception("sub-job %s failed", label)
                 failed.append(label)
 

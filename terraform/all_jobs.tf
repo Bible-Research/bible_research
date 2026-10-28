@@ -15,8 +15,8 @@ resource "google_cloud_run_v2_job" "all_jobs" {
       # single-job 3600s template this file was copied from; the
       # master runs its JOBS entries serially, so the cap must
       # cover the sum of sub-job runtimes.
-      timeout         = "5400s"
-      max_retries     = 0
+      timeout     = "5400s"
+      max_retries = 0
 
       containers {
         # Bootstrap image only. The real image is pushed by the
