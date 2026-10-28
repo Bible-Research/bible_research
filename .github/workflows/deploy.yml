@@ -14,7 +14,6 @@ env:
   GCP_REGION: europe-west3
   WIF_PROVIDER: projects/670506724494/locations/global/workloadIdentityPools/github-actions/providers/github
   DEPLOY_SA: github-deployer@bible-research-489314.iam.gserviceaccount.com
-  AUDIO_JOB_NAME: audio-generator
   AUDIO_IMAGE_REPO: audio-generator
   AUDIO_IMAGE_NAME: audio-generator
   ALL_JOBS_JOB_NAME: all-jobs
@@ -76,12 +75,12 @@ jobs:
             --sort-by=~last_deployed_time \
             --limit=5
 
-      # Build a dedicated container image for the audio-generator
+      # Build a dedicated container image for the ``all-jobs``
       # Cloud Run Job, push it to the ``audio-generator`` Artifact
       # Registry repo under a deterministic ``:<git-sha>`` tag, then
       # pin the Cloud Run Job to the freshly pushed immutable digest.
       # Terraform ignores changes to the Job image (see
-      # audio_generator.tf lifecycle block), so this step is the sole
+      # all_jobs.tf lifecycle block), so this step is the sole
       # writer of the field. We no longer piggyback on App Engine's
       # auto-generated gae-standard image (whose path Terraform cannot
       # predict, which previously forced an unusable ``:latest`` tag).
@@ -113,20 +112,13 @@ jobs:
           echo "Immutable image ref: ${IMMUTABLE}"
           echo "immutable_image=${IMMUTABLE}" >> "${GITHUB_OUTPUT}"
 
-      - name: Sync audio-generator Cloud Run Job image
-        run: |
-          set -euo pipefail
-          gcloud run jobs update "${AUDIO_JOB_NAME}" \
-            --image="${{ steps.audio_image.outputs.immutable_image }}" \
-            --region="${GCP_REGION}" \
-            --project="${GCP_PROJECT_ID}"
-
-      # ``all-jobs`` runs the same image (it is the master
-      # ``run_all_jobs`` entry point). It is created by terraform, so
-      # skip the update only when the Job does not exist yet — a
-      # describe failure is tolerated for NOT_FOUND only; other
-      # describe failures (auth, transient API error) emit a warning
-      # instead of silently leaving a stale image.
+      # ``all-jobs`` is the master ``run_all_jobs`` entry point (it
+      # replaced the standalone ``audio-generator`` job). The Job
+      # is created by terraform; skip the update only when it does
+      # not exist yet — a describe failure is tolerated for
+      # NOT_FOUND only; other describe failures (auth, transient
+      # API error) emit a warning instead of silently leaving a
+      # stale image.
       - name: Sync all-jobs Cloud Run Job image
         run: |
           set -euo pipefail

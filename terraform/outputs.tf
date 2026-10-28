@@ -46,17 +46,18 @@ output "audio_generator_sa_email" {
   value = google_service_account.audio_generator.email
 }
 
-output "audio_generator_job_name" {
-  value = google_cloud_run_v2_job.audio_generator.name
+output "all_jobs_job_name" {
+  value = google_cloud_run_v2_job.all_jobs.name
 }
 
 # Disabled together with the scheduler resources in scheduler.tf
 # (2026-09-17). Uncomment when re-enabling the monthly job.
-# output "audio_scheduler_job_name" {
-#   value = google_cloud_scheduler_job.monthly_audio_generator.name
+# output "all_jobs_scheduler_job_name" {
+#   value = google_cloud_scheduler_job.monthly_all_jobs.name
 # }
 
-# Base image path (without tag) for the audio-generator Cloud Run Job.
+# Base image path (without tag) for the all-jobs Cloud Run Job — the
+# Artifact Registry repository keeps the ``audio-generator`` name.
 # The Deploy workflow appends ":<git-sha>" when building, pushing, and
 # pinning the Cloud Run Job to the new immutable image.
 output "audio_generator_image_base" {

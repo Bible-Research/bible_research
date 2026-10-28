@@ -132,7 +132,8 @@ resource "google_project_iam_member" "github_deployer_service_usage_admin" {
 #
 #  3) ``serviceAccountAdmin`` is applied conditionally, restricted to
 #     the specific SAs this Terraform config manages (github-deployer,
-#     audio-generator, audio-scheduler, appspot). This closes the
+#     audio-generator — the all-jobs runtime SA — thumbnail-worker,
+#     all-jobs-scheduler, appspot). This closes the
 #     "compromised CI → setIamPolicy on appspot → full project
 #     takeover" path that the previous unscoped grant exposed.
 resource "google_project_iam_member" "github_deployer_service_account_viewer" {
@@ -168,6 +169,7 @@ resource "google_project_iam_member" "github_deployer_service_account_admin_scop
     expression = join(" || ", [
       for suffix in concat(
         [
+          "all-jobs-scheduler@${var.project_id}.iam.gserviceaccount.com",
           "audio-generator@${var.project_id}.iam.gserviceaccount.com",
           "github-deployer@${var.project_id}.iam.gserviceaccount.com",
           "thumbnail-worker@${var.project_id}.iam.gserviceaccount.com",
@@ -270,4 +272,36 @@ resource "google_service_account_iam_member" "appspot_self_token_creator" {
   service_account_id = "projects/${var.project_id}/serviceAccounts/${local.appspot_email}"
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:${local.appspot_email}"
+}
+
+# Required to create/manage Cloud Scheduler jobs (scheduler.tf). The
+# scheduler stays commented out, but the binding is kept so re-enabling
+# does not also require an IAM change.
+resource "google_project_iam_member" "github_deployer_scheduler_admin" {
+  project = var.project_id
+  role    = "roles/cloudscheduler.admin"
+  member  = "serviceAccount:${google_service_account.github_deployer.email}"
+
+  depends_on = [
+    google_project_service.enabled,
+    google_service_account.github_deployer,
+  ]
+}
+
+# github-deployer needs these additional permissions to run
+# ``gcloud run jobs update all-jobs --image=...`` from the
+# Deploy to App Engine workflow, and to manage the IAM policy on the
+# Cloud Run Job (e.g. granting the scheduler SA the Invoker
+# role in scheduler.tf). ``roles/run.admin`` is required over
+# ``roles/run.developer`` because only ``admin`` grants
+# ``run.jobs.setIamPolicy``.
+resource "google_project_iam_member" "github_deployer_run_admin" {
+  project = var.project_id
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.github_deployer.email}"
+
+  depends_on = [
+    google_project_service.enabled,
+    google_service_account.github_deployer,
+  ]
 }

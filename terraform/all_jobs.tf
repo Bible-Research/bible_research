@@ -1,8 +1,31 @@
 # Master Cloud Run Job: runs bible/management/commands/run_all_jobs.py,
 # which executes the sub-jobs listed in its JOBS table sequentially.
-# Phase 1: manually runnable only — no google_cloud_scheduler_job.
-# Reuses the audio-generator runtime service account and the same
-# env-file secret wiring (see audio_generator.tf).
+# This is the project's only Cloud Run Job — it replaced the standalone
+# ``audio-generator`` job (Phase 2), whose runtime service account and
+# env-file secret wiring moved into this file unchanged. No
+# google_cloud_scheduler_job: scheduling stays disabled (see
+# scheduler.tf).
+
+# Runtime SA for all-jobs. The account keeps the ``audio-generator``
+# id for stability — renaming the account_id would force a
+# destroy/recreate of the service account.
+resource "google_service_account" "audio_generator" {
+  account_id   = "audio-generator"
+  display_name = "Audio Generator (Cloud Run Job)"
+  project      = var.project_id
+}
+
+# The Job needs the app's .env config at Django settings import time.
+# It is injected as the DOTENV env var sourced from the consolidated
+# ``env-file`` secret (see secrets.tf) — settings.py parses its value
+# directly, so no per-secret env vars or API calls are needed.
+resource "google_secret_manager_secret_iam_member" "audio_generator_env_file" {
+  project   = var.project_id
+  secret_id = data.google_secret_manager_secret.env_file.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.audio_generator.email}"
+}
+
 resource "google_cloud_run_v2_job" "all_jobs" {
   name     = "all-jobs"
   location = local.app_engine_region
@@ -22,23 +45,24 @@ resource "google_cloud_run_v2_job" "all_jobs" {
         # Bootstrap image only. The real image is pushed by the
         # ``Deploy to App Engine`` GitHub Actions workflow (see
         # .github/workflows/deploy.yml), which then runs
-        # ``gcloud run jobs update all-jobs`` to point this Job at the
-        # freshly pushed immutable digest — the same wiring as the
-        # audio-generator job (see audio_generator.tf). The
-        # ``ignore_changes`` lifecycle below tells Terraform not to
-        # fight the CI writer, so the public ``gcr.io/cloudrun/hello``
-        # placeholder keeps the very first ``terraform apply``
-        # working before CI has pushed anything.
+        # ``gcloud run jobs update all-jobs`` to point this Job at
+        # the freshly pushed immutable digest.
+        # The ``ignore_changes`` lifecycle below tells Terraform
+        # not to fight the CI writer, so the public
+        # ``gcr.io/cloudrun/hello`` placeholder keeps the very
+        # first ``terraform apply`` working before CI has pushed
+        # anything.
         image = "gcr.io/cloudrun/hello"
 
         command = [
           "python", "manage.py", "run_all_jobs",
         ]
 
-        # Same env surface as the audio-generator job: every sub-job
-        # in the master JOBS list must find the configuration it
-        # expects (TTS voice, audio bucket, monthly budget, run-lock
-        # staleness, Django settings, DOTENV secret payload).
+        # Env surface carried over from the former audio-generator
+        # job: every sub-job in the master JOBS list must find the
+        # configuration it expects (TTS voice, audio bucket, monthly
+        # budget, run-lock staleness, Django settings, DOTENV secret
+        # payload).
         env {
           name  = "FILESET_ID"
           value = "LVSGLU8"
@@ -107,4 +131,14 @@ resource "google_cloud_run_v2_job" "all_jobs" {
       client_version,
     ]
   }
+}
+
+# github-deployer needs to act as the all-jobs runtime SA when running
+# ``gcloud run jobs update all-jobs`` from the Deploy to App Engine
+# workflow. Kept scoped to this specific SA rather than granted
+# project-wide.
+resource "google_service_account_iam_member" "github_deployer_act_as_audio_generator" {
+  service_account_id = google_service_account.audio_generator.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.github_deployer.email}"
 }

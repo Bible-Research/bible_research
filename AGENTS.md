@@ -17,7 +17,8 @@ tests run on SQLite.
 - `annotations/` — notes, tags, comments, images, reading positions.
 - `users/` — auth/token endpoints.
 - `bible_research/` — settings, urls, authentication.
-- `terraform/` — GCP infra (Cloud Run job, storage; see note below).
+- `terraform/` — GCP infra (the `all-jobs` Cloud Run job, storage;
+  see note below).
 - `config.yaml` — local secrets (gitignored). Tests do NOT need it.
 
 All API routes live under `/api/v1/` (see `bible_research/urls.py`).
@@ -296,6 +297,11 @@ resolved:
   stage only files you changed.
 - `terraform/scheduler.tf`: the monthly TTS Cloud Scheduler is
   intentionally commented out — do NOT enable it.
+- `terraform/all_jobs.tf`: the single `all-jobs` Cloud Run Job
+  replaced the per-task `audio-generator` job (it reuses that SA and
+  image repo, both still named `audio-generator`). Sub-jobs are
+  listed in the `JOBS` table of
+  `bible/management/commands/run_all_jobs.py`.
 - Dependencies: `requirements.txt` pins the runtime stack to
   the versions installed in `venv/` (verify with `pip freeze`);
   `requirements-dev.txt` adds pytest/pytest-django/debugpy.
