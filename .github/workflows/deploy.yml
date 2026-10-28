@@ -17,6 +17,7 @@ env:
   AUDIO_JOB_NAME: audio-generator
   AUDIO_IMAGE_REPO: audio-generator
   AUDIO_IMAGE_NAME: audio-generator
+  ALL_JOBS_JOB_NAME: all-jobs
 
 jobs:
   deploy:
@@ -119,3 +120,32 @@ jobs:
             --image="${{ steps.audio_image.outputs.immutable_image }}" \
             --region="${GCP_REGION}" \
             --project="${GCP_PROJECT_ID}"
+
+      # ``all-jobs`` runs the same image (it is the master
+      # ``run_all_jobs`` entry point). It is created by terraform, so
+      # skip the update only when the Job does not exist yet — a
+      # describe failure is tolerated for NOT_FOUND only; other
+      # describe failures (auth, transient API error) emit a warning
+      # instead of silently leaving a stale image.
+      - name: Sync all-jobs Cloud Run Job image
+        run: |
+          set -euo pipefail
+          JOB="${ALL_JOBS_JOB_NAME}"
+          if gcloud run jobs describe "${JOB}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            --format='value(metadata.name)' > /dev/null \
+            2> describe_err.log; then
+            gcloud run jobs update "${JOB}" \
+              --image="${{ steps.audio_image.outputs.immutable_image }}" \
+              --region="${GCP_REGION}" \
+              --project="${GCP_PROJECT_ID}"
+          elif grep -qiE \
+              'not.?found|cannot find|could not find|does not exist' \
+              describe_err.log; then
+            echo "Job ${JOB} not yet created (terraform pending)"
+          else
+            echo "::warning::Could not describe job ${JOB} — " \
+              "skipping image sync:"
+            cat describe_err.log
+          fi
