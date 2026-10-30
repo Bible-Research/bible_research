@@ -325,4 +325,17 @@ resolved:
   OpenAPI client imported via a `sys.path` append in
   `dbt/client.py` — not a pip package; don't add it to
   requirements or remove the path patch.
+- This machine sits behind a Netskope TLS-intercepting proxy
+  (`ca.gocardless.goskope.com`): pip/requests/aiohttp/grpc all
+  fail with "self signed certificate in certificate chain"
+  unless pointed at a combined CA bundle. Build one:
+  `cat $(venv/bin/python -c 'import certifi;print(certifi.where())') \
+    "/Library/Application Support/Netskope/STAgent/data/nscacert.pem" \
+    > /tmp/combined-ca.pem`
+  (optionally append `security find-certificate -a -c gocardless
+  -p`), then export `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` /
+  `PIP_CERT` / `CURL_CA_BUNDLE` /
+  `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` to it. gRPC also needs
+  REST transport (`transport="rest"`) — the proxy strips ALPN.
+  See `tts-out/voice-comparison/README.md` for a worked example.
 - If docs and code disagree, the code wins — fix the doc.
