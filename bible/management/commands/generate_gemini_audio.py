@@ -1,28 +1,46 @@
 """Generate LVSGLU8 chapter audio via the Gemini API free tier.
 
-Designed to run locally on each boot: it drips through the ~15
-requests/day free quota (resetting at midnight Pacific), writes
-MP3 + timestamps under ``tts-out/``, and resumes where it left
-off via a gitignored JSON state file. No GCS upload yet — quality
-first, ``--upload-gcs`` comes later.
+Two modes share one resume-safe loop:
+
+- **Local** (default): run on each boot; writes MP3 + timestamps
+  under ``tts-out/`` and resumes via a gitignored JSON state file.
+- **GCS** (``--upload-gcs``, or auto-enabled when the
+  ``CLOUD_RUN_JOB`` env var is set — i.e. inside the ``all-jobs``
+  Cloud Run Job): uploads artifacts to the audio bucket under
+  ``audio_gemini/`` (GCS mode ``"gemini"``), derives completion
+  from the object listing, and keeps the daily request counter in
+  a per-Pacific-day JSON object so a same-day retry resumes the
+  spend. A day-keyed run lock serializes executions and a
+  successful run marks it complete, so same-day reruns exit early.
+
+Either way the command drips through the ~15 requests/day free
+quota (resetting at midnight Pacific) and exits 0 on quota
+exhaustion so ``run_all_jobs`` never marks the sub-job failed.
 """
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from bible.services.gemini_tts.client import (
+    DEFAULT_VOICE_NAME,
     GeminiTTSClient,
     QuotaExceeded,
 )
-from bible.services.gemini_tts.state import RunState
+from bible.services.gemini_tts.state import (
+    GcsRunState,
+    RunState,
+    today_pacific,
+)
 from bible.services.gemini_tts.synthesizer import (
     DEFAULT_MAX_SEGMENT_CHARS,
     GeminiSynthesizer,
 )
+from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import canonical_sword_fileset_id
 
@@ -152,6 +170,15 @@ class Command(BaseCommand):
             help="Gemini prebuilt voice name (default: Sadachbia).",
         )
         parser.add_argument(
+            "--upload-gcs", action="store_true",
+            help=(
+                "Upload artifacts to the audio bucket under "
+                "audio_gemini/ and keep run state in GCS instead of "
+                "local files (Cloud Run Job mode; also enabled "
+                "automatically when CLOUD_RUN_JOB is set)."
+            ),
+        )
+        parser.add_argument(
             "--dry-run", action="store_true",
             help="List pending chapters; do not call the API.",
         )
@@ -164,13 +191,23 @@ class Command(BaseCommand):
             raise CommandError(
                 f"Unknown fileset_id: {options['fileset_id']!r}"
             )
-        output_dir = Path(
-            options["output_dir"] or _default_output_dir()
+        upload_gcs = (
+            options["upload_gcs"]
+            or bool(os.environ.get("CLOUD_RUN_JOB"))
         )
-        state = RunState(
-            Path(options["state_file"])
-            if options["state_file"] else None
-        )
+        voice_name = options["voice"] or DEFAULT_VOICE_NAME
+
+        if upload_gcs:
+            output_dir: Optional[Path] = None
+            state = GcsRunState(fileset_id, voice_name)
+        else:
+            output_dir = Path(
+                options["output_dir"] or _default_output_dir()
+            )
+            state = RunState(
+                Path(options["state_file"])
+                if options["state_file"] else None
+            )
 
         worklist = get_default_sword_client().list_chapters(
             fileset_id
@@ -198,8 +235,32 @@ class Command(BaseCommand):
             raise CommandError(
                 "No Gemini API keys configured. Add "
                 "GEMINI_API_KEY (a string or a list) to "
-                "config.yaml."
+                "config.yaml or the env-file secret."
             )
+
+        lock_day = None
+        if upload_gcs:
+            # Day-keyed run lock: serializes same-day executions,
+            # and a completed run makes later same-day triggers
+            # exit early (``already_completed``). A crashed run
+            # leaves a ``running`` lock that blocks reruns only
+            # until LOCK_STALE_HOURS — and never past today, since
+            # tomorrow uses a new day key.
+            lock_day = today_pacific()
+            acquired, lock_reason = gcs.acquire_run_lock(
+                fileset_id,
+                stale_after_hours=settings.LOCK_STALE_HOURS,
+                ym=lock_day,
+                mode="gemini",
+            )
+            if not acquired:
+                logger.info(
+                    "Skipping gemini run for %s on %s: %s",
+                    fileset_id, lock_day, lock_reason,
+                )
+                self.stdout.write(f"skipped reason={lock_reason}")
+                return
+
         client = GeminiTTSClient(
             api_keys=api_keys,
             min_interval_seconds=options["sleep_seconds"],
@@ -211,6 +272,7 @@ class Command(BaseCommand):
         )
 
         generated = 0
+        chars_used = 0
         reason = "all_done"
         max_requests = options["max_requests"]
         for book_id, chap in pending:
@@ -256,14 +318,27 @@ class Command(BaseCommand):
                     state.save()
 
             try:
-                write_chapter_artifacts(
-                    output_dir, fileset_id, book_id, chap,
-                    artifacts.mp3_bytes,
-                    artifacts.timestamps_payload,
-                )
-            except OSError as exc:
+                if upload_gcs:
+                    gcs.upload_chapter_artifacts(
+                        fileset_id, book_id, chap,
+                        artifacts.mp3_bytes,
+                        artifacts.timestamps_payload,
+                        voice_name,
+                        mode="gemini",
+                    )
+                else:
+                    write_chapter_artifacts(
+                        output_dir, fileset_id, book_id, chap,
+                        artifacts.mp3_bytes,
+                        artifacts.timestamps_payload,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                # Broad catch like generate_chapter_audio: an
+                # upload/disk failure must not kill the run —
+                # but the requests spent still counted (finally
+                # above already persisted them).
                 logger.exception(
-                    "Failed to write %s %s artifacts: %s",
+                    "Failed to persist %s %s artifacts: %s",
                     book_id, chap, exc,
                 )
                 continue
@@ -271,12 +346,38 @@ class Command(BaseCommand):
             state.mark_completed(book_id, chap)
             state.save()
             generated += 1
+            chars_used += artifacts.chars_used
             logger.info(
                 "Generated %s %s chars=%d duration=%.2fs "
                 "requests_today=%d",
                 book_id, chap, artifacts.chars_used,
                 artifacts.duration_seconds, state.requests_today,
             )
+
+        if upload_gcs:
+            # Mirror generate_chapter_audio: when every pending
+            # chapter hit the generic failure path the day's lock
+            # stays ``running`` — marking it completed would record
+            # a zero-artifact "success" and hide a real outage.
+            if (
+                pending and generated == 0
+                and reason == "all_done"
+            ):
+                reason = "all_failed"
+                logger.error(
+                    "All %d pending chapters failed; leaving the "
+                    "day lock un-completed.",
+                    len(pending),
+                )
+            else:
+                gcs.mark_run_complete(
+                    fileset_id,
+                    chars_used=chars_used,
+                    chapters_generated=generated,
+                    reason=reason,
+                    ym=lock_day,
+                    mode="gemini",
+                )
 
         self.stdout.write(
             f"done generated={generated} "
@@ -287,21 +388,26 @@ class Command(BaseCommand):
     @staticmethod
     def _pending(
         worklist,
-        state: RunState,
-        output_dir: Path,
+        state,
+        output_dir: Optional[Path],
         fileset_id: str,
     ) -> list:
         """Worklist minus completed chapters.
 
-        A chapter with both files already on disk but missing from
-        the state file (e.g. state was deleted) is marked complete
-        without re-synthesizing."""
+        Local mode: a chapter with both files already on disk but
+        missing from the state file (e.g. state was deleted) is
+        marked complete without re-synthesizing. GCS mode passes
+        ``output_dir=None`` — the artifact listing that backs
+        ``GcsRunState`` is already the on-"disk" check."""
         pending = []
         for book_id, chap in worklist:
             if state.is_completed(book_id, chap):
                 continue
-            if chapter_files_exist(
-                output_dir, fileset_id, book_id, chap,
+            if (
+                output_dir is not None
+                and chapter_files_exist(
+                    output_dir, fileset_id, book_id, chap,
+                )
             ):
                 state.mark_completed(book_id, chap)
                 continue

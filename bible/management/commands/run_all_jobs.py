@@ -24,6 +24,23 @@ JOBS = [
         ["--fileset-id", "LVSGLU8", "--mode", "both"],
         "dom:3",
     ),
+    # Gemini free-tier audio drip. The ``daily-gemini-audio`` Cloud
+    # Scheduler job triggers all-jobs daily but overrides the
+    # container args to ``--only generate_gemini_audio``, which
+    # reaches this entry. ``manual`` on purpose: an unfiltered
+    # scheduled pass (e.g. a future plain daily/monthly trigger of
+    # all-jobs, or a run whose arg override was lost) must not
+    # start it implicitly — only an explicit ``--only``/``--force``
+    # invocation runs it.
+    (
+        "generate_gemini_audio",
+        [
+            "--fileset-id", "LVSGLU8",
+            "--upload-gcs",
+            "--max-requests", "14",
+        ],
+        "manual",
+    ),
 ]
 
 

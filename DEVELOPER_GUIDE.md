@@ -1704,25 +1704,55 @@ logged and skipped, and the run exits non-zero naming the
 failures. `--only LABEL` runs one entry ignoring its schedule,
 `--force` runs all entries, `--dry-run` prints what would run.
 It currently lists `generate_chapter_audio` on `dom:3` (the
-monthly audio pass). `all-jobs` replaced the standalone
+monthly audio pass, which has no scheduler trigger) and
+`generate_gemini_audio` on `manual` (started daily by the
+`daily-gemini-audio` Cloud Scheduler job via a `jobs:run`
+container-args override of `--only generate_gemini_audio` —
+see `terraform/scheduler.tf`; `manual` keeps an unfiltered
+trigger from starting it). `all-jobs` replaced the standalone
 `audio-generator` Cloud Run Job; it reuses that job's runtime
 service account (still named `audio-generator`) and its
 `audio-generator` Artifact Registry image repo. The deploy
 workflow pins the Job to the
 freshly built image via `gcloud run jobs update all-jobs`.
 
-### Generated Audio (Gemini API free tier, local)
+### Generated Audio (Gemini API free tier)
 
 `manage.py generate_gemini_audio` synthesizes the same LVSGLU8
 worklist through the **Gemini API** `generateContent` endpoint
 (`gemini-2.5-flash-preview-tts`), which has a free tier — unlike
-Cloud TTS. It is a local-only command (run on each boot, e.g. via
-launchd) that drips through ~15 requests/day per project until all
-1,189 chapters exist; no GCS upload yet.
+Cloud TTS. It has two modes:
 
-- **Auth**: `GEMINI_API_KEY` in `config.yaml` (gitignored) — a
-  single string or a YAML list of keys (one per free-tier GCP
-  project), normalized to `settings.GEMINI_API_KEYS`. Keys travel
+- **Local** (default): run on each boot (e.g. via launchd);
+  writes MP3 + timestamps under `tts-out/` and resumes via the
+  gitignored `gemini-tts-state.json`.
+- **GCS** (`--upload-gcs`, auto-enabled when the `CLOUD_RUN_JOB`
+  env var is set): the mode used by the `all-jobs` sub-job —
+  artifacts upload to the audio bucket under
+  `audio_gemini/{fileset}/{voice}/{BOOK}/{CHAPTER}_audio.mp3`
+  (+ `_timestamps.json`), a distinct prefix from `audio/` and
+  `audio_chapter/` so nothing can collide. Nothing serves these
+  objects over the API yet — a future audio fileset id can map
+  to GCS mode `"gemini"` via `audio_mode_for_fileset()`.
+
+**GCS run state** (same bucket, all JSON):
+
+- Completion comes from the artifact listing itself — a chapter
+  with both objects counts as done.
+- The daily request counter lives in
+  `state/gemini/{fileset}/{voice}/{YYYY-MM-DD}.json` (Pacific
+  day) so a same-day job retry resumes the spend.
+- A **day-keyed run lock**
+  `state/lock/{fileset}/gemini/{YYYY-MM-DD}.json` serializes
+  same-day executions; a finished run marks it `completed` so
+  reruns exit early (`already_completed`), and an all-failed run
+  is left `running` rather than recorded as success.
+
+- **Auth**: `GEMINI_API_KEY` in `config.yaml` (gitignored) or in
+  the GCP `env-file` secret (the `all-jobs` container injects it
+  via `DOTENV`) — a single string or a list of keys (one per
+  free-tier GCP project; a .env value is comma-separated),
+  normalized to `settings.GEMINI_API_KEYS`. Keys travel
   in the `x-goog-api-key` header, never in URLs or logs.
 - **Segments**: each chapter splits into consecutive-verse
   segments under `--max-segment-chars` (default 3000; ~5 chars/sec
@@ -1733,16 +1763,23 @@ launchd) that drips through ~15 requests/day per project until all
   retries, bounded by a per-chapter retry budget.
 - **Pacing/quota**: `--sleep-seconds` (default 21, ~3 RPM) between
   calls; `--max-requests` (default 14) per day. HTTP 429 rotates to
-  the next key; all keys exhausted → stop for the day.
-- **Resume**: `gemini-tts-state.json` (gitignored, repo root)
-  tracks completed chapters + a request counter that resets at
-  midnight Pacific. Chapters already on disk count as done even
-  if the state file is lost.
-- **Output**: `tts-out/LVSGLU8/<BOOK>/<CH>.mp3` plus
+  the next key; all keys exhausted → stop for the day (a clean
+  exit 0 — `run_all_jobs` never reports the sub-job failed).
+- **Resume** (local mode): `gemini-tts-state.json` (gitignored,
+  repo root) tracks completed chapters + a request counter that
+  resets at midnight Pacific. Chapters already on disk count as
+  done even if the state file is lost.
+- **Output** (local mode): `tts-out/LVSGLU8/<BOOK>/<CH>.mp3` plus
   `<CH>_timestamps.json` — char-proportional verse-timestamp
   estimates with exact anchors at each synthesized segment
   boundary (Gemini TTS has no SSML-mark timepoints). MP3 encoding
   uses `lameenc` (no ffmpeg).
+- **Scheduling**: `terraform/scheduler.tf` `daily-gemini-audio`
+  fires `all-jobs` daily at 09:00 UTC — always after the
+  free-tier reset (midnight Pacific = 07:00–08:00 UTC). The
+  `jobs:run` body overrides container args to `--only
+  generate_gemini_audio`, so the still-unscheduled monthly
+  `dom:3` Google TTS entry can never piggyback on the trigger.
 
 ---
 
