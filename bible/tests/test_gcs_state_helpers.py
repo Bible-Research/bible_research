@@ -454,3 +454,94 @@ def test_upload_chapter_artifacts_invalidates_cache(fake_bucket):
     assert gcs.read_timestamps_json(
         "LVSGLU8", "JHN", 3, "v"
     )["data"] == "new"
+
+
+def test_chapter_object_paths_gemini_mode():
+    """Gemini artifacts get their own prefix so they can never
+    collide with (or be mistaken for) Cloud TTS output."""
+    audio, ts = gcs.chapter_object_paths(
+        "LVSGLU8", "JHN", 3, "Sadachbia", mode="gemini",
+    )
+    assert audio == (
+        "audio_gemini/LVSGLU8/Sadachbia/JHN/3_audio.mp3"
+    )
+    assert ts == (
+        "audio_gemini/LVSGLU8/Sadachbia/JHN/3_timestamps.json"
+    )
+
+
+def test_list_completed_chapters_gemini_isolation(fake_bucket):
+    """Only artifacts under audio_gemini/ count for mode="gemini"
+    — verse/chapter output must not mark Gemini work done."""
+    verse_audio, verse_ts = gcs.chapter_object_paths(
+        "LVSGLU8", "JHN", 3, "Sadachbia", mode="verse",
+    )
+    fake_bucket._store[verse_audio] = {"data": b"mp3", "gen": 1}
+    fake_bucket._store[verse_ts] = {"data": b"{}", "gen": 1}
+
+    assert gcs.list_completed_chapters(
+        "LVSGLU8", "Sadachbia", mode="gemini",
+    ) == set()
+
+    gemini_audio, gemini_ts = gcs.chapter_object_paths(
+        "LVSGLU8", "JHN", 3, "Sadachbia", mode="gemini",
+    )
+    fake_bucket._store[gemini_audio] = {"data": b"mp3", "gen": 1}
+    fake_bucket._store[gemini_ts] = {"data": b"{}", "gen": 1}
+    assert gcs.list_completed_chapters(
+        "LVSGLU8", "Sadachbia", mode="gemini",
+    ) == {("JHN", 3)}
+
+
+def test_gemini_daily_requests_round_trip(fake_bucket):
+    assert gcs.read_gemini_daily_requests(
+        "LVSGLU8", "Sadachbia", "2026-10-30",
+    ) == 0
+    gcs.write_gemini_daily_requests(
+        "LVSGLU8", "Sadachbia", "2026-10-30", 7,
+    )
+    assert gcs.read_gemini_daily_requests(
+        "LVSGLU8", "Sadachbia", "2026-10-30",
+    ) == 7
+    # A different Pacific day reads a different object -> fresh 0.
+    assert gcs.read_gemini_daily_requests(
+        "LVSGLU8", "Sadachbia", "2026-10-31",
+    ) == 0
+
+
+def test_gemini_daily_requests_corrupt_returns_zero(fake_bucket):
+    path = "state/gemini/LVSGLU8/Sadachbia/2026-10-30.json"
+    fake_bucket._store[path] = {"data": b"{bad", "gen": 1}
+    assert gcs.read_gemini_daily_requests(
+        "LVSGLU8", "Sadachbia", "2026-10-30",
+    ) == 0
+
+
+def test_gemini_lock_is_day_keyed(fake_bucket):
+    """``ym=<day>`` + ``mode="gemini"`` gives a per-day run lock:
+    a completed run blocks same-day reruns but never tomorrow's."""
+    ok, reason = gcs.acquire_run_lock(
+        "LVSGLU8", stale_after_hours=24,
+        ym="2026-10-30", mode="gemini",
+    )
+    assert ok and reason == "acquired"
+    assert (
+        "state/lock/LVSGLU8/gemini/2026-10-30.json"
+        in fake_bucket._store
+    )
+
+    gcs.mark_run_complete(
+        "LVSGLU8", chars_used=100, chapters_generated=2,
+        reason="all_done", ym="2026-10-30", mode="gemini",
+    )
+    ok, reason = gcs.acquire_run_lock(
+        "LVSGLU8", stale_after_hours=24,
+        ym="2026-10-30", mode="gemini",
+    )
+    assert not ok and reason == "already_completed"
+
+    ok, reason = gcs.acquire_run_lock(
+        "LVSGLU8", stale_after_hours=24,
+        ym="2026-10-31", mode="gemini",
+    )
+    assert ok and reason == "acquired"

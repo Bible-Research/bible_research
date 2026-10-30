@@ -45,9 +45,17 @@ def get_default_client() -> storage.Client:
 # historical ``audio/`` prefix so existing objects stay valid;
 # ``chapter`` writes whole-chapter-synthesized artifacts under a
 # parallel prefix so the two modes coexist without collisions.
+# ``gemini`` holds artifacts synthesized by the Gemini free-tier
+# pipeline (generate_gemini_audio --upload-gcs), ``edge`` the
+# Edge read-aloud endpoint (generate_edge_audio --upload-gcs,
+# default voice lv-LV-EveritaNeural). Nothing reads either yet —
+# a future audio fileset id can map to one via
+# sword.registry.audio_mode_for_fileset.
 _MODE_PREFIXES = {
     "verse": "audio",
     "chapter": "audio_chapter",
+    "gemini": "audio_gemini",
+    "edge": "audio_edge",
 }
 
 
@@ -522,3 +530,70 @@ def mark_run_complete(
         logger.warning(
             "Lock object changed concurrently; cannot mark complete."
         )
+
+
+def _gemini_requests_path(
+    fileset_id: str, voice_name: str, day: str,
+) -> str:
+    """Path of the per-day Gemini request counter object.
+
+    ``state/gemini/{fileset}/{voice}/{YYYY-MM-DD}.json`` — keyed by
+    the caller-provided day string (the command passes the
+    America/Los_Angeles date, matching the free-tier quota reset at
+    midnight Pacific). A new day means a new object, so a stale
+    counter can never block a fresh day's run; leftover objects are
+    a few hundred bytes each."""
+    return f"state/gemini/{fileset_id}/{voice_name}/{day}.json"
+
+
+def read_gemini_daily_requests(
+    fileset_id: str, voice_name: str, day: str,
+) -> int:
+    """Requests already spent on ``day``; 0 when absent/corrupt.
+
+    A corrupt counter degrades to 0 — the run may then overshoot
+    the free-tier cap, which the API itself enforces with 429s
+    (surfaced as ``QuotaExceeded`` and a clean exit), so this is
+    the safe failure direction."""
+    blob = _bucket().blob(
+        _gemini_requests_path(fileset_id, voice_name, day)
+    )
+    if not blob.exists():
+        return 0
+    try:
+        return int(
+            json.loads(blob.download_as_bytes()).get(
+                "requests_today", 0
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Failed to parse gemini requests object %s", blob.name,
+        )
+        return 0
+
+
+def write_gemini_daily_requests(
+    fileset_id: str,
+    voice_name: str,
+    day: str,
+    requests_today: int,
+) -> None:
+    """Persist the day's request spend.
+
+    Plain overwrite, no generation match: the Cloud Scheduler
+    triggers one run per day and the day-keyed lock object
+    (``acquire_run_lock`` with ``ym=<day>``, ``mode="gemini"``)
+    serializes same-day executions, so a lost update requires two
+    concurrent writers that cannot normally exist."""
+    blob = _bucket().blob(
+        _gemini_requests_path(fileset_id, voice_name, day)
+    )
+    blob.upload_from_string(
+        json.dumps({
+            "day": day,
+            "requests_today": int(requests_today),
+            "updated_at": _utc_naive_now().isoformat(),
+        }),
+        content_type="application/json",
+    )
