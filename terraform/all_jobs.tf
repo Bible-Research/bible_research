@@ -91,6 +91,21 @@ resource "google_cloud_run_v2_job" "all_jobs" {
           name  = "MONTHLY_TTS_CHAR_LIMIT"
           value = "450000"
         }
+        # STT free tier is 60 min/month; 3300s keeps headroom
+        # under it. `default` is the only long-form V1 model
+        # lv-LV supports (`latest_long` is not offered for it).
+        env {
+          name  = "MONTHLY_STT_SECONDS_LIMIT"
+          value = "3300"
+        }
+        env {
+          name  = "STT_LANGUAGE_CODE"
+          value = "lv-LV"
+        }
+        env {
+          name  = "STT_MODEL"
+          value = "default"
+        }
         env {
           name  = "LOCK_STALE_HOURS"
           value = "24"
@@ -133,12 +148,25 @@ resource "google_cloud_run_v2_job" "all_jobs" {
   }
 }
 
+# The STT timestamps sub-job needs recognition access: the
+# minimal predefined role granting speech.recognizers.recognize
+# (LongRunningRecognize) is roles/speech.client.
+resource "google_project_iam_member" "audio_generator_speech_client" {
+  project = var.project_id
+  role    = "roles/speech.client"
+  member  = "serviceAccount:${google_service_account.audio_generator.email}"
+}
+
 # github-deployer needs to act as the all-jobs runtime SA when running
 # ``gcloud run jobs update all-jobs`` from the Deploy to App Engine
 # workflow. Kept scoped to this specific SA rather than granted
 # project-wide.
+# NOTE: the resource header below exceeds the workspace 79-char
+# limit — HCL resource labels cannot be split across lines and
+# renaming the label would force a destroy/recreate of the
+# binding, so it is intentionally left long.
 resource "google_service_account_iam_member" "github_deployer_act_as_audio_generator" {
   service_account_id = google_service_account.audio_generator.name
   role               = "roles/iam.serviceAccountUser"
-  member             = "serviceAccount:${google_service_account.github_deployer.email}"
+  member             = google_service_account.github_deployer.member
 }

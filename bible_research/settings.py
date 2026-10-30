@@ -357,6 +357,21 @@ LOCK_STALE_HOURS = int(
     _audio_settings_source.get("LOCK_STALE_HOURS", 24)
 )
 
+# Cloud Speech-to-Text (V1) settings for the self-generated
+# timestamps job. The free tier is 60 min/month; 3300s keeps
+# headroom under it. ``default`` is the only long-form model
+# lv-LV supports in V1 (``latest_long`` is not offered for it).
+MONTHLY_STT_SECONDS_LIMIT = int(
+    _audio_settings_source.get("MONTHLY_STT_SECONDS_LIMIT", 3300)
+)
+STT_LANGUAGE_CODE = _audio_settings_source.get(
+    "STT_LANGUAGE_CODE", "lv-LV"
+)
+STT_MODEL = _audio_settings_source.get("STT_MODEL", "default")
+STT_LRO_TIMEOUT_SECONDS = int(
+    _audio_settings_source.get("STT_LRO_TIMEOUT_SECONDS", 900)
+)
+
 # Gemini API key(s) for the free-tier generateContent TTS endpoint.
 # config.yaml may set GEMINI_API_KEY to a single string or a YAML
 # list (one key per free-tier project); a .env value is a

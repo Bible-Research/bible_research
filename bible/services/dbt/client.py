@@ -273,6 +273,51 @@ class DBTClient:
                 **kwargs
             )
 
+    def get_fileset_files(
+        self,
+        fileset_id: str,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        List the audio files a fileset actually covers.
+
+        ``GET /bibles/filesets/{fileset_id}`` returns one row per
+        chapter file for the fileset's *own* coverage (unlike
+        ``/bibles/{id}/book``, which is keyed on the bible id and
+        unions every sibling fileset). Each row carries
+        ``book_id``, ``chapter_start``, ``path`` (signed MP3 URL)
+        and ``duration`` — the generate_audio_timestamps worklist
+        needs exactly this.
+
+        Uses requests directly — the generated OpenAPI client has
+        no method for this route.
+
+        Args:
+            fileset_id: Audio fileset ID (e.g. 'LATLVRN1DA')
+            **kwargs: Additional query parameters
+
+        Returns:
+            Dictionary with file rows under 'data'
+        """
+        params = kwargs.copy()
+        params['v'] = 4
+        params['key'] = self.api_key
+
+        url = f"{self.base_url}/bibles/filesets/{fileset_id}"
+
+        try:
+            response = self.session.get(
+                url, params=params,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            _log_request_error(
+                "DBT fileset files request error", e
+            )
+            raise
+
     def get_timestamps(
         self,
         fileset_id: str,
