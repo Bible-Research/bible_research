@@ -1704,12 +1704,63 @@ logged and skipped, and the run exits non-zero naming the
 failures. `--only LABEL` runs one entry ignoring its schedule,
 `--force` runs all entries, `--dry-run` prints what would run.
 It currently lists `generate_chapter_audio` on `dom:3` (the
-monthly audio pass). `all-jobs` replaced the standalone
+monthly audio pass) and `generate_audio_timestamps` on `dom:10`
+(the monthly STT timestamps pass). `all-jobs` replaced the
+standalone
 `audio-generator` Cloud Run Job; it reuses that job's runtime
 service account (still named `audio-generator`) and its
 `audio-generator` Artifact Registry image repo. The deploy
 workflow pins the Job to the
 freshly built image via `gcloud run jobs update all-jobs`.
+
+### Generated Timestamps (Cloud STT)
+
+Some DBT audio filesets — the Latvian 1953 LVR (`LATLVRN1DA`,
+`LATLVRP1DA`) and LAVNLI OT partials (`LATBSLP1DA`,
+`LATBSLP2DA`) — have no DBT verse timestamps, so
+`generate_audio_timestamps` produces them with Cloud
+Speech-to-Text V1 (the only tier with a 60 min/month free
+allowance) and writes `timestamps_generated/` artifacts into
+the audio bucket. The `/api/v1/bible/timestamps/` contract is
+unchanged: `DbtProvider.get_timestamps` falls back to the
+generated artifact when DBT answers empty (or fails) for a
+fileset registered in
+`bible/services/dbt/timestamps_registry.py`
+(`GENERATED_TIMESTAMPS_FILESETS`, `-opus16` suffix stripped —
+opus/webm variants are the same recordings). Missing artifacts
+still answer `{"data": []}`.
+
+**Worklist**: `GET /bibles/filesets/{fileset_id}` — the
+fileset's real chapter coverage (one row per chapter file,
+carrying the signed `path` MP3 URL and `duration`) — minus
+`timestamps_generated/` artifacts already present. A chapter
+where DBT suddenly serves timestamps is skipped (never spend
+STT budget where coverage exists); a *failed* DBT check means
+"proceed to generate".
+
+**Per chapter**: download the DBT MP3 → stage to `stt_staging/`
+→ `long_running_recognize` (MP3 encoding inferred, no
+`sample_rate_hertz`) → align word offsets to the reference
+text (`LVSGLU8` SWORD text via `difflib` in
+`google_stt/aligner.py`; verses without a matched word
+interpolate between anchored neighbours; < 2 anchors fails)
+→ upload the artifact (`meta.source: stt_v1`,
+`alignment_score`, `low_confidence` below
+`MIN_ALIGNMENT_SCORE`/per-fileset override) → delete staging.
+
+**Budget**: global `state/stt-usage/{YYYY-MM}.json` seconds
+counter (STT bills per account, in 1-second increments once
+the LRO completes — even on empty results), capped by
+`MONTHLY_STT_SECONDS_LIMIT` (3300s ≈ 55 min, headroom under
+the 60 min free tier). Per-fileset monthly lock at
+`state/stt-lock/{fileset}/{YYYY-MM}.json`.
+
+**Config env vars**: `MONTHLY_STT_SECONDS_LIMIT`,
+`STT_LANGUAGE_CODE` (`lv-LV`), `STT_MODEL` (`default` — the
+only long-form V1 model lv-LV supports), plus the shared
+`AUDIO_BUCKET_NAME` and `LOCK_STALE_HOURS`. Requires
+`speech.googleapis.com` and `roles/speech.client` on the
+`audio-generator` SA (both in terraform).
 
 ### Generated Audio (Gemini API free tier, local)
 

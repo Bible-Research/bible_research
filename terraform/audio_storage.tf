@@ -23,6 +23,22 @@ resource "google_storage_bucket" "bible_audio" {
     }
   }
 
+  # STT LRO input staging: the job deletes stt_staging/ objects
+  # after recognition finishes; this rule is the belt-and-braces
+  # backstop when it dies first. NOTE: with versioning enabled a
+  # Delete action only makes blobs noncurrent — bytes are freed
+  # by the noncurrent-after-30-days rule above (~37-day
+  # effective retention). Harmless at these sizes.
+  lifecycle_rule {
+    condition {
+      age            = 7
+      matches_prefix = ["stt_staging/"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
   # Belt-and-braces: orphan multipart uploads should also be cleaned
   # up rather than lingering as billable fragments.
   lifecycle_rule {

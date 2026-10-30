@@ -53,6 +53,9 @@ from bible.services.apibible.registry import (
     is_apibible_fileset,
 )
 from bible.services.dbt.client import get_default_dbt_client
+from bible.services.dbt.timestamps_registry import (
+    generated_timestamps_base_id,
+)
 from bible.services.esv.client import get_default_esv_client
 from bible.services.esv.registry import (
     canonical_esv_fileset_id,
@@ -892,16 +895,52 @@ class DbtProvider(Provider):
         }
 
     def get_timestamps(self, book_id, chapter):
-        result = get_default_dbt_client().get_timestamps(
-            self.fileset_id, book_id, chapter
-        )
-        return [
+        """DBT timestamps, with a generated-artifact fallback.
+
+        DBT has no timestamps for the filesets in
+        ``GENERATED_TIMESTAMPS_FILESETS`` (e.g. the Latvian 1953
+        LVR / LAVNLI audio). When DBT answers empty — or the
+        timestamps call itself fails — a registered fileset reads
+        its ``timestamps_generated/`` artifact instead. Artifact
+        missing returns ``[]`` (the existing 200-empty contract)
+        when DBT answered, or re-raises the DBT error when it
+        did not (preserving today's 502 when we have nothing
+        better)."""
+        try:
+            result = get_default_dbt_client().get_timestamps(
+                self.fileset_id, book_id, chapter
+            )
+        except Exception:
+            generated = self._generated_timestamps(book_id, chapter)
+            if generated is not None:
+                return generated
+            raise
+        data = [
             {
                 'verse_start': item.get('verse_start'),
                 'timestamp': item.get('timestamp'),
             }
             for item in (result.get('data') or [])
         ]
+        if data:
+            return data
+        generated = self._generated_timestamps(book_id, chapter)
+        return generated if generated is not None else []
+
+    def _generated_timestamps(self, book_id, chapter):
+        """Return the generated ``{verse_start, timestamp}`` list
+        for this fileset, or ``None`` when the id is unregistered
+        or no artifact exists yet."""
+        base_id = generated_timestamps_base_id(self.fileset_id)
+        if base_id is None:
+            return None
+        try:
+            payload = gcs.read_generated_timestamps_json(
+                base_id, book_id, chapter,
+            )
+        except gcs_exceptions.NotFound:
+            return None
+        return payload.get('data') or []
 
     def get_copyright(self):
         result = get_default_dbt_client().get_copyright(

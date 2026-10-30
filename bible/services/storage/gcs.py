@@ -326,16 +326,26 @@ def _state_object_path(
     return f"state/{kind}/{fileset_id}/{mode}/{ym}.json"
 
 
-def read_monthly_usage(fileset_id: str, ym: str | None = None) -> int:
-    ym = ym or get_current_year_month()
-    blob = _bucket().blob(_state_object_path("usage", fileset_id, ym))
+def _read_usage(path: str, usage_key: str) -> int:
+    """Read a monthly usage counter object; 0 when missing or
+    unparseable."""
+    blob = _bucket().blob(path)
     if not blob.exists():
         return 0
     try:
-        return int(json.loads(blob.download_as_bytes()).get("chars_used", 0))
+        return int(
+            json.loads(blob.download_as_bytes()).get(usage_key, 0)
+        )
     except Exception:
         logger.exception("Failed to parse usage object %s", blob.name)
         return 0
+
+
+def read_monthly_usage(fileset_id: str, ym: str | None = None) -> int:
+    ym = ym or get_current_year_month()
+    return _read_usage(
+        _state_object_path("usage", fileset_id, ym), "chars_used",
+    )
 
 
 _USAGE_MAX_CONFLICT_RETRIES = 8
@@ -343,12 +353,68 @@ _USAGE_RETRY_BASE_SLEEP_SECONDS = 0.1
 
 
 class UsageIncrementConflict(Exception):
-    """Raised when ``increment_monthly_usage`` cannot win the
+    """Raised when a monthly-usage increment cannot win the
     read-modify-write race within ``_USAGE_MAX_CONFLICT_RETRIES``
     attempts. The caller must decide whether to abort the run — in
     practice we expect zero conflicts because the run lock serializes
     writers, so repeated failures almost always indicate a real problem
     (IAM misconfig, another process running, etc.)."""
+
+
+def _increment_usage(
+    path: str,
+    usage_key: str,
+    delta: int,
+    max_retries: int,
+    _sleep=None,
+) -> int:
+    """Atomic-ish ``if_generation_match`` increment of a usage
+    object at ``path`` keyed by ``usage_key``. Shared by the TTS
+    char counter and the STT seconds counter."""
+    sleep = _sleep or time.sleep
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        blob = _bucket().blob(path)
+        if blob.exists():
+            blob.reload()
+            current = int(
+                json.loads(blob.download_as_bytes()).get(usage_key, 0)
+            )
+            new_total = current + delta
+            payload = json.dumps({
+                usage_key: new_total,
+                "updated_at": _utc_naive_now().isoformat(),
+            })
+            try:
+                blob.upload_from_string(
+                    payload,
+                    content_type="application/json",
+                    if_generation_match=blob.generation,
+                )
+                return new_total
+            except _GCS_UPLOAD_CONFLICT as exc:
+                last_exc = exc
+        else:
+            payload = json.dumps({
+                usage_key: delta,
+                "updated_at": _utc_naive_now().isoformat(),
+            })
+            try:
+                blob.upload_from_string(
+                    payload,
+                    content_type="application/json",
+                    if_generation_match=0,
+                )
+                return delta
+            except _GCS_UPLOAD_CONFLICT as exc:
+                last_exc = exc
+        if attempt < max_retries:
+            sleep(_USAGE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
+
+    raise UsageIncrementConflict(
+        f"usage increment for {path} failed after "
+        f"{max_retries + 1} attempts: {last_exc}"
+    )
 
 
 def increment_monthly_usage(
@@ -365,72 +431,16 @@ def increment_monthly_usage(
     IAM/config regression cannot spin the Cloud Run Job until its 3600s
     timeout fires. In normal operation the run lock guarantees a single
     writer, so conflicts should be 0."""
-    sleep = _sleep or time.sleep
     ym = ym or get_current_year_month()
     path = _state_object_path("usage", fileset_id, ym)
-    last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
-        blob = _bucket().blob(path)
-        if blob.exists():
-            blob.reload()
-            current = int(
-                json.loads(blob.download_as_bytes()).get("chars_used", 0)
-            )
-            new_total = current + delta
-            payload = json.dumps({
-                "chars_used": new_total,
-                "updated_at": _utc_naive_now().isoformat(),
-            })
-            try:
-                blob.upload_from_string(
-                    payload,
-                    content_type="application/json",
-                    if_generation_match=blob.generation,
-                )
-                return new_total
-            except _GCS_UPLOAD_CONFLICT as exc:
-                last_exc = exc
-        else:
-            payload = json.dumps({
-                "chars_used": delta,
-                "updated_at": _utc_naive_now().isoformat(),
-            })
-            try:
-                blob.upload_from_string(
-                    payload,
-                    content_type="application/json",
-                    if_generation_match=0,
-                )
-                return delta
-            except _GCS_UPLOAD_CONFLICT as exc:
-                last_exc = exc
-        if attempt < max_retries:
-            sleep(_USAGE_RETRY_BASE_SLEEP_SECONDS * (2 ** attempt))
-
-    raise UsageIncrementConflict(
-        f"increment_monthly_usage for {fileset_id} {ym} failed after "
-        f"{max_retries + 1} attempts: {last_exc}"
+    return _increment_usage(
+        path, "chars_used", delta, max_retries, _sleep=_sleep,
     )
 
 
-def acquire_run_lock(
-    fileset_id: str,
-    stale_after_hours: int,
-    ym: str | None = None,
-    mode: str = "verse",
-) -> Tuple[bool, str]:
-    """Try to acquire the once-per-month run lock for ``mode``.
-
-    Returns ``(acquired, reason)``. ``reason`` is one of:
-      - ``"acquired"`` — fresh lock created; caller may proceed.
-      - ``"stale_overridden"`` — previous lock was older than
-        ``stale_after_hours`` and we replaced it; caller may proceed.
-      - ``"already_completed"`` — this month's run already finished.
-        Caller must exit without doing work.
-      - ``"active_run"`` — another run is in progress and is fresh.
-        Caller must exit without doing work."""
-    ym = ym or get_current_year_month()
-    path = _state_object_path("lock", fileset_id, ym, mode=mode)
+def _acquire_lock(path: str, stale_after_hours: int) -> Tuple[bool, str]:
+    """Shared once-per-month lock acquisition over the lock
+    object at ``path``."""
     blob = _bucket().blob(path)
     now = _utc_naive_now()
 
@@ -488,6 +498,53 @@ def acquire_run_lock(
         return False, "active_run"
 
 
+def acquire_run_lock(
+    fileset_id: str,
+    stale_after_hours: int,
+    ym: str | None = None,
+    mode: str = "verse",
+) -> Tuple[bool, str]:
+    """Try to acquire the once-per-month run lock for ``mode``.
+
+    Returns ``(acquired, reason)``. ``reason`` is one of:
+      - ``"acquired"`` — fresh lock created; caller may proceed.
+      - ``"stale_overridden"`` — previous lock was older than
+        ``stale_after_hours`` and we replaced it; caller may proceed.
+      - ``"already_completed"`` — this month's run already finished.
+        Caller must exit without doing work.
+      - ``"active_run"`` — another run is in progress and is fresh.
+        Caller must exit without doing work."""
+    ym = ym or get_current_year_month()
+    path = _state_object_path("lock", fileset_id, ym, mode=mode)
+    return _acquire_lock(path, stale_after_hours)
+
+
+def _mark_lock_complete(path: str, metrics: dict) -> None:
+    """Mark the lock object at ``path`` as completed, merging
+    ``metrics`` (per-job spend/count fields) into the payload.
+    Idempotent."""
+    blob = _bucket().blob(path)
+    if not blob.exists():
+        return
+    blob.reload()
+    existing = json.loads(blob.download_as_bytes())
+    existing.update({
+        "status": "completed",
+        "completed_at": _utc_naive_now().isoformat(),
+    })
+    existing.update(metrics)
+    try:
+        blob.upload_from_string(
+            json.dumps(existing),
+            content_type="application/json",
+            if_generation_match=blob.generation,
+        )
+    except _GCS_UPLOAD_CONFLICT:
+        logger.warning(
+            "Lock object changed concurrently; cannot mark complete."
+        )
+
+
 def mark_run_complete(
     fileset_id: str,
     chars_used: int,
@@ -500,25 +557,218 @@ def mark_run_complete(
     Idempotent."""
     ym = ym or get_current_year_month()
     path = _state_object_path("lock", fileset_id, ym, mode=mode)
-    blob = _bucket().blob(path)
-    if not blob.exists():
-        return
-    blob.reload()
-    existing = json.loads(blob.download_as_bytes())
-    existing.update({
-        "status": "completed",
-        "completed_at": _utc_naive_now().isoformat(),
+    _mark_lock_complete(path, {
         "chars_used": chars_used,
         "chapters_generated": chapters_generated,
         "reason": reason,
     })
-    try:
-        blob.upload_from_string(
-            json.dumps(existing),
-            content_type="application/json",
-            if_generation_match=blob.generation,
-        )
-    except _GCS_UPLOAD_CONFLICT:
-        logger.warning(
-            "Lock object changed concurrently; cannot mark complete."
-        )
+
+
+# ---------------------------------------------------------------------
+# STT-generated verse timestamps
+#
+# ``generate_audio_timestamps`` writes ``timestamps_generated/``
+# artifacts for DBT audio filesets that have no DBT timestamps
+# (``bible/services/dbt/timestamps_registry.py``); the serving
+# path reads them through ``read_generated_timestamps_json`` when
+# DBT answers empty. GCS layout:
+#
+#   timestamps_generated/{FILESET}/{BOOK}/{CH}_timestamps.json
+#   stt_staging/{FILESET}/{BOOK}/{CH}.mp3   # LRO input, deleted
+#                                         # after the LRO finishes
+#   state/stt-usage/{YYYY-MM}.json        # GLOBAL seconds counter
+#                                         # (STT bills per account)
+#   state/stt-lock/{FILESET}/{YYYY-MM}.json
+# ---------------------------------------------------------------------
+
+_GENERATED_TIMESTAMPS_PREFIX = "timestamps_generated"
+_STT_STAGING_PREFIX = "stt_staging"
+
+
+def generated_timestamps_object_path(
+    fileset_id: str, book_id: str, chapter: int,
+) -> str:
+    return (
+        f"{_GENERATED_TIMESTAMPS_PREFIX}/{fileset_id}"
+        f"/{book_id}/{int(chapter)}_timestamps.json"
+    )
+
+
+def stt_staging_object_path(
+    fileset_id: str, book_id: str, chapter: int,
+) -> str:
+    return (
+        f"{_STT_STAGING_PREFIX}/{fileset_id}"
+        f"/{book_id}/{int(chapter)}.mp3"
+    )
+
+
+def _generated_timestamps_cache_key(
+    fileset_id: str, book_id: str, chapter: int,
+) -> str:
+    return (
+        f"v1:gen-ts:{fileset_id}:{book_id}:{int(chapter)}"
+    )
+
+
+def read_generated_timestamps_json(
+    fileset_id: str, book_id: str, chapter: int,
+) -> dict:
+    """Read a ``timestamps_generated`` artifact, cached like
+    ``read_timestamps_json`` under a separate key prefix."""
+    cache_key = _generated_timestamps_cache_key(
+        fileset_id, book_id, chapter,
+    )
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    blob = _bucket().blob(
+        generated_timestamps_object_path(fileset_id, book_id, chapter)
+    )
+    payload = json.loads(blob.download_as_bytes())
+    # Only successful reads are cached — a ``NotFound`` miss must
+    # become visible as soon as the artifact is uploaded.
+    cache.set(
+        cache_key, payload, TIMESTAMPS_CACHE_TTL_SECONDS,
+    )
+    return payload
+
+
+def upload_generated_timestamps(
+    fileset_id: str,
+    book_id: str,
+    chapter: int,
+    payload: dict,
+) -> None:
+    """Write the generated timestamps artifact. Drops the locmem
+    read cache entry in this process (same-process readers only —
+    the writer runs in the Cloud Run Job)."""
+    bucket = _bucket()
+    path = generated_timestamps_object_path(
+        fileset_id, book_id, chapter,
+    )
+    bucket.blob(path).upload_from_string(
+        json.dumps(payload, ensure_ascii=False),
+        content_type="application/json",
+    )
+    cache.delete(
+        _generated_timestamps_cache_key(fileset_id, book_id, chapter)
+    )
+    logger.info(
+        "Uploaded generated timestamps: gs://%s/%s",
+        bucket.name, path,
+    )
+
+
+def list_generated_chapters(
+    fileset_id: str,
+) -> Set[Tuple[str, int]]:
+    """Return the ``(book_id, chapter)`` pairs that already have a
+    ``timestamps_generated`` artifact — progress is derived from
+    artifact presence, like ``list_completed_chapters``."""
+    prefix = f"{_GENERATED_TIMESTAMPS_PREFIX}/{fileset_id}/"
+    done: Set[Tuple[str, int]] = set()
+    for blob in _bucket().list_blobs(prefix=prefix):
+        # name = <prefix>/<fileset>/<BOOK>/<CH>_timestamps.json
+        rest = blob.name[len(prefix):]
+        try:
+            book_id, fname = rest.split("/", 1)
+        except ValueError:
+            continue
+        if not fname.endswith("_timestamps.json"):
+            continue
+        try:
+            chap = int(fname[: -len("_timestamps.json")])
+        except ValueError:
+            continue
+        done.add((book_id, chap))
+    return done
+
+
+def upload_stt_staging_audio(
+    fileset_id: str,
+    book_id: str,
+    chapter: int,
+    mp3_bytes: bytes,
+) -> str:
+    """Upload the chapter MP3 to ``stt_staging/`` for the STT LRO
+    and return its ``gs://`` URI."""
+    path = stt_staging_object_path(fileset_id, book_id, chapter)
+    bucket = _bucket()
+    bucket.blob(path).upload_from_file(
+        BytesIO(mp3_bytes), content_type="audio/mpeg",
+    )
+    return f"gs://{bucket.name}/{path}"
+
+
+def delete_stt_staging_audio(
+    fileset_id: str, book_id: str, chapter: int,
+) -> None:
+    """Delete the staged MP3 once the LRO has finished. The
+    ``stt_staging/`` lifecycle rule is the backstop when the job
+    dies before reaching this."""
+    _bucket().blob(
+        stt_staging_object_path(fileset_id, book_id, chapter)
+    ).delete()
+
+
+def _stt_usage_path(ym: str) -> str:
+    """Global STT seconds counter — unlike the TTS counter this
+    is NOT per-fileset: STT bills per account, so every fileset's
+    run draws from the same monthly pool."""
+    return f"state/stt-usage/{ym}.json"
+
+
+def _stt_lock_path(fileset_id: str, ym: str) -> str:
+    return f"state/stt-lock/{fileset_id}/{ym}.json"
+
+
+def read_stt_monthly_usage(ym: str | None = None) -> int:
+    ym = ym or get_current_year_month()
+    return _read_usage(_stt_usage_path(ym), "seconds_used")
+
+
+def increment_stt_monthly_usage(
+    delta: int,
+    ym: str | None = None,
+    max_retries: int = _USAGE_MAX_CONFLICT_RETRIES,
+    _sleep=None,
+) -> int:
+    """Increment the global STT seconds counter; returns the new
+    total. Same bounded read-modify-write semantics as
+    ``increment_monthly_usage``."""
+    ym = ym or get_current_year_month()
+    return _increment_usage(
+        _stt_usage_path(ym), "seconds_used", delta,
+        max_retries, _sleep=_sleep,
+    )
+
+
+def acquire_stt_run_lock(
+    fileset_id: str,
+    stale_after_hours: int,
+    ym: str | None = None,
+) -> Tuple[bool, str]:
+    """Try to acquire this month's STT run lock for
+    ``fileset_id``. Same ``(acquired, reason)`` contract as
+    ``acquire_run_lock``."""
+    ym = ym or get_current_year_month()
+    return _acquire_lock(
+        _stt_lock_path(fileset_id, ym), stale_after_hours,
+    )
+
+
+def mark_stt_run_complete(
+    fileset_id: str,
+    seconds_used: int,
+    chapters_generated: int,
+    reason: str,
+    ym: str | None = None,
+) -> None:
+    """Mark this month's STT lock as completed. Idempotent."""
+    ym = ym or get_current_year_month()
+    _mark_lock_complete(_stt_lock_path(fileset_id, ym), {
+        "seconds_used": seconds_used,
+        "chapters_generated": chapters_generated,
+        "reason": reason,
+    })
