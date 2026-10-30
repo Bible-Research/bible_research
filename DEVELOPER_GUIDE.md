@@ -1704,12 +1704,13 @@ logged and skipped, and the run exits non-zero naming the
 failures. `--only LABEL` runs one entry ignoring its schedule,
 `--force` runs all entries, `--dry-run` prints what would run.
 It currently lists `generate_chapter_audio` on `dom:3` (the
-monthly audio pass, which has no scheduler trigger) and
-`generate_gemini_audio` on `manual` (started daily by the
-`daily-gemini-audio` Cloud Scheduler job via a `jobs:run`
-container-args override of `--only generate_gemini_audio` —
-see `terraform/scheduler.tf`; `manual` keeps an unfiltered
-trigger from starting it). `all-jobs` replaced the standalone
+monthly audio pass, which has no scheduler trigger) plus
+`generate_gemini_audio` and `generate_edge_audio` on `manual`
+(the Edge entry is started daily by the `daily-edge-audio`
+Cloud Scheduler job via a `jobs:run` container-args override
+of `--only generate_edge_audio` — see
+`terraform/scheduler.tf`; `manual` keeps an unfiltered trigger
+from starting either). `all-jobs` replaced the standalone
 `audio-generator` Cloud Run Job; it reuses that job's runtime
 service account (still named `audio-generator`) and its
 `audio-generator` Artifact Registry image repo. The deploy
@@ -1774,12 +1775,45 @@ Cloud TTS. It has two modes:
   estimates with exact anchors at each synthesized segment
   boundary (Gemini TTS has no SSML-mark timepoints). MP3 encoding
   uses `lameenc` (no ffmpeg).
-- **Scheduling**: `terraform/scheduler.tf` `daily-gemini-audio`
-  fires `all-jobs` daily at 09:00 UTC — always after the
-  free-tier reset (midnight Pacific = 07:00–08:00 UTC). The
-  `jobs:run` body overrides container args to `--only
-  generate_gemini_audio`, so the still-unscheduled monthly
-  `dom:3` Google TTS entry can never piggyback on the trigger.
+- **Scheduling**: `manual` only — the Gemini entry is no
+  longer the daily trigger's target (Edge is, see below). It
+  can still be run on demand via `gcloud run jobs execute
+  all-jobs --overrides` with `--only generate_gemini_audio`.
+
+### Generated Audio (Edge read-aloud TTS — Everita)
+
+`manage.py generate_edge_audio` synthesizes the same LVSGLU8
+worklist through the **Microsoft Edge read-aloud endpoint**
+(`edge-tts` package, `lv-LV-EveritaNeural` by default — the
+production voice chosen from the local voice comparison). It
+is free and keyless (the same endpoint Edge's browser
+read-aloud uses), so there is no API key, char budget, or
+daily quota — runs are bounded by `--max-chapters` (default
+60) and `--max-minutes` (default 60) instead, keeping each
+invocation inside the Job's 5400 s timeout. Same dual modes
+as the Gemini command (`--upload-gcs` / `CLOUD_RUN_JOB`
+auto-detect; artifacts under `audio_edge/`, GCS mode
+`"edge"`), minus the request counter — completion comes from
+the object listing alone. The day-keyed run lock lives at
+`state/lock/{fileset}/edge/{YYYY-MM-DD}.json`.
+
+Differences from the Gemini pipeline:
+
+- **Per-verse synthesis**: one request per verse (each verse
+  is its own `edge_tts.Communicate`), MP3 frames
+  byte-concatenated (48 kbps CBR — the only output format the
+  endpoint honors). Verse timestamps are therefore EXACT
+  cumulative stream durations, not estimates.
+- **Output**: MP3 48 kbps CBR from the endpoint directly —
+  no `lameenc` re-encode.
+- **Pacing**: `--sleep-seconds` (default 0.5) between verse
+  calls; retries (3 attempts, 2 s backoff) absorb the
+  endpoint's occasional `NoAudioReceived`/WSS drops.
+- **Scheduling**: `terraform/scheduler.tf` `daily-edge-audio`
+  fires `all-jobs` daily at 09:00 UTC with container args
+  `--only generate_edge_audio`; the unscheduled monthly
+  `dom:3` Google TTS entry can never piggyback (it needs a
+  plain run on day 3, which no trigger performs).
 
 ---
 

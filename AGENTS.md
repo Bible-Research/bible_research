@@ -297,27 +297,32 @@ resolved:
   stage only files you changed.
 - `terraform/scheduler.tf`: the *monthly* Google TTS Cloud
   Scheduler stays intentionally commented out — do NOT enable it.
-  The `daily-gemini-audio` job IS enabled: it triggers `all-jobs`
+  The `daily-edge-audio` job IS enabled: it triggers `all-jobs`
   daily with a `jobs:run` container-args override of `--only
-  generate_gemini_audio`, so the monthly `dom:3` entry cannot
+  generate_edge_audio`, so the monthly `dom:3` entry cannot
   piggyback on the trigger.
 - `terraform/all_jobs.tf`: the single `all-jobs` Cloud Run Job
   replaced the per-task `audio-generator` job (it reuses that SA and
   image repo, both still named `audio-generator`). Sub-jobs are
   listed in the `JOBS` table of
   `bible/management/commands/run_all_jobs.py` —
-  `generate_chapter_audio` (`dom:3`, unscheduled) and
-  `generate_gemini_audio` (`manual`; started only by the daily
-  scheduler's `--only` override). Gemini artifacts land under
-  `audio_gemini/` in the audio bucket (GCS mode `"gemini"` in
-  `bible/services/storage/gcs.py`) with day-keyed lock/counter
-  objects under `state/`; no fileset serves them yet.
-- `bible/management/commands/generate_gemini_audio.py`: local
-  mode (default) writes `tts-out/` + `gemini-tts-state.json`;
-  `--upload-gcs` (auto-on when `CLOUD_RUN_JOB` is set) switches
-  state + artifacts to GCS. `GEMINI_API_KEY` must exist in
+  `generate_chapter_audio` (`dom:3`, unscheduled),
+  `generate_gemini_audio` (`manual`) and `generate_edge_audio`
+  (`manual`; started only by the daily scheduler's `--only`
+  override — the Everita voice). Generated artifacts land under
+  `audio_gemini/` and `audio_edge/` in the audio bucket (GCS
+  modes `"gemini"`/`"edge"` in `bible/services/storage/gcs.py`)
+  with day-keyed lock objects under `state/`; no fileset serves
+  them yet.
+- `bible/management/commands/generate_gemini_audio.py` and
+  `generate_edge_audio.py`: local mode (default) writes
+  `tts-out/` + `gemini-tts-state.json`; `--upload-gcs`
+  (auto-on when `CLOUD_RUN_JOB` is set) switches state +
+  artifacts to GCS. Gemini needs `GEMINI_API_KEY` in
   `config.yaml` locally or the `env-file` secret on GCP —
-  normalized to `settings.GEMINI_API_KEYS`.
+  normalized to `settings.GEMINI_API_KEYS`. The Edge command
+  is keyless (unofficial Microsoft endpoint, default voice
+  `lv-LV-EveritaNeural`, exact per-verse timestamps).
 - Dependencies: `requirements.txt` pins the runtime stack to
   the versions installed in `venv/` (verify with `pip freeze`);
   `requirements-dev.txt` adds pytest/pytest-django/debugpy.

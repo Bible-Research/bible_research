@@ -46,13 +46,16 @@ def get_default_client() -> storage.Client:
 # ``chapter`` writes whole-chapter-synthesized artifacts under a
 # parallel prefix so the two modes coexist without collisions.
 # ``gemini`` holds artifacts synthesized by the Gemini free-tier
-# pipeline (generate_gemini_audio --upload-gcs); nothing reads them
-# yet — a future audio fileset id can map to mode="gemini" via
+# pipeline (generate_gemini_audio --upload-gcs), ``edge`` the
+# Edge read-aloud endpoint (generate_edge_audio --upload-gcs,
+# default voice lv-LV-EveritaNeural). Nothing reads either yet —
+# a future audio fileset id can map to one via
 # sword.registry.audio_mode_for_fileset.
 _MODE_PREFIXES = {
     "verse": "audio",
     "chapter": "audio_chapter",
     "gemini": "audio_gemini",
+    "edge": "audio_edge",
 }
 
 

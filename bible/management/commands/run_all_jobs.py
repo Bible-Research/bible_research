@@ -41,6 +41,19 @@ JOBS = [
         ],
         "manual",
     ),
+    # Edge read-aloud TTS (lv-LV-EveritaNeural) — the production
+    # voice. The ``daily-edge-audio`` Cloud Scheduler job triggers
+    # all-jobs daily with ``--only generate_edge_audio`` container
+    # args; ``manual`` keeps unfiltered passes from starting it
+    # implicitly (same reasoning as the Gemini entry above).
+    (
+        "generate_edge_audio",
+        [
+            "--fileset-id", "LVSGLU8",
+            "--upload-gcs",
+        ],
+        "manual",
+    ),
 ]
 
 

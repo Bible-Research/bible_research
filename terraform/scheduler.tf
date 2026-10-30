@@ -1,8 +1,10 @@
 # ============================================================================
 # SCHEDULER RESOURCES
 # ============================================================================
-# The daily ``daily-gemini-audio`` trigger below is ENABLED. It is the
-# only scheduled trigger of ``all-jobs``.
+# The daily ``daily-edge-audio`` trigger below is ENABLED. It is the
+# only scheduled trigger of ``all-jobs`` and runs the Edge
+# read-aloud TTS sub-job (lv-LV-EveritaNeural, artifacts under
+# ``audio_edge/``).
 #
 # It must not be a plain trigger: the JOBS table in
 # bible/management/commands/run_all_jobs.py also contains the
@@ -12,8 +14,8 @@
 # body therefore passes ``overrides.containerOverrides`` — the job
 # container's command is ``python manage.py run_all_jobs`` and the
 # override supplies ``args`` = ``["--only",
-# "generate_gemini_audio"]``, restricting the pass to that single
-# JOBS entry. The ``generate_gemini_audio`` entry additionally
+# "generate_edge_audio"]``, restricting the pass to that single
+# JOBS entry. The ``generate_edge_audio`` entry additionally
 # carries schedule ``manual``, so even an override-less run cannot
 # start it implicitly.
 # ============================================================================
@@ -37,13 +39,12 @@ resource "google_cloud_run_v2_job_iam_member" "all_jobs_scheduler_invoker" {
   member   = "serviceAccount:${google_service_account.all_jobs_scheduler.email}"
 }
 
-# 09:00 UTC daily: the Gemini free-tier quota resets at midnight
-# America/Los_Angeles, which is 07:00–08:00 UTC depending on DST, so
-# this always lands safely after the reset while still being a
-# daytime run in Europe/Riga.
-resource "google_cloud_scheduler_job" "daily_gemini_audio" {
-  name             = "daily-gemini-audio"
-  description      = "Daily Gemini free-tier audio sub-job of all-jobs."
+# 09:00 UTC daily — a daytime run in Europe/Riga. (There is no
+# quota reset to catch like the Gemini free tier has; Edge TTS is
+# keyless. Time is arbitrary but fixed.)
+resource "google_cloud_scheduler_job" "daily_edge_audio" {
+  name             = "daily-edge-audio"
+  description      = "Daily Edge TTS audio sub-job of all-jobs."
   schedule         = "0 9 * * *"
   time_zone        = "Etc/UTC"
   project          = var.project_id
@@ -67,7 +68,7 @@ resource "google_cloud_scheduler_job" "daily_gemini_audio" {
     body = base64encode(jsonencode({
       overrides = {
         containerOverrides = [{
-          args = ["--only", "generate_gemini_audio"]
+          args = ["--only", "generate_edge_audio"]
         }]
       }
     }))

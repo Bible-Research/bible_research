@@ -13,6 +13,7 @@ locals {
     "100199889854403046928", # github-deployer
     "111270081806219228031", # thumbnail-worker
     "110192253908821077884", # appspot default runtime SA
+    "102770082233043287598", # all-jobs-scheduler
   ]
 }
 
