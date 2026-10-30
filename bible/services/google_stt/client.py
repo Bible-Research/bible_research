@@ -3,11 +3,14 @@
 V1 is deliberate: the 60 min/month free tier exists only on the
 V1 API (``speech.SpeechClient``) — V2/Chirp has no free tier.
 """
+import logging
 import threading
 from typing import List, Optional, Tuple
 
 from google.api_core import exceptions as gax
 from google.cloud import speech
+
+logger = logging.getLogger(__name__)
 
 
 class QuotaExceeded(Exception):
@@ -47,7 +50,11 @@ class GoogleSTTClient:
         apply its generic per-chapter handling. Billing counts
         every *successfully processed* request — including an
         empty result — so the caller consumes the chapter's full
-        duration once the LRO completes.
+        duration once the LRO completes. On a poll
+        ``TimeoutError`` the LRO may still complete server-side
+        and bill the audio; it is re-raised after a best-effort
+        ``operation.cancel()`` so the caller can meter the spend
+        conservatively.
         """
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.MP3,
@@ -60,7 +67,19 @@ class GoogleSTTClient:
             operation = self._client.long_running_recognize(
                 config=config, audio=audio,
             )
-            response = operation.result(timeout=timeout_seconds)
+            try:
+                response = operation.result(
+                    timeout=timeout_seconds,
+                )
+            except TimeoutError:
+                try:
+                    operation.cancel()
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to cancel timed-out STT LRO.",
+                        exc_info=True,
+                    )
+                raise
         except gax.ResourceExhausted as exc:
             raise QuotaExceeded(str(exc)) from exc
 

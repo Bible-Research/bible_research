@@ -161,8 +161,12 @@ resource "google_project_iam_member" "audio_generator_speech_client" {
 # ``gcloud run jobs update all-jobs`` from the Deploy to App Engine
 # workflow. Kept scoped to this specific SA rather than granted
 # project-wide.
+# NOTE: the resource header below exceeds the workspace 79-char
+# limit — HCL resource labels cannot be split across lines and
+# renaming the label would force a destroy/recreate of the
+# binding, so it is intentionally left long.
 resource "google_service_account_iam_member" "github_deployer_act_as_audio_generator" {
   service_account_id = google_service_account.audio_generator.name
   role               = "roles/iam.serviceAccountUser"
-  member             = "serviceAccount:${google_service_account.github_deployer.email}"
+  member             = google_service_account.github_deployer.member
 }

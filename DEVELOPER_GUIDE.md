@@ -1727,8 +1727,9 @@ generated artifact when DBT answers empty (or fails) for a
 fileset registered in
 `bible/services/dbt/timestamps_registry.py`
 (`GENERATED_TIMESTAMPS_FILESETS`, `-opus16` suffix stripped —
-opus/webm variants are the same recordings). Missing artifacts
-still answer `{"data": []}`.
+opus/webm variants are the same recordings). Missing or
+unreadable artifacts still answer `{"data": []}` (an artifact
+read failure degrades like a miss, never a 502).
 
 **Worklist**: `GET /bibles/filesets/{fileset_id}` — the
 fileset's real chapter coverage (one row per chapter file,
@@ -1750,7 +1751,9 @@ interpolate between anchored neighbours; < 2 anchors fails)
 
 **Budget**: global `state/stt-usage/{YYYY-MM}.json` seconds
 counter (STT bills per account, in 1-second increments once
-the LRO completes — even on empty results), capped by
+the LRO completes — even on empty results; a poll timeout is
+also metered, since the LRO may complete server-side — the
+client best-effort `cancel()`s it first), capped by
 `MONTHLY_STT_SECONDS_LIMIT` (3300s ≈ 55 min, headroom under
 the 60 min free tier). Per-fileset monthly lock at
 `state/stt-lock/{fileset}/{YYYY-MM}.json`.

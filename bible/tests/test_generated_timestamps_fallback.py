@@ -94,6 +94,58 @@ def test_dbt_exception_reraises_without_artifact(
 
 @patch(f"{_PROVIDERS}.gcs.read_generated_timestamps_json")
 @patch(f"{_PROVIDERS}.get_default_dbt_client")
+def test_gcs_read_error_degrades_to_empty(get_dbt, read_gen):
+    """A transient GCS failure (not just ``NotFound``) on the
+    artifact read must degrade like a missing artifact — a
+    raise here would turn a 200-empty into a 502."""
+    get_dbt.return_value.get_timestamps.return_value = {
+        "data": [],
+    }
+    read_gen.side_effect = RuntimeError("gcs 503")
+    data = DbtProvider("LATLVRN1DA").get_timestamps("JHN", 3)
+    assert data == []
+
+
+@patch(f"{_PROVIDERS}.gcs.read_generated_timestamps_json")
+@patch(f"{_PROVIDERS}.get_default_dbt_client")
+def test_gcs_read_error_reraises_dbt_exception(
+    get_dbt, read_gen,
+):
+    """When DBT failed and the artifact read also fails, the
+    *original* DBT exception propagates — the GCS error must
+    not mask it."""
+    get_dbt.return_value.get_timestamps.side_effect = (
+        RuntimeError("dbt down")
+    )
+    read_gen.side_effect = RuntimeError("gcs 503")
+    with pytest.raises(RuntimeError, match="dbt down"):
+        DbtProvider("LATLVRN1DA").get_timestamps("JHN", 3)
+
+
+@patch(f"{_PROVIDERS}.gcs.read_generated_timestamps_json")
+@patch(f"{_PROVIDERS}.get_default_dbt_client")
+def test_generated_rows_shaped_like_dbt(get_dbt, read_gen):
+    """Artifact rows are shaped to the DBT serving contract —
+    only ``verse_start``/``timestamp`` survive, extra fields
+    are dropped."""
+    get_dbt.return_value.get_timestamps.return_value = {
+        "data": [],
+    }
+    read_gen.return_value = {
+        "data": [
+            {
+                "verse_start": 1,
+                "timestamp": 0.0,
+                "confidence": 0.9,
+            },
+        ],
+    }
+    data = DbtProvider("LATLVRN1DA").get_timestamps("JHN", 3)
+    assert data == [{"verse_start": 1, "timestamp": 0.0}]
+
+
+@patch(f"{_PROVIDERS}.gcs.read_generated_timestamps_json")
+@patch(f"{_PROVIDERS}.get_default_dbt_client")
 def test_dbt_data_wins_over_artifact(get_dbt, read_gen):
     """Real DBT coverage always wins — generated artifacts are a
     fallback, never an override."""

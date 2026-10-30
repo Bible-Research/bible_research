@@ -241,6 +241,29 @@ def test_all_attempted_failed_leaves_lock_open():
     assert "reason=all_failed" in text
 
 
+def test_lro_timeout_still_meters_billed_seconds():
+    """A timed-out LRO may still complete server-side and bill
+    the chapter — the seconds must hit the persisted counter
+    even though no artifact is produced, and the run must move
+    on to the next chapter."""
+    stt = _fake_stt()
+    stt.long_running_recognize_uri.side_effect = [
+        TimeoutError("lro slow"),
+        _STT_WORDS,
+    ]
+    text, m = _run(
+        ["--fileset-ids", "LATLVRN1DA"], stt=stt,
+    )
+    increments = m["increment_stt_monthly_usage"]
+    # Chapter 3 (300s) timed out but is metered; chapter 4
+    # (200s) generated normally.
+    assert increments.call_count == 2
+    assert increments.call_args_list[0].args[0] == 300
+    assert increments.call_args_list[1].args[0] == 200
+    assert m["upload_generated_timestamps"].call_count == 1
+    assert "generated=1" in text
+
+
 def test_dry_run_prints_worklist_without_gcs_writes():
     """--dry-run reports the worklist and remaining budget and
     never acquires the lock or writes artifacts; the STT client
@@ -282,6 +305,50 @@ def test_book_filter_selects_one_book():
         m["upload_generated_timestamps"].call_args_list[0].args
     )
     assert args[1] == "LUK"
+
+
+@override_settings(**_SETTINGS)
+@patch(f"{_CMD}.gcs.mark_stt_run_complete")
+@patch(f"{_CMD}.gcs.increment_stt_monthly_usage")
+@patch(f"{_CMD}.gcs.read_stt_monthly_usage")
+@patch(f"{_CMD}.gcs.acquire_stt_run_lock")
+@patch(f"{_CMD}.gcs.list_generated_chapters")
+@patch(f"{_CMD}.gcs.delete_stt_staging_audio")
+@patch(f"{_CMD}.gcs.upload_stt_staging_audio")
+@patch(f"{_CMD}.gcs.upload_generated_timestamps")
+@patch(f"{_CMD}.get_default_sword_client")
+@patch(f"{_CMD}.get_default_stt_client")
+@patch(f"{_CMD}.get_default_dbt_client")
+def test_one_fileset_failure_does_not_abort_the_rest(
+    get_dbt, get_stt, get_sword, upload_ts, stage, unstage,
+    list_done, acquire, read_usage, increment, mark_done,
+):
+    """A fileset whose run setup raises (e.g. the lock read)
+    must not abort the remaining filesets in the same run."""
+    get_dbt.return_value = _fake_dbt()
+    get_stt.return_value = _fake_stt()
+    get_sword.return_value = _fake_sword()
+    read_usage.return_value = 0
+    list_done.return_value = set()
+    stage.return_value = "gs://b/staging.mp3"
+
+    def lock(fileset_id, **_kw):
+        if fileset_id == "LATLVRN1DA":
+            raise RuntimeError("gcs down")
+        return True, "acquired"
+
+    acquire.side_effect = lock
+
+    out = StringIO()
+    call_command(
+        "generate_audio_timestamps",
+        "--fileset-ids", "LATLVRN1DA,LATLVRP1DA", stdout=out,
+    )
+
+    assert "fileset=LATLVRN1DA failed" in out.getvalue()
+    # LATLVRP1DA still ran its two-chapter worklist.
+    assert upload_ts.call_count == 2
+    assert "fileset=LATLVRP1DA done" in out.getvalue()
 
 
 def test_opus16_fileset_id_resolves_to_base():

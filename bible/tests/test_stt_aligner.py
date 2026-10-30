@@ -53,10 +53,40 @@ def test_unanchored_verse_interpolates_by_word_count():
     ts = {d["verse_start"]: d["timestamp"] for d in out["data"]}
     assert ts[1] == 0.0
     assert ts[3] == 10.0
-    # verse 2 sits 2 of 3 words through the 1->3 span.
-    assert ts[2] == pytest.approx((2 / 3) * 10.0, abs=0.001)
+    # Anchors are verse-start times: verse 2 starts after verse
+    # 1's 2 words, inside the 4-word span covered by verses 1+2
+    # (the words spoken between the v1 and v3 anchors).
+    assert ts[2] == pytest.approx((2 / 4) * 10.0, abs=0.001)
     # score = 3 matched of 5 reference words.
     assert out["alignment_score"] == pytest.approx(3 / 5)
+
+
+def test_interpolation_uses_verse_start_window():
+    """Regression: the interpolation window counts the words of
+    the verses *between* the anchors — an off-by-one that adds
+    the target verse's own words shifts every interpolated
+    timestamp late."""
+    stt = [
+        ("a", 0.0, 0.5), ("b", 0.5, 1.0),
+        ("c", 1.0, 1.5), ("d", 1.5, 2.0),
+        ("omega", 10.0, 10.5),
+    ]
+    ref = [
+        # verse 1 anchors at t=0 — 4 words
+        {"verse_start": 1, "verse_text": "a b c d"},
+        # verses 2-3 share no words — 2 and 6 words
+        {"verse_start": 2, "verse_text": "e f"},
+        {"verse_start": 3, "verse_text": "g h i j k l"},
+        # verse 4 anchors at t=10 — 4 words
+        {"verse_start": 4, "verse_text": "omega x y z"},
+    ]
+    out = align_chapter(stt, ref)
+    ts = {d["verse_start"]: d["timestamp"] for d in out["data"]}
+    assert ts[1] == 0.0
+    assert ts[4] == 10.0
+    # span = words of verses 1..3 = 4+2+6 = 12.
+    assert ts[2] == pytest.approx((4 / 12) * 10.0, abs=0.001)
+    assert ts[3] == pytest.approx((6 / 12) * 10.0, abs=0.001)
 
 
 def test_leading_metadata_never_matches():

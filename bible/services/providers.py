@@ -938,9 +938,28 @@ class DbtProvider(Provider):
             payload = gcs.read_generated_timestamps_json(
                 base_id, book_id, chapter,
             )
+            # Shape rows like the DBT branch — the serving
+            # contract is ``{verse_start, timestamp}`` only.
+            return [
+                {
+                    'verse_start': item.get('verse_start'),
+                    'timestamp': item.get('timestamp'),
+                }
+                for item in (payload.get('data') or [])
+            ]
         except gcs_exceptions.NotFound:
             return None
-        return payload.get('data') or []
+        except Exception:  # noqa: BLE001
+            # A transient GCS failure or a malformed artifact
+            # must degrade like a missing artifact — a 502 here
+            # would turn a 200-empty into an error and mask the
+            # original DBT exception on the re-raise path.
+            logger.warning(
+                "Generated-timestamps read failed for %s %s %s; "
+                "treating as no artifact.",
+                base_id, book_id, chapter, exc_info=True,
+            )
+            return None
 
     def get_copyright(self):
         result = get_default_dbt_client().get_copyright(

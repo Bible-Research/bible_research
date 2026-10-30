@@ -11,6 +11,7 @@ chapter (billed spend is never lost), per-chapter failures log
 + continue, and the lock is left open when every attempted
 chapter fails so a later run can retry.
 """
+import datetime
 import logging
 import math
 from io import BytesIO
@@ -109,14 +110,24 @@ class Command(BaseCommand):
             else get_default_stt_client()
         )
         for fileset_id in fileset_ids:
-            self._run_fileset(
-                fileset_id,
-                dbt=dbt,
-                stt=stt,
-                book_filter=book_filter,
-                dry_run=options["dry_run"],
-                max_chapters=options["max_chapters"],
-            )
+            try:
+                self._run_fileset(
+                    fileset_id,
+                    dbt=dbt,
+                    stt=stt,
+                    book_filter=book_filter,
+                    dry_run=options["dry_run"],
+                    max_chapters=options["max_chapters"],
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "STT run failed for fileset %s; continuing "
+                    "with the remaining filesets.",
+                    fileset_id,
+                )
+                self.stdout.write(
+                    f"fileset={fileset_id} failed"
+                )
 
     # ---------------------------------------------------------
     # Worklist
@@ -135,7 +146,13 @@ class Command(BaseCommand):
             chapter = row.get("chapter_start")
             if not book_id or chapter is None:
                 continue
-            key = (book_id, int(chapter))
+            try:
+                chapter = int(chapter)
+            except (TypeError, ValueError):
+                continue
+            if chapter < 1:
+                continue
+            key = (book_id, chapter)
             if key in seen:
                 continue
             seen.add(key)
@@ -296,6 +313,13 @@ class Command(BaseCommand):
                             settings.STT_LRO_TIMEOUT_SECONDS
                         ),
                     )
+                except TimeoutError:
+                    # A timed-out LRO can still complete
+                    # server-side and bill the whole chapter —
+                    # meter the seconds before the staging
+                    # cleanup frees its input object.
+                    budget.consume(seconds)
+                    raise
                 finally:
                     try:
                         gcs.delete_stt_staging_audio(
@@ -328,7 +352,9 @@ class Command(BaseCommand):
                         "alignment_score": round(score, 4),
                         "low_confidence": score < min_score,
                         "generated_at": (
-                            gcs._utc_naive_now().isoformat()
+                            datetime.datetime.now(
+                                datetime.timezone.utc
+                            ).replace(tzinfo=None).isoformat()
                         ),
                     },
                 }

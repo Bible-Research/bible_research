@@ -142,9 +142,11 @@ def _verse_timestamp(
     Anchored verses read their first matched word's start time.
     Unanchored verses interpolate linearly between the nearest
     neighbouring anchored verses, proportional to reference word
-    counts; verses outside the anchor range clamp to the nearest
-    anchor's timestamp (there is nothing to interpolate
-    against)."""
+    counts — the anchors are verse-*start* times, so the
+    fraction is the words of verses ``prev .. pos - 1`` over
+    ``prev .. next - 1``. Verses outside the anchor range clamp
+    to the nearest anchor's timestamp (there is nothing to
+    interpolate against)."""
     if pos in anchors:
         return stt_words[anchors[pos]][1]
 
@@ -157,11 +159,15 @@ def _verse_timestamp(
 
     t_prev = stt_words[anchors[prev_pos]][1]
     t_next = stt_words[anchors[next_pos]][1]
+    # Anchors are verse-*start* times (the first matched word's
+    # start), so the span between them covers the words of
+    # verses ``prev_pos .. next_pos - 1`` and verse ``pos``
+    # starts after the words of verses ``prev_pos .. pos - 1``.
     span_words = sum(
-        verse_word_counts[prev_pos + 1: next_pos + 1]
+        verse_word_counts[prev_pos:next_pos]
     )
     mid_words = sum(
-        verse_word_counts[prev_pos + 1: pos + 1]
+        verse_word_counts[prev_pos:pos]
     )
     frac = mid_words / span_words if span_words else 0.0
     return t_prev + frac * (t_next - t_prev)
