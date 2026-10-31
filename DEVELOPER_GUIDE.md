@@ -1860,9 +1860,11 @@ Differences from the Gemini pipeline:
   cumulative stream durations, not estimates.
 - **Output**: MP3 48 kbps CBR from the endpoint directly —
   no `lameenc` re-encode.
-- **Pacing**: `--sleep-seconds` (default 0.5) between verse
-  calls; retries (3 attempts, 2 s backoff) absorb the
-  endpoint's occasional `NoAudioReceived`/WSS drops.
+- **Pacing**: `--sleep-seconds` (default 1.5) between verse
+  calls; retries (5 attempts, 2 s exponential backoff doubling
+  to a 30 s cap, ±25% jitter) ride out the endpoint's
+  multi-minute `NoAudioReceived` throttle bursts (~30% of
+  requests failed at 3×2 s retry in the first live run).
 - **Scheduling**: `terraform/scheduler.tf` `daily-edge-audio`
   fires `all-jobs` daily at 09:00 UTC with container args
   `--only generate_edge_audio`; the unscheduled monthly

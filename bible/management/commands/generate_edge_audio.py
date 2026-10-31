@@ -49,9 +49,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_CHAPTERS = 60
 # Second safety bound so a slow streak can't outlive the timeout.
 DEFAULT_MAX_MINUTES = 60.0
-# Courtesy pacing — the endpoint is undocumented, bursts are the
-# likeliest throttle trigger.
-DEFAULT_SLEEP_SECONDS = 0.5
+# Courtesy pacing — the endpoint is undocumented and throttles
+# bursts hard (observed ~30% of requests failing with
+# NoAudioReceived at 0.5 s spacing), so requests stay sparse.
+DEFAULT_SLEEP_SECONDS = 1.5
 
 
 class Command(BaseCommand):
