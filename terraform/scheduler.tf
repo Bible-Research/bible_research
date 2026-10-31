@@ -1,10 +1,11 @@
 # ============================================================================
-# SCHEDULER RESOURCES
+# SCHEDULER RESOURCES — CURRENTLY DISABLED
 # ============================================================================
-# The daily ``daily-edge-audio`` trigger below is ENABLED. It is the
-# only scheduled trigger of ``all-jobs`` and runs the Edge
-# read-aloud TTS sub-job (lv-LV-EveritaNeural, artifacts under
-# ``audio_edge/``).
+# ``daily-edge-audio`` below was DISABLED on 2026-10-31 per user
+# request — it was the only scheduled trigger of ``all-jobs`` (Edge
+# read-aloud TTS, lv-LV-EveritaNeural, artifacts under
+# ``audio_edge/``). To re-enable: uncomment the resource and
+# outputs.tf output, then `terraform apply`.
 #
 # It must not be a plain trigger: the JOBS table in
 # bible/management/commands/run_all_jobs.py also contains the
@@ -57,106 +58,106 @@ resource "google_cloud_run_v2_job_iam_member" "all_jobs_scheduler_invoker" {
   member   = google_service_account.all_jobs_scheduler.member
 }
 
-# 09:00 UTC daily — a daytime run in Europe/Riga. (There is no
-# quota reset to catch like the Gemini free tier has; Edge TTS is
-# keyless. Time is arbitrary but fixed.)
-resource "google_cloud_scheduler_job" "daily_edge_audio" {
-  name             = "daily-edge-audio"
-  description      = "Daily Edge TTS audio sub-job of all-jobs."
-  schedule         = "0 9 * * *"
-  time_zone        = "Etc/UTC"
-  project          = var.project_id
-  region           = local.app_engine_region
-  attempt_deadline = "320s"
-
-  retry_config {
-    # The job itself enforces quota/run-lock semantics; an
-    # immediate scheduler retry would just hit the day lock.
-    retry_count = 0
-  }
-
-  http_target {
-    http_method = "POST"
-    uri = join("", [
-      "https://${local.app_engine_region}-run.googleapis.com",
-      "/v2/projects/${var.project_id}",
-      "/locations/${local.app_engine_region}",
-      "/jobs/${google_cloud_run_v2_job.all_jobs.name}:run",
-    ])
-
-    headers = {
-      "Content-Type" = "application/json"
-    }
-
-    body = base64encode(jsonencode({
-      overrides = {
-        containerOverrides = [{
-          args = ["--only", "generate_edge_audio"]
-        }]
-      }
-    }))
-
-    oauth_token {
-      service_account_email = google_service_account.all_jobs_scheduler.email
-    }
-  }
-
-  depends_on = [
-    google_cloud_run_v2_job_iam_member.all_jobs_scheduler_invoker,
-  ]
-}
-
-# ============================================================================
-# END-OF-MONTH STT TIMESTAMPS TRIGGER — ENABLED
-# ============================================================================
-# Runs the ``generate_audio_timestamps`` sub-job on the last day of
-# each month so the STT free tier (60 min/mo, resetting on the 1st)
-# is spent just before it expires. Cloud Scheduler cron cannot
-# express "last day", so this fires a plain ``jobs:run`` on days
-# 28-31 and the JOBS entry's ``last_day_of_month`` predicate gates
-# execution to the real last day.
+# # 09:00 UTC daily — a daytime run in Europe/Riga. (There is no
+# # quota reset to catch like the Gemini free tier has; Edge TTS is
+# # keyless. Time is arbitrary but fixed.)
+# resource "google_cloud_scheduler_job" "daily_edge_audio" {
+#   name             = "daily-edge-audio"
+#   description      = "Daily Edge TTS audio sub-job of all-jobs."
+#   schedule         = "0 9 * * *"
+#   time_zone        = "Etc/UTC"
+#   project          = var.project_id
+#   region           = local.app_engine_region
+#   attempt_deadline = "320s"
 #
-# No container overrides — deliberately a bare ``jobs:run``, because
-# ``--only`` bypasses the schedule predicate and would run the job
-# on the 28th regardless. On days 28-31 nothing else in JOBS can
-# match (dom:3 is out of range; the Gemini/Edge entries are
-# ``manual``). CAUTION: a future JOBS entry whose schedule matches
-# any of 28-31 (e.g. ``daily``) would also run under this trigger —
-# review the JOBS table when adding entries.
-# ============================================================================
-resource "google_cloud_scheduler_job" "eom_stt_timestamps" {
-  name             = "eom-stt-timestamps"
-  description      = "Last-day-of-month STT timestamps sub-job of all-jobs."
-  schedule         = "0 7 28-31 * *"
-  time_zone        = "Etc/UTC"
-  project          = var.project_id
-  region           = local.app_engine_region
-  attempt_deadline = "320s"
-
-  retry_config {
-    # The job itself enforces quota/run-lock semantics; a
-    # scheduler retry would just hit the month lock.
-    retry_count = 0
-  }
-
-  http_target {
-    http_method = "POST"
-    uri = join("", [
-      "https://${local.app_engine_region}-run.googleapis.com",
-      "/v2/projects/${var.project_id}",
-      "/locations/${local.app_engine_region}",
-      "/jobs/${google_cloud_run_v2_job.all_jobs.name}:run",
-    ])
-
-    oauth_token {
-      service_account_email = google_service_account.all_jobs_scheduler.email
-    }
-  }
-
-  depends_on = [
-    google_cloud_run_v2_job_iam_member.all_jobs_scheduler_invoker,
-  ]
-}
+#   retry_config {
+#     # The job itself enforces quota/run-lock semantics; an
+#     # immediate scheduler retry would just hit the day lock.
+#     retry_count = 0
+#   }
+#
+#   http_target {
+#     http_method = "POST"
+#     uri = join("", [
+#       "https://${local.app_engine_region}-run.googleapis.com",
+#       "/v2/projects/${var.project_id}",
+#       "/locations/${local.app_engine_region}",
+#       "/jobs/${google_cloud_run_v2_job.all_jobs.name}:run",
+#     ])
+#
+#     headers = {
+#       "Content-Type" = "application/json"
+#     }
+#
+#     body = base64encode(jsonencode({
+#       overrides = {
+#         containerOverrides = [{
+#           args = ["--only", "generate_edge_audio"]
+#         }]
+#       }
+#     }))
+#
+#     oauth_token {
+#       service_account_email = google_service_account.all_jobs_scheduler.email
+#     }
+#   }
+#
+#   depends_on = [
+#     google_cloud_run_v2_job_iam_member.all_jobs_scheduler_invoker,
+#   ]
+# }
+#
+# # ============================================================================
+# # END-OF-MONTH STT TIMESTAMPS TRIGGER — ENABLED
+# # ============================================================================
+# # Runs the ``generate_audio_timestamps`` sub-job on the last day of
+# # each month so the STT free tier (60 min/mo, resetting on the 1st)
+# # is spent just before it expires. Cloud Scheduler cron cannot
+# # express "last day", so this fires a plain ``jobs:run`` on days
+# # 28-31 and the JOBS entry's ``last_day_of_month`` predicate gates
+# # execution to the real last day.
+# #
+# # No container overrides — deliberately a bare ``jobs:run``, because
+# # ``--only`` bypasses the schedule predicate and would run the job
+# # on the 28th regardless. On days 28-31 nothing else in JOBS can
+# # match (dom:3 is out of range; the Gemini/Edge entries are
+# # ``manual``). CAUTION: a future JOBS entry whose schedule matches
+# # any of 28-31 (e.g. ``daily``) would also run under this trigger —
+# # review the JOBS table when adding entries.
+# # ============================================================================
+# resource "google_cloud_scheduler_job" "eom_stt_timestamps" {
+#   name             = "eom-stt-timestamps"
+#   description      = "Last-day-of-month STT timestamps sub-job of all-jobs."
+#   schedule         = "0 7 28-31 * *"
+#   time_zone        = "Etc/UTC"
+#   project          = var.project_id
+#   region           = local.app_engine_region
+#   attempt_deadline = "320s"
+#
+#   retry_config {
+#     # The job itself enforces quota/run-lock semantics; a
+#     # scheduler retry would just hit the month lock.
+#     retry_count = 0
+#   }
+#
+#   http_target {
+#     http_method = "POST"
+#     uri = join("", [
+#       "https://${local.app_engine_region}-run.googleapis.com",
+#       "/v2/projects/${var.project_id}",
+#       "/locations/${local.app_engine_region}",
+#       "/jobs/${google_cloud_run_v2_job.all_jobs.name}:run",
+#     ])
+#
+#     oauth_token {
+#       service_account_email = google_service_account.all_jobs_scheduler.email
+#     }
+#   }
+#
+#   depends_on = [
+#     google_cloud_run_v2_job_iam_member.all_jobs_scheduler_invoker,
+#   ]
+# }
 
 # ============================================================================
 # MONTHLY GOOGLE TTS TRIGGER — STILL DISABLED
