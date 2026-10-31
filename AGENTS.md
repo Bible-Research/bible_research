@@ -314,13 +314,20 @@ resolved:
   The `daily-edge-audio` job IS enabled: it triggers `all-jobs`
   daily with a `jobs:run` container-args override of `--only
   generate_edge_audio`, so the monthly `dom:3` entry cannot
-  piggyback on the trigger.
+  piggyback on the trigger. The `eom-stt-timestamps` job IS also
+  enabled: it fires a plain `jobs:run` on days 28-31 and the
+  `last_day_of_month` predicate gates it to the real last day —
+  a future `daily` JOBS entry would ALSO run on 28-31 via this
+  trigger (review JOBS when adding entries).
 - `terraform/all_jobs.tf`: the single `all-jobs` Cloud Run Job
   replaced the per-task `audio-generator` job (it reuses that SA and
   image repo, both still named `audio-generator`). Sub-jobs are
   listed in the `JOBS` table of
   `bible/management/commands/run_all_jobs.py` —
   `generate_chapter_audio` (`dom:3`, unscheduled),
+  `generate_audio_timestamps` (`last_day_of_month`, started by
+  the `eom-stt-timestamps` scheduler — spends the month's STT
+  free minutes before they reset on the 1st),
   `generate_gemini_audio` (`manual`) and `generate_edge_audio`
   (`manual`; started only by the daily scheduler's `--only`
   override — the Everita voice). Generated artifacts land under

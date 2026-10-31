@@ -25,15 +25,19 @@ JOBS = [
         "dom:3",
     ),
     # Self-generated STT timestamps for DBT audio filesets with
-    # no DBT coverage. A different day from the TTS dom:3 run so
-    # the two never contend for the job's 5400s timeout.
+    # no DBT coverage. Runs on the LAST day of the month — the
+    # STT free tier (60 min/mo) resets on the 1st, so end-of-month
+    # spends a budget that would otherwise expire days later. The
+    # ``eom-stt-timestamps`` Cloud Scheduler trigger fires a plain
+    # ``jobs:run`` on days 28-31; this predicate gates it to the
+    # real last day.
     (
         "generate_audio_timestamps",
         [
             "--fileset-ids",
             "LATLVRN1DA,LATLVRP1DA,LATBSLP1DA,LATBSLP2DA",
         ],
-        "dom:10",
+        "last_day_of_month",
     ),
     # Gemini free-tier audio drip. The ``daily-gemini-audio`` Cloud
     # Scheduler job triggers all-jobs daily but overrides the
