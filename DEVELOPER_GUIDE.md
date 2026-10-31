@@ -1762,10 +1762,14 @@ interpolate between anchored neighbours; < 2 anchors fails)
 counter (STT bills per account, in 1-second increments once
 the LRO completes — even on empty results; a poll timeout is
 also metered, since the LRO may complete server-side — the
-client best-effort `cancel()`s it first), capped by
+client best-effort `cancel()`s it first — and any other
+post-creation failure surfaces as `BilledRecognizeError`,
+which the command likewise meters), capped by
 `MONTHLY_STT_SECONDS_LIMIT` (3300s ≈ 55 min, headroom under
 the 60 min free tier). Per-fileset monthly lock at
-`state/stt-lock/{fileset}/{YYYY-MM}.json`.
+`state/stt-lock/{fileset}/{YYYY-MM}.json`. The fileset aborts
+after `--max-failures` (default 3) consecutive chapter
+failures so a systematic error cannot drain the worklist.
 
 **Config env vars**: `MONTHLY_STT_SECONDS_LIMIT`,
 `STT_LANGUAGE_CODE` (`lv-LV`), `STT_MODEL` (`default` — the

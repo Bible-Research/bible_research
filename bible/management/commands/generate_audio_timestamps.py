@@ -34,6 +34,7 @@ from bible.services.google_stt.budget import (
     SecondsBudget,
 )
 from bible.services.google_stt.client import (
+    BilledRecognizeError,
     QuotaExceeded,
     get_default_stt_client,
 )
@@ -74,6 +75,16 @@ class Command(BaseCommand):
         parser.add_argument(
             "--max-chapters", type=int, default=None,
             help="Cap the number of chapters processed per fileset.",
+        )
+        parser.add_argument(
+            "--max-failures", type=int, default=3,
+            help=(
+                "Abort the fileset after this many consecutive "
+                "chapter failures (default 3). Guards spend when "
+                "every chapter fails the same way — e.g. a client "
+                "bug or outage — instead of draining the whole "
+                "worklist. 0 disables."
+            ),
         )
 
     def handle(self, *args, **options):
@@ -118,6 +129,7 @@ class Command(BaseCommand):
                     book_filter=book_filter,
                     dry_run=options["dry_run"],
                     max_chapters=options["max_chapters"],
+                    max_failures=options["max_failures"],
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
@@ -215,7 +227,7 @@ class Command(BaseCommand):
 
     def _run_fileset(
         self, fileset_id, dbt, stt, book_filter, dry_run,
-        max_chapters,
+        max_chapters, max_failures=3,
     ):
         meta = generated_timestamps_meta(fileset_id)
         min_score = meta.get(
@@ -266,6 +278,7 @@ class Command(BaseCommand):
         generated = 0
         skipped_dbt = 0
         attempted = 0
+        consecutive_failures = 0
         complete_reason = "all_done"
 
         for book_id, chap, row in pending:
@@ -313,11 +326,13 @@ class Command(BaseCommand):
                             settings.STT_LRO_TIMEOUT_SECONDS
                         ),
                     )
-                except TimeoutError:
+                except (TimeoutError, BilledRecognizeError):
                     # A timed-out LRO can still complete
-                    # server-side and bill the whole chapter —
-                    # meter the seconds before the staging
-                    # cleanup frees its input object.
+                    # server-side, and a BilledRecognizeError by
+                    # definition reached Google — both can bill
+                    # the whole chapter, so meter the seconds
+                    # before the staging cleanup frees its input
+                    # object.
                     budget.consume(seconds)
                     raise
                 finally:
@@ -385,7 +400,21 @@ class Command(BaseCommand):
                     "Failed to generate timestamps %s %s %s: %s",
                     fileset_id, book_id, chap, exc,
                 )
-                continue
+                consecutive_failures += 1
+                if (
+                    max_failures
+                    and consecutive_failures >= max_failures
+                ):
+                    logger.error(
+                        "fileset=%s %d consecutive chapter "
+                        "failures; aborting to protect spend.",
+                        fileset_id, consecutive_failures,
+                    )
+                    complete_reason = "consecutive_failures"
+                else:
+                    continue
+            else:
+                consecutive_failures = 0
             finally:
                 delta = budget.used - chapter_start_used
                 if delta > 0:
