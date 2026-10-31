@@ -50,10 +50,6 @@ output "all_jobs_job_name" {
   value = google_cloud_run_v2_job.all_jobs.name
 }
 
-output "daily_edge_audio_scheduler_job_name" {
-  value = google_cloud_scheduler_job.daily_edge_audio.name
-}
-
 # Disabled together with the scheduler resources in scheduler.tf
 # (2026-09-17). Uncomment when re-enabling the monthly job.
 # output "all_jobs_scheduler_job_name" {
