@@ -309,13 +309,34 @@ resolved:
 - NEVER run `migrate`/`makemigrations`/`sqlmigrate` — workspace rule.
 - Commit format: `Type: Capitalized message`; never commit to `main`;
   stage only files you changed.
-- `terraform/scheduler.tf`: the monthly TTS Cloud Scheduler is
-  intentionally commented out — do NOT enable it.
+- `terraform/scheduler.tf`: the *monthly* Google TTS Cloud
+  Scheduler stays intentionally commented out — do NOT enable it.
+  The `daily-edge-audio` job IS enabled: it triggers `all-jobs`
+  daily with a `jobs:run` container-args override of `--only
+  generate_edge_audio`, so the monthly `dom:3` entry cannot
+  piggyback on the trigger.
 - `terraform/all_jobs.tf`: the single `all-jobs` Cloud Run Job
   replaced the per-task `audio-generator` job (it reuses that SA and
   image repo, both still named `audio-generator`). Sub-jobs are
   listed in the `JOBS` table of
-  `bible/management/commands/run_all_jobs.py`.
+  `bible/management/commands/run_all_jobs.py` —
+  `generate_chapter_audio` (`dom:3`, unscheduled),
+  `generate_gemini_audio` (`manual`) and `generate_edge_audio`
+  (`manual`; started only by the daily scheduler's `--only`
+  override — the Everita voice). Generated artifacts land under
+  `audio_gemini/` and `audio_edge/` in the audio bucket (GCS
+  modes `"gemini"`/`"edge"` in `bible/services/storage/gcs.py`)
+  with day-keyed lock objects under `state/`; no fileset serves
+  them yet.
+- `bible/management/commands/generate_gemini_audio.py` and
+  `generate_edge_audio.py`: local mode (default) writes
+  `tts-out/` + `gemini-tts-state.json`; `--upload-gcs`
+  (auto-on when `CLOUD_RUN_JOB` is set) switches state +
+  artifacts to GCS. Gemini needs `GEMINI_API_KEY` in
+  `config.yaml` locally or the `env-file` secret on GCP —
+  normalized to `settings.GEMINI_API_KEYS`. The Edge command
+  is keyless (unofficial Microsoft endpoint, default voice
+  `lv-LV-EveritaNeural`, exact per-verse timestamps).
 - Dependencies: `requirements.txt` pins the runtime stack to
   the versions installed in `venv/` (verify with `pip freeze`);
   `requirements-dev.txt` adds pytest/pytest-django/debugpy.
@@ -328,4 +349,17 @@ resolved:
   OpenAPI client imported via a `sys.path` append in
   `dbt/client.py` — not a pip package; don't add it to
   requirements or remove the path patch.
+- This machine sits behind a Netskope TLS-intercepting proxy
+  (`ca.gocardless.goskope.com`): pip/requests/aiohttp/grpc all
+  fail with "self signed certificate in certificate chain"
+  unless pointed at a combined CA bundle. Build one:
+  `cat $(venv/bin/python -c 'import certifi;print(certifi.where())') \
+    "/Library/Application Support/Netskope/STAgent/data/nscacert.pem" \
+    > /tmp/combined-ca.pem`
+  (optionally append `security find-certificate -a -c gocardless
+  -p`), then export `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` /
+  `PIP_CERT` / `CURL_CA_BUNDLE` /
+  `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` to it. gRPC also needs
+  REST transport (`transport="rest"`) — the proxy strips ALPN.
+  See `tts-out/voice-comparison/README.md` for a worked example.
 - If docs and code disagree, the code wins — fix the doc.

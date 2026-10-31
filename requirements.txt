@@ -22,6 +22,9 @@ google-cloud-storage==3.17.1
 google-auth==2.62.0
 mutagen==1.48.1
 lameenc==1.9.0
+edge-tts==7.3.1
+# edge-tts transport
+aiohttp==3.14.5
 Pillow==13.0.0
 
 # Dependencies of the vendored DBT client

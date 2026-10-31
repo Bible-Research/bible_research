@@ -173,3 +173,35 @@ class TestSelection:
         assert mock_call.call_count == 2
         assert "job_a" in str(exc.value)
         assert "job_b" not in str(exc.value)
+
+
+class TestGeminiJobsEntry:
+    """The generate_gemini_audio JOBS entry is schedule=manual:
+    only the daily scheduler's ``--only`` container-override (or a
+    manual --force) may start it — never an unfiltered pass."""
+
+    def test_only_runs_gemini_entry(self):
+        out, mock_call = _run(
+            ["--only", "generate_gemini_audio"],
+            today=date(2026, 10, 4),
+        )
+        mock_call.assert_called_once_with(
+            "generate_gemini_audio",
+            "--fileset-id", "LVSGLU8",
+            "--upload-gcs",
+            "--max-requests", "14",
+        )
+
+    def test_gemini_entry_skipped_on_monthly_day(self):
+        """Even on dom:3 (when the monthly Google TTS entry fires)
+        a plain trigger must not start the Gemini job."""
+        out, mock_call = _run([], today=date(2026, 10, 3))
+        called = [c.args[0] for c in mock_call.call_args_list]
+        assert called == ["generate_chapter_audio"]
+        assert "skipping: generate_gemini_audio" in out
+
+    def test_gemini_entry_skipped_on_plain_day(self):
+        out, mock_call = _run([], today=date(2026, 10, 4))
+        called = [c.args[0] for c in mock_call.call_args_list]
+        assert "generate_gemini_audio" not in called
+        assert "skipping: generate_gemini_audio" in out

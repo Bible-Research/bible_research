@@ -3,18 +3,24 @@
 The Gemini client is never exercised — ``GeminiSynthesizer`` is
 patched — and SWORD's chapter worklist is stubbed, so nothing
 touches the network, config.yaml, or the real API. State and
-output dirs point at ``tmp_path``.
+output dirs point at ``tmp_path``. GCS mode (``--upload-gcs``)
+patches the ``gcs`` helper functions the way
+``test_generate_chapter_audio_command`` does.
 """
 import json
+import os
 from io import StringIO
-from unittest.mock import MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, patch
 
 import pytest
 from django.conf import settings as django_settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from bible.services.gemini_tts.client import QuotaExceeded
+from bible.services.gemini_tts.client import (
+    DEFAULT_VOICE_NAME,
+    QuotaExceeded,
+)
 from bible.services.gemini_tts.state import RunState
 
 
@@ -322,3 +328,232 @@ def test_dry_run_reports_without_calling_api(
     assert "would generate 3 chapters" in text
     assert not (tmp_path / "tts-out").exists()
     assert _FakeSynth.instances == []
+
+
+@pytest.fixture
+def gcs_mocks():
+    """Patch every ``gcs`` helper the GCS mode touches.
+
+    The command module and ``gemini_tts.state`` both hold the same
+    ``gcs`` module object, so patching attributes here covers the
+    real :class:`GcsRunState` too."""
+    # patch.multiple only populates the yielded dict for
+    # attributes patched with DEFAULT — explicit MagicMock()
+    # replacements patch the attribute but never appear in it.
+    with patch.multiple(
+        f"{_CMD}.gcs",
+        acquire_run_lock=DEFAULT,
+        list_completed_chapters=DEFAULT,
+        read_gemini_daily_requests=DEFAULT,
+        write_gemini_daily_requests=DEFAULT,
+        upload_chapter_artifacts=DEFAULT,
+        mark_run_complete=DEFAULT,
+    ) as mocks:
+        mocks["acquire_run_lock"].return_value = (True, "acquired")
+        mocks["list_completed_chapters"].return_value = set()
+        mocks["read_gemini_daily_requests"].return_value = 0
+        yield mocks
+
+
+def _invoke_gcs_out(*extra):
+    out = StringIO()
+    call_command(
+        "generate_gemini_audio",
+        "--upload-gcs",
+        "--sleep-seconds", "0",
+        *extra, stdout=out,
+    )
+    return out.getvalue()
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_gcs_mode_uploads_artifacts_and_completes(
+    sword_factory, tmp_path, worklist_client, gcs_mocks,
+):
+    sword_factory.return_value = worklist_client
+
+    text = _invoke_gcs_out()
+
+    upload = gcs_mocks["upload_chapter_artifacts"]
+    assert upload.call_count == 3
+    first = upload.call_args_list[0]
+    assert first.args[:3] == ("LVSGLU8", "GEN", 1)
+    # args: fileset, book, chapter, mp3, payload, voice_name.
+    assert first.args[5] == DEFAULT_VOICE_NAME
+    assert first.kwargs["mode"] == "gemini"
+
+    acquire = gcs_mocks["acquire_run_lock"]
+    assert acquire.call_args.kwargs["mode"] == "gemini"
+    assert acquire.call_args.kwargs["ym"]  # day key, not month
+
+    mark = gcs_mocks["mark_run_complete"]
+    mark.assert_called_once()
+    assert mark.call_args.kwargs["mode"] == "gemini"
+    assert mark.call_args.kwargs["reason"] == "all_done"
+    assert mark.call_args.kwargs["chapters_generated"] == 3
+    assert mark.call_args.kwargs["ym"] == (
+        acquire.call_args.kwargs["ym"]
+    )
+
+    # The request counter persisted per chapter (3 calls total:
+    # one per finally-spend + mark_completed save pairs collapse).
+    assert gcs_mocks["write_gemini_daily_requests"].call_count >= 3
+
+    # Nothing local was written.
+    assert not (tmp_path / "tts-out").exists()
+    assert not (tmp_path / "state.json").exists()
+    assert "generated=3" in text
+    assert "reason=all_done" in text
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_gcs_completed_listing_skips_chapters(
+    sword_factory, tmp_path, worklist_client, gcs_mocks,
+):
+    """Completion comes from the GCS artifact listing, not a
+    state file — listed chapters are never re-synthesized."""
+    sword_factory.return_value = worklist_client
+    gcs_mocks["list_completed_chapters"].return_value = {
+        ("GEN", 1), ("GEN", 2),
+    }
+
+    _invoke_gcs_out()
+
+    synth = _FakeSynth.instances[-1]
+    assert synth.runs == [("GEN", 3)]
+    # The listing was scoped to the gemini prefix + voice.
+    assert (
+        gcs_mocks["list_completed_chapters"].call_args.kwargs[
+            "mode"
+        ]
+        == "gemini"
+    )
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_gcs_day_counter_resumes_same_day_spend(
+    sword_factory, tmp_path, worklist_client, gcs_mocks,
+):
+    """A same-day job retry reads the persisted counter: with
+    13/14 already spent only one more chapter is allowed."""
+    sword_factory.return_value = worklist_client
+    gcs_mocks["read_gemini_daily_requests"].return_value = 13
+
+    text = _invoke_gcs_out()
+
+    synth = _FakeSynth.instances[-1]
+    assert synth.runs == [("GEN", 1)]
+    assert "reason=daily_request_cap" in text
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_gcs_lock_not_acquired_skips_run(
+    sword_factory, tmp_path, worklist_client, gcs_mocks,
+):
+    """A live same-day lock (concurrent/duplicate trigger) makes
+    the run a clean no-op."""
+    sword_factory.return_value = worklist_client
+    gcs_mocks["acquire_run_lock"].return_value = (
+        False, "already_completed",
+    )
+
+    text = _invoke_gcs_out()
+
+    assert "skipped reason=already_completed" in text
+    assert _FakeSynth.instances == []
+    gcs_mocks["upload_chapter_artifacts"].assert_not_called()
+    gcs_mocks["mark_run_complete"].assert_not_called()
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_gcs_quota_exhausted_still_marks_run_complete(
+    sword_factory, tmp_path, worklist_client, gcs_mocks,
+):
+    """Quota exhaustion is a *successful* daily outcome — the lock
+    is marked complete so same-day reruns don't retry."""
+    sword_factory.return_value = worklist_client
+
+    def outcome(book_id, chapter):
+        if chapter == 2:
+            raise QuotaExceeded("429 on every key")
+        return _artifacts()
+
+    _FakeSynth.outcome = outcome
+    text = _invoke_gcs_out()
+
+    assert "reason=quota_exhausted" in text
+    mark = gcs_mocks["mark_run_complete"]
+    assert mark.call_args.kwargs["reason"] == "quota_exhausted"
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_gcs_all_failed_leaves_lock_uncompleted(
+    sword_factory, tmp_path, worklist_client, gcs_mocks,
+):
+    """Every chapter failing must not record a zero-artifact
+    'completed' run — mirrors generate_chapter_audio."""
+    sword_factory.return_value = worklist_client
+    _FakeSynth.outcome = RuntimeError("synthetic boom")
+
+    text = _invoke_gcs_out()
+
+    assert "reason=all_failed" in text
+    gcs_mocks["mark_run_complete"].assert_not_called()
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_cloud_run_job_env_var_enables_gcs_mode(
+    sword_factory, tmp_path, worklist_client, gcs_mocks,
+):
+    """Inside the Cloud Run Job container CLOUD_RUN_JOB is always
+    set — GCS mode must engage even without the flag, so a
+    forgotten ``--upload-gcs`` can never silently burn quota into
+    ephemeral disk."""
+    sword_factory.return_value = worklist_client
+
+    with patch.dict(os.environ, {"CLOUD_RUN_JOB": "all-jobs"}):
+        text = _invoke_out(tmp_path)
+
+    gcs_mocks["acquire_run_lock"].assert_called_once()
+    assert "generated=3" in text
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_gcs_dry_run_never_acquires_lock(
+    sword_factory, tmp_path, worklist_client, gcs_mocks,
+):
+    """--dry-run must not write a 'running' lock object that would
+    block the real scheduled run."""
+    sword_factory.return_value = worklist_client
+
+    text = _invoke_gcs_out("--dry-run")
+
+    assert "would generate 3 chapters" in text
+    gcs_mocks["acquire_run_lock"].assert_not_called()
+    assert _FakeSynth.instances == []
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_local_mode_never_touches_gcs(
+    sword_factory, tmp_path, worklist_client, gcs_mocks,
+):
+    """Backward compatibility: without --upload-gcs (and no
+    CLOUD_RUN_JOB) every gcs helper stays uncalled."""
+    sword_factory.return_value = worklist_client
+    # Guard against a polluted ambient environment: patch.dict
+    # restores os.environ on exit.
+    with patch.dict(os.environ) as env:
+        env.pop("CLOUD_RUN_JOB", None)
+        _invoke_out(tmp_path)
+
+    for name, mock in gcs_mocks.items():
+        assert not mock.called, f"gcs.{name} called in local mode"

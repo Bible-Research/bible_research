@@ -35,6 +35,36 @@ JOBS = [
         ],
         "dom:10",
     ),
+    # Gemini free-tier audio drip. The ``daily-gemini-audio`` Cloud
+    # Scheduler job triggers all-jobs daily but overrides the
+    # container args to ``--only generate_gemini_audio``, which
+    # reaches this entry. ``manual`` on purpose: an unfiltered
+    # scheduled pass (e.g. a future plain daily/monthly trigger of
+    # all-jobs, or a run whose arg override was lost) must not
+    # start it implicitly — only an explicit ``--only``/``--force``
+    # invocation runs it.
+    (
+        "generate_gemini_audio",
+        [
+            "--fileset-id", "LVSGLU8",
+            "--upload-gcs",
+            "--max-requests", "14",
+        ],
+        "manual",
+    ),
+    # Edge read-aloud TTS (lv-LV-EveritaNeural) — the production
+    # voice. The ``daily-edge-audio`` Cloud Scheduler job triggers
+    # all-jobs daily with ``--only generate_edge_audio`` container
+    # args; ``manual`` keeps unfiltered passes from starting it
+    # implicitly (same reasoning as the Gemini entry above).
+    (
+        "generate_edge_audio",
+        [
+            "--fileset-id", "LVSGLU8",
+            "--upload-gcs",
+        ],
+        "manual",
+    ),
 ]
 
 
