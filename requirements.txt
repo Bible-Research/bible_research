@@ -17,6 +17,7 @@ psycopg2-binary==2.9.13
 gunicorn==26.2.0
 google-cloud-secret-manager==2.31.0
 google-cloud-texttospeech==2.38.0
+google-cloud-speech==2.41.0
 google-cloud-storage==3.17.1
 google-auth==2.62.0
 mutagen==1.48.1

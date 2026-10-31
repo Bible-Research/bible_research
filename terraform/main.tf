@@ -36,10 +36,12 @@ locals {
     "run.googleapis.com",
     "cloudscheduler.googleapis.com",
     "texttospeech.googleapis.com",
+    "speech.googleapis.com",
   ]
 
-  # Matches Artifact Registry + App Engine (artifact_registry.tf). Audio bucket, Cloud Run Job,
-  # and Scheduler must use this region—never derive only from var.region (tfvars can drift).
+  # Matches Artifact Registry + App Engine (artifact_registry.tf).
+  # Audio bucket, Cloud Run Job, and Scheduler must use this
+  # region—never derive only from var.region (tfvars can drift).
   app_engine_region = google_artifact_registry_repository.gae_standard.location
 }
 

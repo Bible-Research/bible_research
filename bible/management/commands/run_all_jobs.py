@@ -24,6 +24,17 @@ JOBS = [
         ["--fileset-id", "LVSGLU8", "--mode", "both"],
         "dom:3",
     ),
+    # Self-generated STT timestamps for DBT audio filesets with
+    # no DBT coverage. A different day from the TTS dom:3 run so
+    # the two never contend for the job's 5400s timeout.
+    (
+        "generate_audio_timestamps",
+        [
+            "--fileset-ids",
+            "LATLVRN1DA,LATLVRP1DA,LATBSLP1DA,LATBSLP2DA",
+        ],
+        "dom:10",
+    ),
     # Gemini free-tier audio drip. The ``daily-gemini-audio`` Cloud
     # Scheduler job triggers all-jobs daily but overrides the
     # container args to ``--only generate_gemini_audio``, which

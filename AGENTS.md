@@ -70,6 +70,20 @@ mode via SSML marks — see `audio_mode_for_fileset` in
 `audio_chapter/`), `ENGNIV_API` (API.Bible NIV text),
 `ENGNIVC1DA` (NIV audio). `*DA`-suffixed ids are audio filesets.
 
+`bible/services/dbt/timestamps_registry.py`
+(`GENERATED_TIMESTAMPS_FILESETS`) lists DBT audio filesets with
+no DBT timestamps (Latvian `LATLVR*`/`LATBSLP*`) whose verse
+timestamps we generate via Cloud STT
+(`generate_audio_timestamps`, `bible/services/google_stt/`).
+`DbtProvider.get_timestamps` falls back to the
+`timestamps_generated/` GCS artifact when DBT answers empty or
+fails; `-opus16` ids strip the suffix to the base fileset.
+Worklist source is `DBTClient.get_fileset_files` —
+`GET /bibles/filesets/{fileset_id}` returns the fileset's real
+per-chapter coverage with signed `path` + `duration` (unlike
+`/bibles/{bible_id}/book`, which keys on the bible id and unions
+sibling filesets; a `*DA` fileset id 404s there).
+
 API.Bible text responses carry a `meta` block with FUMS fields the
 frontend must report (license requirement). The API.Bible client
 needs `API_BIBLE_KEY` (settings/`config.yaml`); the registry and
@@ -326,6 +340,11 @@ resolved:
 - Dependencies: `requirements.txt` pins the runtime stack to
   the versions installed in `venv/` (verify with `pip freeze`);
   `requirements-dev.txt` adds pytest/pytest-django/debugpy.
+- Local pip/requests hit an SSL-intercept proxy: pip needs
+  `--trusted-host pypi.org --trusted-host
+  files.pythonhosted.org`; one-off `requests` scripts need
+  `verify=False`. `terraform` is installed but not on agent
+  PATH (`/opt/homebrew/bin`).
 - `bible/services/dbt/dbt_client/` is a slimmed vendored
   OpenAPI client imported via a `sys.path` append in
   `dbt/client.py` — not a pip package; don't add it to
