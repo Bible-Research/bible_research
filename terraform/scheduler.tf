@@ -31,6 +31,16 @@ resource "google_service_account" "all_jobs_scheduler" {
   project      = var.project_id
 }
 
+# Cloud Scheduler mints the OAuth token for the trigger through its
+# own service agent, which needs TokenCreator on the invoker SA —
+# without it the :run call fails PERMISSION_DENIED before reaching
+# Cloud Run (seen on the first daily attempt, 2026-10-31).
+resource "google_service_account_iam_member" "cloudscheduler_token_creator" {
+  service_account_id = google_service_account.all_jobs_scheduler.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
+}
+
 resource "google_cloud_run_v2_job_iam_member" "all_jobs_scheduler_invoker" {
   project  = var.project_id
   location = google_cloud_run_v2_job.all_jobs.location
