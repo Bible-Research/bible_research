@@ -7,7 +7,10 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import override_settings
 
-from bible.services.google_stt.client import QuotaExceeded
+from bible.services.google_stt.client import (
+    BilledRecognizeError,
+    QuotaExceeded,
+)
 
 
 _CMD = "bible.management.commands.generate_audio_timestamps"
@@ -362,3 +365,45 @@ def test_opus16_fileset_id_resolves_to_base():
         m["upload_generated_timestamps"].call_args_list[0].args
     )
     assert args[0] == "LATLVRN1DA"
+
+
+def test_billed_recognize_error_still_meters_seconds():
+    """A failure after the LRO was created is billed spend —
+    the seconds must be consumed and persisted even though the
+    chapter produced no artifact."""
+    stt = _fake_stt()
+    stt.long_running_recognize_uri.side_effect = [
+        BilledRecognizeError("parse crash"),
+        _STT_WORDS,
+    ]
+    out, mocks = _run(
+        ["--fileset-ids", "LATLVRN1DA"], stt=stt,
+    )
+    mocks["increment_stt_monthly_usage"].assert_any_call(300)
+    mocks["increment_stt_monthly_usage"].assert_any_call(200)
+    assert "generated=1" in out
+
+
+def test_max_failures_aborts_on_consecutive_errors():
+    """Consecutive chapter failures abort the fileset after
+    ``--max-failures`` (default 3) instead of draining the
+    whole worklist — a systematic failure must not keep
+    spending."""
+    rows = [
+        {
+            "book_id": "JHN", "chapter_start": n,
+            "path": f"https://x/{n}.mp3", "duration": 100,
+            "filesize_in_bytes": 1,
+        }
+        for n in range(1, 6)
+    ]
+    dbt = _fake_dbt(rows=rows)
+    stt = _fake_stt()
+    stt.long_running_recognize_uri.side_effect = RuntimeError(
+        "systematic"
+    )
+    out, mocks = _run(
+        ["--fileset-ids", "LATLVRN1DA"], stt=stt, dbt=dbt,
+    )
+    assert stt.long_running_recognize_uri.call_count == 3
+    assert "reason=consecutive_failures" in out

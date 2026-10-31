@@ -17,8 +17,27 @@ class QuotaExceeded(Exception):
     """Raised when Cloud STT reports the project's quota is depleted."""
 
 
+class BilledRecognizeError(Exception):
+    """The LRO was created but its result could not be used.
+
+    Cloud STT bills every successfully processed request, and an
+    operation that reached Google may still complete — and bill —
+    even when polling or result parsing fails client-side. The
+    caller must meter the chapter's seconds on this error.
+    """
+
+
 def _seconds(duration) -> float:
-    """Convert a protobuf Duration to float seconds."""
+    """Convert a word-offset duration to float seconds.
+
+    ``google-cloud-speech`` (proto-plus) returns
+    ``datetime.timedelta`` for ``start_time``/``end_time`` — the
+    observed production shape. Older client versions exposed a
+    protobuf ``Duration`` with ``.seconds``/``.nanos`` instead;
+    handle both.
+    """
+    if hasattr(duration, "total_seconds"):
+        return duration.total_seconds()
     return duration.seconds + duration.nanos / 1e9
 
 
@@ -67,32 +86,44 @@ class GoogleSTTClient:
             operation = self._client.long_running_recognize(
                 config=config, audio=audio,
             )
-            try:
-                response = operation.result(
-                    timeout=timeout_seconds,
-                )
-            except TimeoutError:
-                try:
-                    operation.cancel()
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "Failed to cancel timed-out STT LRO.",
-                        exc_info=True,
-                    )
-                raise
         except gax.ResourceExhausted as exc:
             raise QuotaExceeded(str(exc)) from exc
 
-        words: List[Tuple[str, float, float]] = []
-        for result in response.results or []:
-            alternatives = result.alternatives or []
-            if not alternatives:
-                continue
-            for w in alternatives[0].words or []:
-                words.append(
-                    (w.word, _seconds(w.start_time),
-                     _seconds(w.end_time))
+        # Everything below happens after the LRO was created —
+        # failures here can still bill the chapter's seconds, so
+        # they surface as BilledRecognizeError (TimeoutError is
+        # raised bare because the caller already meters it).
+        try:
+            response = operation.result(
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            try:
+                operation.cancel()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to cancel timed-out STT LRO.",
+                    exc_info=True,
                 )
+            raise
+        except gax.ResourceExhausted as exc:
+            raise QuotaExceeded(str(exc)) from exc
+        except Exception as exc:
+            raise BilledRecognizeError(str(exc)) from exc
+
+        try:
+            words: List[Tuple[str, float, float]] = []
+            for result in response.results or []:
+                alternatives = result.alternatives or []
+                if not alternatives:
+                    continue
+                for w in alternatives[0].words or []:
+                    words.append(
+                        (w.word, _seconds(w.start_time),
+                         _seconds(w.end_time))
+                    )
+        except Exception as exc:
+            raise BilledRecognizeError(str(exc)) from exc
         return words
 
 
