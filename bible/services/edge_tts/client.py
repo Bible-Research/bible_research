@@ -8,6 +8,7 @@ CBR makes byte length a reliable duration estimate.
 """
 import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -15,8 +16,14 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_VOICE_NAME = "lv-LV-EveritaNeural"
-DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_MAX_ATTEMPTS = 5
+# Exponential backoff between retries: base 2 s doubling per
+# attempt, capped at 30 s, ±25% jitter. The endpoint's
+# NoAudioReceived throttling arrives in multi-minute bursts —
+# the old fixed 2 s sleep burned all retries inside one burst.
 RETRY_BACKOFF_SECONDS = 2.0
+RETRY_BACKOFF_MAX_SECONDS = 30.0
+RETRY_BACKOFF_JITTER = 0.25
 # edge-tts output is a 48 kbps CBR MP3 stream — byte length maps
 # linearly to playback duration.
 MP3_BITRATE_BPS = 48000
@@ -61,11 +68,14 @@ async def _stream_once(
 class EdgeTTSClient:
     """Thin retry wrapper over ``edge_tts.Communicate``.
 
-    The unofficial endpoint occasionally answers a well-formed
-    request with ``NoAudioReceived`` or drops the WebSocket, so
-    every call retries a few times with a short backoff. There is
-    no API key and no formal quota — courtesy pacing lives in the
-    synthesizer (``min_interval_seconds``), not here.
+    The unofficial endpoint frequently answers a well-formed
+    request with ``NoAudioReceived`` or drops the WebSocket —
+    in bursts lasting minutes — so every call retries with
+    exponential backoff (``RETRY_BACKOFF_SECONDS`` doubling per
+    attempt up to ``RETRY_BACKOFF_MAX_SECONDS``, ±
+    ``RETRY_BACKOFF_JITTER`` jitter). There is no API key and no
+    formal quota — courtesy pacing lives in the synthesizer
+    (``min_interval_seconds``), not here.
     """
 
     def __init__(
@@ -73,10 +83,16 @@ class EdgeTTSClient:
         voice_name: str = DEFAULT_VOICE_NAME,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         sleep_fn: Callable[[float], None] = time.sleep,
+        random_fn: Callable[[float, float], float] = (
+            random.uniform
+        ),
     ):
         self._voice_name = voice_name
         self._max_attempts = max_attempts
         self._sleep = sleep_fn
+        # (low, high) -> float sampler for jitter; injectable so
+        # tests can pin the backoff schedule deterministically.
+        self._random = random_fn
         # Requests actually sent — retries included — so callers
         # can log real spend against endpoint throttling.
         self.requests_made = 0
@@ -109,8 +125,24 @@ class EdgeTTSClient:
                     type(exc).__name__,
                 )
                 if attempt < self._max_attempts:
-                    self._sleep(RETRY_BACKOFF_SECONDS)
+                    delay = self._backoff_seconds(attempt)
+                    logger.warning(
+                        "edge-tts retrying in %.1fs", delay,
+                    )
+                    self._sleep(delay)
         raise EdgeTTSError(
             f"edge-tts failed after {self._max_attempts} "
             f"attempts: {type(last_exc).__name__}"
         ) from last_exc
+
+    def _backoff_seconds(self, attempt: int) -> float:
+        """Delay after failed ``attempt`` (1-based): 2 s doubling
+        per attempt up to the cap, ±25% jitter so consecutive
+        verses don't re-fire in lockstep inside a throttle
+        burst."""
+        base = min(
+            RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1),
+            RETRY_BACKOFF_MAX_SECONDS,
+        )
+        delta = base * RETRY_BACKOFF_JITTER
+        return self._random(base - delta, base + delta)

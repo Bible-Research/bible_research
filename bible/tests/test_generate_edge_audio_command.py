@@ -170,6 +170,33 @@ def test_max_chapters_bounds_run(
 
 @patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
 @patch(f"{_CMD}.get_default_sword_client")
+def test_default_pacing_reaches_synthesizer(
+    sword_factory, tmp_path, worklist_client,
+):
+    """Omitting --sleep-seconds passes the (raised) default to
+    the synthesizer's courtesy pacing."""
+    from bible.management.commands.generate_edge_audio import (
+        DEFAULT_SLEEP_SECONDS,
+    )
+    sword_factory.return_value = worklist_client
+
+    out = StringIO()
+    call_command(
+        "generate_edge_audio",
+        "--output-dir", str(tmp_path / "tts-out"),
+        "--state-file", str(tmp_path / "state.json"),
+        stdout=out,
+    )
+
+    synth = _FakeEdgeSynth.instances[-1]
+    assert synth.kwargs["min_interval_seconds"] == (
+        DEFAULT_SLEEP_SECONDS
+    )
+    assert DEFAULT_SLEEP_SECONDS > 0.5
+
+
+@patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
 def test_edge_tts_error_continues(
     sword_factory, tmp_path, worklist_client,
 ):
