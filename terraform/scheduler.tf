@@ -38,7 +38,11 @@ resource "google_service_account" "all_jobs_scheduler" {
 resource "google_service_account_iam_member" "cloudscheduler_token_creator" {
   service_account_id = google_service_account.all_jobs_scheduler.name
   role               = "roles/iam.serviceAccountTokenCreator"
-  member             = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
+  member = join("", [
+    "serviceAccount:service-",
+    "${data.google_project.project.number}",
+    "@gcp-sa-cloudscheduler.iam.gserviceaccount.com",
+  ])
 }
 
 # run.invoker grants run.jobs.run only — the trigger passes
@@ -50,7 +54,7 @@ resource "google_cloud_run_v2_job_iam_member" "all_jobs_scheduler_invoker" {
   location = google_cloud_run_v2_job.all_jobs.location
   name     = google_cloud_run_v2_job.all_jobs.name
   role     = "roles/run.developer"
-  member   = "serviceAccount:${google_service_account.all_jobs_scheduler.email}"
+  member   = google_service_account.all_jobs_scheduler.member
 }
 
 # 09:00 UTC daily — a daytime run in Europe/Riga. (There is no
@@ -73,7 +77,12 @@ resource "google_cloud_scheduler_job" "daily_edge_audio" {
 
   http_target {
     http_method = "POST"
-    uri         = "https://${local.app_engine_region}-run.googleapis.com/v2/projects/${var.project_id}/locations/${local.app_engine_region}/jobs/${google_cloud_run_v2_job.all_jobs.name}:run"
+    uri = join("", [
+      "https://${local.app_engine_region}-run.googleapis.com",
+      "/v2/projects/${var.project_id}",
+      "/locations/${local.app_engine_region}",
+      "/jobs/${google_cloud_run_v2_job.all_jobs.name}:run",
+    ])
 
     headers = {
       "Content-Type" = "application/json"
@@ -86,6 +95,58 @@ resource "google_cloud_scheduler_job" "daily_edge_audio" {
         }]
       }
     }))
+
+    oauth_token {
+      service_account_email = google_service_account.all_jobs_scheduler.email
+    }
+  }
+
+  depends_on = [
+    google_cloud_run_v2_job_iam_member.all_jobs_scheduler_invoker,
+  ]
+}
+
+# ============================================================================
+# END-OF-MONTH STT TIMESTAMPS TRIGGER — ENABLED
+# ============================================================================
+# Runs the ``generate_audio_timestamps`` sub-job on the last day of
+# each month so the STT free tier (60 min/mo, resetting on the 1st)
+# is spent just before it expires. Cloud Scheduler cron cannot
+# express "last day", so this fires a plain ``jobs:run`` on days
+# 28-31 and the JOBS entry's ``last_day_of_month`` predicate gates
+# execution to the real last day.
+#
+# No container overrides — deliberately a bare ``jobs:run``, because
+# ``--only`` bypasses the schedule predicate and would run the job
+# on the 28th regardless. On days 28-31 nothing else in JOBS can
+# match (dom:3 is out of range; the Gemini/Edge entries are
+# ``manual``). CAUTION: a future JOBS entry whose schedule matches
+# any of 28-31 (e.g. ``daily``) would also run under this trigger —
+# review the JOBS table when adding entries.
+# ============================================================================
+resource "google_cloud_scheduler_job" "eom_stt_timestamps" {
+  name             = "eom-stt-timestamps"
+  description      = "Last-day-of-month STT timestamps sub-job of all-jobs."
+  schedule         = "0 7 28-31 * *"
+  time_zone        = "Etc/UTC"
+  project          = var.project_id
+  region           = local.app_engine_region
+  attempt_deadline = "320s"
+
+  retry_config {
+    # The job itself enforces quota/run-lock semantics; a
+    # scheduler retry would just hit the month lock.
+    retry_count = 0
+  }
+
+  http_target {
+    http_method = "POST"
+    uri = join("", [
+      "https://${local.app_engine_region}-run.googleapis.com",
+      "/v2/projects/${var.project_id}",
+      "/locations/${local.app_engine_region}",
+      "/jobs/${google_cloud_run_v2_job.all_jobs.name}:run",
+    ])
 
     oauth_token {
       service_account_email = google_service_account.all_jobs_scheduler.email
@@ -124,7 +185,12 @@ resource "google_cloud_scheduler_job" "daily_edge_audio" {
 #
 #   http_target {
 #     http_method = "POST"
-#     uri         = "https://${local.app_engine_region}-run.googleapis.com/v2/projects/${var.project_id}/locations/${local.app_engine_region}/jobs/${google_cloud_run_v2_job.all_jobs.name}:run"
+#     uri = join("", [
+#       "https://${local.app_engine_region}-run.googleapis.com",
+#       "/v2/projects/${var.project_id}",
+#       "/locations/${local.app_engine_region}",
+#       "/jobs/${google_cloud_run_v2_job.all_jobs.name}:run",
+#     ])
 #
 #     oauth_token {
 #       service_account_email = google_service_account.all_jobs_scheduler.email

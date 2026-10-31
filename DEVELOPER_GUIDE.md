@@ -1705,8 +1705,11 @@ failures. `--only LABEL` runs one entry ignoring its schedule,
 `--force` runs all entries, `--dry-run` prints what would run.
 It currently lists `generate_chapter_audio` on `dom:3` (the
 monthly audio pass, which has no scheduler trigger),
-`generate_audio_timestamps` on `dom:10` (the monthly STT
-timestamps pass), plus `generate_gemini_audio` and
+`generate_audio_timestamps` on `last_day_of_month` (the
+monthly STT timestamps pass, started by the
+`eom-stt-timestamps` Cloud Scheduler job firing a plain
+`jobs:run` on days 28-31 — cron can't express "last day", so
+the predicate gates it), plus `generate_gemini_audio` and
 `generate_edge_audio` on `manual`
 (the Edge entry is started daily by the `daily-edge-audio`
 Cloud Scheduler job via a `jobs:run` container-args override
