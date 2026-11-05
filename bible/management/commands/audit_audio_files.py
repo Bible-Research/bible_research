@@ -18,8 +18,10 @@ cheap pass (list + small sidecar JSONs, no MP3 downloads) —
 that is the mode meant to stay inside free-tier limits on a
 frequent schedule.
 
-Content-level defects (clipping, TTS voice glitches) need a
-real decoder and are out of scope; see DEVELOPER_GUIDE.md.
+``--deep`` adds content-level checks (clipped samples, dead
+silence, loudness outliers per verse segment) by decoding each
+MP3 with ``miniaudio`` — a dev-only dependency, so this mode
+is LOCAL-only and not free-tier safe; see DEVELOPER_GUIDE.md.
 """
 import json
 import logging
@@ -28,6 +30,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from bible.services import audio_audit
+from bible.services import audio_deep
 from bible.services.storage import gcs
 
 logger = logging.getLogger(__name__)
@@ -83,6 +86,33 @@ class Command(BaseCommand):
             "--verbose", action="store_true",
             help="Also print a line for every clean artifact.",
         )
+        parser.add_argument(
+            "--deep", action="store_true",
+            help=(
+                "Also decode every downloaded MP3 and check its "
+                "content: per-verse clipping, dead silence and "
+                "loudness outliers (dev-only decoder, local use "
+                "only — not combinable with --metadata-only)."
+            ),
+        )
+        parser.add_argument(
+            "--clip-min-run", type=int,
+            default=audio_deep.CLIP_MIN_RUN,
+            help=(
+                "Consecutive near-full-scale samples that flag a "
+                "segment as clipped "
+                f"(default: {audio_deep.CLIP_MIN_RUN})."
+            ),
+        )
+        parser.add_argument(
+            "--clip-min-total", type=int,
+            default=audio_deep.CLIP_MIN_TOTAL,
+            help=(
+                "Total near-full-scale samples that flag a "
+                "segment as clipped even without a long run "
+                f"(default: {audio_deep.CLIP_MIN_TOTAL})."
+            ),
+        )
 
     def handle(self, *args, **options):
         prefixes = [
@@ -96,14 +126,33 @@ class Command(BaseCommand):
         book = (options["book"] or "").upper() or None
         metadata_only = options["metadata_only"]
         limit = options["limit"]
+        deep = options["deep"]
+        if deep and metadata_only:
+            raise CommandError(
+                "--deep cannot be combined with --metadata-only "
+                "(content checks need the MP3 downloads)"
+            )
+        if deep:
+            # Fail fast with an actionable message before listing
+            # a single blob when the dev-only decoder is absent.
+            try:
+                audio_deep.ensure_decoder()
+            except audio_deep.DecoderUnavailableError as exc:
+                raise CommandError(str(exc))
 
         bucket = gcs.get_default_client().bucket(
             settings.AUDIO_BUCKET_NAME
         )
-        report = self._audit(
-            bucket, prefixes, fileset_id, book,
-            metadata_only=metadata_only, limit=limit,
-        )
+        try:
+            report = self._audit(
+                bucket, prefixes, fileset_id, book,
+                metadata_only=metadata_only, limit=limit,
+                deep=deep,
+                clip_min_run=options["clip_min_run"],
+                clip_min_total=options["clip_min_total"],
+            )
+        except audio_deep.DecoderUnavailableError as exc:
+            raise CommandError(str(exc))
         self._emit(report, options)
         if report["suspects"]:
             raise CommandError(
@@ -118,7 +167,9 @@ class Command(BaseCommand):
 
     def _audit(
         self, bucket, prefixes, fileset_id, book,
-        metadata_only=False, limit=0,
+        metadata_only=False, limit=0, deep=False,
+        clip_min_run=audio_deep.CLIP_MIN_RUN,
+        clip_min_total=audio_deep.CLIP_MIN_TOTAL,
     ) -> dict:
         audio_blobs = {}
         sidecar_blobs = {}
@@ -162,9 +213,8 @@ class Command(BaseCommand):
             )
             if fully_checked:
                 checked += 1
-                check = audio_audit.audit_mp3(
-                    name, blob.download_as_bytes()
-                )
+                data = blob.download_as_bytes()
+                check = audio_audit.audit_mp3(name, data)
                 entry["duration_seconds"] = check.duration_seconds
                 entry["issues"].extend(
                     {"code": i.code, "detail": i.detail}
@@ -175,6 +225,15 @@ class Command(BaseCommand):
                         {"code": i.code, "detail": i.detail}
                         for i in audio_audit.cross_check(
                             name, blob.size, check, payload,
+                        )
+                    )
+                if deep:
+                    entry["issues"].extend(
+                        {"code": i.code, "detail": i.detail}
+                        for i in self._deep_check(
+                            data, payload,
+                            clip_min_run=clip_min_run,
+                            clip_min_total=clip_min_total,
                         )
                     )
             elif payload:
@@ -211,6 +270,7 @@ class Command(BaseCommand):
             "bucket": settings.AUDIO_BUCKET_NAME,
             "prefixes": prefixes,
             "metadata_only": metadata_only,
+            "deep": deep,
             "scanned": len(audio_blobs),
             "fully_checked": checked,
             "results": results,
@@ -219,6 +279,32 @@ class Command(BaseCommand):
                 e["name"] for e in results if e["issues"]
             ] + orphans,
         }
+
+    @staticmethod
+    def _deep_check(
+        data, payload, *, clip_min_run, clip_min_total,
+    ):
+        """Decode MP3 bytes and run the content checks.
+
+        Decoder absence raises ``DecoderUnavailableError`` (the
+        command turns it into a CommandError); a stream the
+        decoder itself cannot parse becomes a ``decode_failed``
+        issue rather than aborting the whole audit."""
+        try:
+            samples, sample_rate = audio_deep.decode_mp3_bytes(
+                data
+            )
+        except audio_deep.DecoderUnavailableError:
+            raise
+        except Exception as exc:
+            return [audio_audit.Issue(
+                "decode_failed", exc.__class__.__name__,
+            )]
+        return audio_deep.analyze_pcm(
+            samples, sample_rate, payload,
+            clip_min_run=clip_min_run,
+            clip_min_total=clip_min_total,
+        )
 
     @staticmethod
     def _matches(name, fileset_id, book):
@@ -263,10 +349,11 @@ class Command(BaseCommand):
             )
         self.stdout.write(
             "summary: scanned={scanned} fully_checked={fc} "
-            "suspects={n} metadata_only={mo}".format(
+            "suspects={n} metadata_only={mo} deep={d}".format(
                 scanned=report["scanned"],
                 fc=report["fully_checked"],
                 n=len(report["suspects"]),
                 mo=report["metadata_only"],
+                d=report["deep"],
             )
         )

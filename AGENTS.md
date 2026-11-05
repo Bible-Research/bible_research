@@ -340,8 +340,12 @@ resolved:
   `bible/services/audio_audit.py`). `--metadata-only` lists
   pairs and checks sidecar size agreement without downloading
   MP3s (the free-tier-friendly mode); exits non-zero on
-  suspects. Not wired into `run_all_jobs`/terraform — see
-  DEVELOPER_GUIDE "Audio Artifact Audit".
+  suspects. `--deep` adds content checks (clipping, silence,
+  loudness outliers) via the dev-only `miniaudio` decoder in
+  `bible/services/audio_deep.py` — local use only, downloads
+  the whole candidate set (GCS egress cost), never wire into
+  `run_all_jobs`/terraform. See DEVELOPER_GUIDE "Audio
+  Artifact Audit".
 - `bible/management/commands/generate_gemini_audio.py` and
   `generate_edge_audio.py`: local mode (default) writes
   `tts-out/` + `gemini-tts-state.json`; `--upload-gcs`
