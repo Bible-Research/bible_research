@@ -333,9 +333,11 @@ resolved:
   ~0.09-0.28 alignment scores / `low_confidence`; revisit when
   a matching Latvian text is licensable — see
   DEVELOPER_GUIDE "Generated Timestamps"),
-  `generate_gemini_audio` (`manual`) and `generate_edge_audio`
+  `generate_gemini_audio` (`manual`), `generate_edge_audio`
   (`manual`; started only by the daily scheduler's `--only`
-  override — the Everita voice). Generated artifacts land under
+  override — the Everita voice) and `repair_audio_files`
+  (`manual`; manifest-driven artifact repair — see below).
+  Generated artifacts land under
   `audio_gemini/` and `audio_edge/` in the audio bucket (GCS
   modes `"gemini"`/`"edge"` in `bible/services/storage/gcs.py`)
   with day-keyed lock objects under `state/`; no fileset serves
@@ -349,12 +351,25 @@ resolved:
   loudness outliers) via the dev-only `miniaudio` decoder in
   `bible/services/audio_deep.py` — local use only, downloads
   the whole candidate set (GCS egress cost), never wire into
-  `run_all_jobs`/terraform. Remediation = regeneration: a
-  `--deep --json` manifest feeds a repair job that deletes
-  the bad MP3 + sidecar and re-synthesizes via the engine
-  matching the prefix, under the same free-tier budget
-  guards as the generation jobs. See DEVELOPER_GUIDE
+  `run_all_jobs`/terraform. `--report PATH` writes the JSON
+  report to a local file or `gs://` URI — the manifest
+  `repair_audio_files` consumes. See DEVELOPER_GUIDE
   "Audio Artifact Audit".
+- `bible/management/commands/repair_audio_files.py` —
+  manifest-driven repair of audit suspects (parsing/routing
+  in `bible/services/audio_repair.py`, ledger + URI helpers
+  in `storage/gcs.py`). Dry-run by default; `--apply`
+  regenerates each suspect chapter pair in place via the
+  Google TTS `Synthesizer` (`audio/` → verse, `audio_chapter/`
+  → chapter; `audio_gemini/`/`audio_edge/` report
+  `unsupported_engine`), billed against the shared
+  `state/usage/{FILESET}/{YYYY-MM}.json` monthly char
+  counter, and records repaired pairs under
+  `state/repair/<base>.json` for idempotent re-runs
+  (`--force` overrides). Default manifest:
+  `gs://{AUDIO_BUCKET_NAME}/manifests/audio-repair.json`;
+  registered as a `manual` JOBS entry — no scheduler
+  wiring.
 - `bible/management/commands/generate_gemini_audio.py` and
   `generate_edge_audio.py`: local mode (default) writes
   `tts-out/` + `gemini-tts-state.json`; `--upload-gcs`

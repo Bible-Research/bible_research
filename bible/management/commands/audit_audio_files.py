@@ -83,6 +83,15 @@ class Command(BaseCommand):
             help="Emit the report as JSON instead of text lines.",
         )
         parser.add_argument(
+            "--report", metavar="PATH",
+            help=(
+                "Also write the full JSON report (same payload "
+                "--json prints) to PATH — a local file or a "
+                "gs://bucket/name URI. This file is the manifest "
+                "repair_audio_files consumes."
+            ),
+        )
+        parser.add_argument(
             "--verbose", action="store_true",
             help="Also print a line for every clean artifact.",
         )
@@ -153,6 +162,14 @@ class Command(BaseCommand):
             )
         except audio_deep.DecoderUnavailableError as exc:
             raise CommandError(str(exc))
+        if options["report"]:
+            gcs.write_text_uri(
+                options["report"],
+                json.dumps(report, indent=2) + "\n",
+            )
+            self.stderr.write(
+                f"report written to {options['report']}"
+            )
         self._emit(report, options)
         if report["suspects"]:
             raise CommandError(

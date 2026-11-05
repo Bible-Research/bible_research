@@ -2037,17 +2037,75 @@ workflow below is the intended consumer instead.
 
 Broken files are fixed by *regeneration*, not repair in
 place — TTS output is non-deterministic, so re-synthesizing
-the same verse/chapter almost always yields clean audio:
+the same chapter almost always yields clean audio. The
+pipeline is manifest-driven:
 
-1. Run `--deep` locally and collect the suspects as a
-   manifest (machine-readable `--json` report).
-2. A repair job consumes the manifest: for each entry it
-   deletes the bad `*_audio.mp3` (and `*_timestamps.json`)
-   from the bucket and re-runs the generation path that
-   produced it (Google TTS verse/chapter mode, Gemini, or
-   Edge, keyed by the prefix), bounded by the same
-   free-tier budget guards the generation jobs use.
-3. Repaired entries are marked so re-runs are idempotent.
+1. Run `--deep` locally and write the manifest —
+   `audit_audio_files --deep --book NUM --report
+   manifest.json` (or `--report
+   gs://$AUDIO_BUCKET/manifests/audio-repair.json`; the flag
+   accepts local paths and `gs://` URIs and writes the same
+   payload `--json` prints). A bare JSON list of blob names
+   is also accepted as a manifest.
+2. Feed the manifest to `repair_audio_files`. It parses
+   each suspect name into
+   `prefix/fileset/voice/book/chapter`, resolves the
+   producing engine from the prefix, and — **dry-run by
+   default** — prints a `REPAIR`/`SKIP` line per entry plus
+   the remaining monthly TTS budget. `--apply` executes.
+3. On `--apply`, each Google TTS entry regenerates through
+   the same code path as `generate_chapter_audio`
+   (`google_tts.Synthesizer` + `upload_chapter_artifacts`,
+   mode `verse` for `audio/`, `chapter` for
+   `audio_chapter/`). The sidecar JSON is written first,
+   then the MP3 overwrites the bad blob in place — a failed
+   regeneration leaves the old artifact untouched and the
+   entry un-repaired.
+4. **Free-tier guard**: synthesized characters draw from
+   the same per-fileset monthly counter the generation job
+   uses (`state/usage/{FILESET}/{YYYY-MM}.json`,
+   `MONTHLY_TTS_CHAR_LIMIT`); entries stop with
+   `budget_exhausted` when the month is spent, and billed
+   deltas are persisted after every attempt.
+5. **Idempotency**: each repaired chapter pair is recorded
+   under `state/repair/<artifact-base>.json`; re-running
+   the same manifest prints `SKIP … already_repaired`
+   (`--force` overrides for a chapter that broke again).
+
+```bash
+# 1. Audit (local, dev-only decoder) -> manifest file.
+python manage.py audit_audio_files --deep --book NUM \
+  --report /tmp/manifest.json
+# 2. Dry-run — planned actions, budget, skips.
+python manage.py repair_audio_files \
+  --manifest /tmp/manifest.json
+# 3. Apply — regenerate + overwrite in place.
+python manage.py repair_audio_files \
+  --manifest /tmp/manifest.json --apply
+```
+
+Engine scope: only the Google TTS modes (`audio/`,
+`audio_chapter/`) regenerate today; `audio_gemini/` and
+`audio_edge/` suspects are reported
+`unsupported_engine` — their pipelines are
+request-capped rather than char-budgeted and are left to
+their own generation commands.
+
+Granularity is the whole chapter pair (`*_audio.mp3` +
+`*_timestamps.json`) — that is the artifact unit the
+generators write, so a `missing_sidecar` or
+`orphan_sidecar` suspect also regenerates the pair rather
+than deleting the dangling half.
+
+Without `--manifest` the command reads
+`gs://{AUDIO_BUCKET_NAME}/manifests/audio-repair.json` and
+exits cleanly when it is absent — that default is what the
+`manual` `repair_audio_files` row in `run_all_jobs.py`'s
+`JOBS` uses (`--only repair_audio_files` runs it with
+`--apply`; a scheduled pass can never start it). The
+command exits non-zero if any entry fails, so a partial
+run is visible to automation; fixed entries stay recorded
+and a re-run resumes with the remainder.
 
 ---
 
