@@ -69,6 +69,19 @@ JOBS = [
         ],
         "manual",
     ),
+    # Manifest-driven repair of defective audio artifacts found
+    # by ``audit_audio_files --deep`` (see DEVELOPER_GUIDE "Audio
+    # Artifact Audit"). Reads the manifest at
+    # gs://{AUDIO_BUCKET_NAME}/manifests/audio-repair.json by
+    # default and exits cleanly when it is absent. ``manual``:
+    # a repair run consumes Cloud TTS characters, so it must only
+    # start via an explicit ``--only``/``--force`` invocation —
+    # never implicitly on a scheduled pass.
+    (
+        "repair_audio_files",
+        ["--apply"],
+        "manual",
+    ),
 ]
 
 

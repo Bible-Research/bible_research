@@ -847,3 +847,93 @@ def write_gemini_daily_requests(
         }),
         content_type="application/json",
     )
+
+
+# ---------------------------------------------------------------------
+# Audio repair ledger + manifest/report URIs
+#
+# ``repair_audio_files`` regenerates the defective chapter
+# artifacts an audit manifest lists. Repaired chapter pairs are
+# recorded under ``state/repair/`` — keyed by the artifact path
+# minus its suffix, e.g.
+#   state/repair/audio/LVSGLU8/{VOICE}/NUM/24.json
+# — so re-running the same manifest skips work already done.
+# ---------------------------------------------------------------------
+
+_REPAIR_STATE_PREFIX = "state/repair"
+_REPAIR_STATE_SUFFIX = ".json"
+
+
+def repair_state_object_path(entry_base: str) -> str:
+    """Ledger object path for a repaired chapter pair.
+
+    ``entry_base`` is the artifact path without its suffix, e.g.
+    ``audio/LVSGLU8/{VOICE}/NUM/24``."""
+    return (
+        f"{_REPAIR_STATE_PREFIX}/{entry_base}"
+        f"{_REPAIR_STATE_SUFFIX}"
+    )
+
+
+def list_repair_state() -> Set[str]:
+    """Return the set of entry bases already recorded repaired."""
+    done: Set[str] = set()
+    prefix = f"{_REPAIR_STATE_PREFIX}/"
+    for blob in _bucket().list_blobs(prefix=prefix):
+        name = blob.name[len(prefix):]
+        if name.endswith(_REPAIR_STATE_SUFFIX):
+            done.add(name[: -len(_REPAIR_STATE_SUFFIX)])
+    return done
+
+
+def mark_entry_repaired(entry_base: str, payload: dict) -> None:
+    """Record a chapter pair as repaired. Idempotent."""
+    record = dict(payload)
+    record["repaired_at"] = _utc_naive_now().isoformat()
+    _bucket().blob(
+        repair_state_object_path(entry_base)
+    ).upload_from_string(
+        json.dumps(record, ensure_ascii=False),
+        content_type="application/json",
+    )
+
+
+def read_text_uri(uri: str) -> str:
+    """Read a local path or ``gs://bucket/name`` URI as UTF-8.
+
+    A missing object raises ``FileNotFoundError`` either way (a
+    GCS ``NotFound`` is translated) so callers get one contract."""
+    if uri.startswith("gs://"):
+        bucket_name, _, blob_name = uri[5:].partition("/")
+        if not bucket_name or not blob_name:
+            raise ValueError(f"Bad gs:// URI: {uri!r}")
+        blob = (
+            get_default_client()
+            .bucket(bucket_name)
+            .blob(blob_name)
+        )
+        try:
+            return blob.download_as_bytes().decode("utf-8")
+        except _gax.NotFound:
+            raise FileNotFoundError(uri) from None
+    with open(uri, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def write_text_uri(uri: str, text: str) -> None:
+    """Write UTF-8 text to a local path or ``gs://`` URI."""
+    if uri.startswith("gs://"):
+        bucket_name, _, blob_name = uri[5:].partition("/")
+        if not bucket_name or not blob_name:
+            raise ValueError(f"Bad gs:// URI: {uri!r}")
+        (
+            get_default_client()
+            .bucket(bucket_name)
+            .blob(blob_name)
+            .upload_from_string(
+                text, content_type="application/json",
+            )
+        )
+        return
+    with open(uri, "w", encoding="utf-8") as fh:
+        fh.write(text)
