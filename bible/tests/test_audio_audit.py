@@ -2,8 +2,13 @@
 ``audit_audio_files`` management command. GCS is replaced by
 fake blob/bucket objects; MP3 fixtures are synthetic MPEG-2
 Layer III CBR streams (0xFFF344C4 = 32 kbps / 24 kHz / mono,
-96-byte frames)."""
+96-byte frames). The --deep content checks are exercised on
+synthesized int16 PCM (and one lameenc->miniaudio round-trip)
+so no network or real MP3 fixture is needed."""
 import json
+import math
+import sys
+from array import array
 from io import StringIO
 from unittest.mock import patch
 
@@ -12,6 +17,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from bible.services import audio_audit
+from bible.services import audio_deep
 from bible.services.audio_audit import (
     AUDIO_SUFFIX,
     TIMESTAMPS_SUFFIX,
@@ -325,3 +331,297 @@ def test_command_limit_caps_full_checks():
     objects[extra_json] = make_sidecar(duration=1.92, size=7680)
     out = call_audit(FakeBucket(objects), "--limit", "1")
     assert "fully_checked=1" in out
+
+
+# ---------------------------------------------------------------
+# audio_deep — content checks on synthesized PCM
+# ---------------------------------------------------------------
+
+SR = 24000
+
+
+def pcm_sine(seconds, amp=0.5):
+    """Clean int16 sine at ``amp`` of full scale."""
+    n = int(seconds * SR)
+    return array("h", (
+        int(amp * 32767 * math.sin(2 * math.pi * 220 * i / SR))
+        for i in range(n)
+    ))
+
+
+def pcm_silence(seconds):
+    return array("h", [0]) * int(seconds * SR)
+
+
+def pcm_clipped(seconds):
+    """Sine driven past the rail — long consecutive clip runs."""
+    out = array("h")
+    for i in range(int(seconds * SR)):
+        v = int(1.8 * 32767 * math.sin(2 * math.pi * 220 * i / SR))
+        out.append(max(-32768, min(32767, v)))
+    return out
+
+
+def join_pcm(*parts):
+    out = array("h")
+    for p in parts:
+        out.extend(p)
+    return out
+
+
+def verse_payload(verses):
+    """Sidecar-shaped payload; ``verses`` = [(verse, ts), ...]
+    plus an explicit chapter duration."""
+    return {
+        "duration_seconds": verses[-1][1] + 1.0,
+        "data": [
+            {"verse_start": v, "timestamp": ts}
+            for v, ts in verses
+        ],
+    }
+
+
+def codes(issues):
+    return {i.code for i in issues}
+
+
+def test_deep_clean_chapter_passes():
+    pcm = join_pcm(*(pcm_sine(1.0) for _ in range(3)))
+    payload = verse_payload([(1, 0.0), (2, 1.0), (3, 2.0)])
+    assert audio_deep.analyze_pcm(pcm, SR, payload) == []
+
+
+def test_deep_flags_clipped_verse_with_number():
+    # Mirror NUM.24:14 — verse 14's onset is hard-clipped while
+    # the surrounding verses are clean.
+    pcm = join_pcm(
+        pcm_sine(1.0),
+        join_pcm(pcm_clipped(0.3), pcm_sine(0.7)),
+        pcm_sine(1.0),
+    )
+    payload = verse_payload([(13, 0.0), (14, 1.0), (15, 2.0)])
+    issues = audio_deep.analyze_pcm(pcm, SR, payload)
+    clipped = [i for i in issues if i.code == "clipped"]
+    assert len(clipped) == 1
+    assert "verse 14" in clipped[0].detail
+
+
+def test_deep_flags_silent_verse():
+    pcm = join_pcm(
+        pcm_sine(1.0), pcm_silence(1.0), pcm_sine(1.0),
+    )
+    payload = verse_payload([(1, 0.0), (2, 1.0), (3, 2.0)])
+    issues = audio_deep.analyze_pcm(pcm, SR, payload)
+    silent = [i for i in issues if i.code == "silent_segment"]
+    assert len(silent) == 1
+    assert "verse 2" in silent[0].detail
+
+
+def test_deep_flags_loudness_outlier():
+    # Five verses, verse 3 ~8 dB quieter than the rest.
+    pcm = join_pcm(
+        pcm_sine(1.0, amp=0.5), pcm_sine(1.0, amp=0.5),
+        pcm_sine(1.0, amp=0.05), pcm_sine(1.0, amp=0.5),
+        pcm_sine(1.0, amp=0.5),
+    )
+    payload = verse_payload(
+        [(i, float(i - 1)) for i in range(1, 6)]
+    )
+    issues = audio_deep.analyze_pcm(pcm, SR, payload)
+    outlier = [
+        i for i in issues if i.code == "loudness_outlier"
+    ]
+    assert len(outlier) == 1
+    assert "verse 3" in outlier[0].detail
+
+
+def test_deep_loud_sine_below_rail_is_clean():
+    # 0.9 full scale is loud but never at the rail.
+    pcm = pcm_sine(1.0, amp=0.9)
+    issues = audio_deep.analyze_pcm(pcm, SR)
+    assert "clipped" not in codes(issues)
+
+
+def test_deep_clip_thresholds_configurable():
+    pcm = pcm_clipped(0.5)
+    assert "clipped" in codes(audio_deep.analyze_pcm(pcm, SR))
+    issues = audio_deep.analyze_pcm(
+        pcm, SR, clip_min_run=10**6, clip_min_total=10**6,
+    )
+    assert "clipped" not in codes(issues)
+
+
+def test_deep_short_silence_not_flagged():
+    # A 0.4 s quiet verse is under SILENCE_MIN_SECONDS.
+    pcm = join_pcm(
+        pcm_sine(1.0), pcm_silence(0.4), pcm_sine(0.6),
+        pcm_sine(1.0),
+    )
+    payload = verse_payload([(1, 0.0), (2, 1.0), (3, 2.0)])
+    issues = audio_deep.analyze_pcm(pcm, SR, payload)
+    assert "silent_segment" not in codes(issues)
+
+
+def test_deep_no_sidecar_whole_file_fallback():
+    pcm = join_pcm(pcm_sine(0.5), pcm_clipped(0.5))
+    issues = audio_deep.analyze_pcm(pcm, SR)
+    clipped = [i for i in issues if i.code == "clipped"]
+    assert clipped and "whole file" in clipped[0].detail
+
+
+def test_deep_no_sidecar_interior_silence_flagged():
+    pcm = join_pcm(
+        pcm_sine(1.0), pcm_silence(3.0), pcm_sine(1.0),
+    )
+    issues = audio_deep.analyze_pcm(pcm, SR)
+    assert "silent_region" in codes(issues)
+
+
+def test_deep_no_sidecar_edge_silence_not_flagged():
+    # Quiet head/tail padding is normal — not an interior gap.
+    pcm = join_pcm(
+        pcm_silence(3.0), pcm_sine(1.0), pcm_silence(3.0),
+    )
+    issues = audio_deep.analyze_pcm(pcm, SR)
+    assert "silent_region" not in codes(issues)
+
+
+def test_deep_fully_silent_file_flagged():
+    issues = audio_deep.analyze_pcm(pcm_silence(5.0), SR)
+    assert "silent_segment" in codes(issues)
+
+
+def test_decode_mp3_missing_decoder_hint(monkeypatch):
+    monkeypatch.setitem(sys.modules, "miniaudio", None)
+    with pytest.raises(audio_deep.DecoderUnavailableError):
+        audio_deep.ensure_decoder()
+    with pytest.raises(
+        audio_deep.DecoderUnavailableError, match="dev"
+    ):
+        audio_deep.decode_mp3("x.mp3")
+
+
+def test_decode_mp3_roundtrip_flags_clip(tmp_path):
+    """Real decode path: lameenc-encoded clipped sine -> MP3."""
+    pytest.importorskip("miniaudio")
+    import lameenc
+
+    pcm = join_pcm(
+        pcm_sine(1.0), join_pcm(
+            pcm_clipped(0.3), pcm_sine(0.7),
+        ), pcm_sine(1.0),
+    )
+    enc = lameenc.Encoder()
+    enc.set_bit_rate(48)
+    enc.set_in_sample_rate(SR)
+    enc.set_channels(1)
+    enc.set_quality(2)
+    mp3 = enc.encode(pcm.tobytes()) + enc.flush()
+    path = tmp_path / "clipped.mp3"
+    path.write_bytes(mp3)
+    samples, rate = audio_deep.decode_mp3(str(path))
+    payload = verse_payload([(1, 0.0), (2, 1.0), (3, 2.0)])
+    # LAME rescales peaks below the int16 rail (decoded peak
+    # ~0.97), so this synthetic clip is detected one step below
+    # CLIP_THRESHOLD — the real TTS artifacts sit at full scale.
+    issues = audio_deep.analyze_pcm(
+        samples, rate, payload, clip_threshold=0.95,
+    )
+    clipped = [i for i in issues if i.code == "clipped"]
+    assert clipped and "verse 2" in clipped[0].detail
+
+
+# ---------------------------------------------------------------
+# --deep at the command level
+# ---------------------------------------------------------------
+
+
+def test_command_deep_rejects_metadata_only():
+    with pytest.raises(CommandError, match="metadata-only"):
+        call_audit(
+            FakeBucket(good_objects()),
+            "--metadata-only", "--deep",
+        )
+
+
+def test_command_deep_requires_decoder(monkeypatch):
+    monkeypatch.setitem(sys.modules, "miniaudio", None)
+    with pytest.raises(CommandError, match="dev"):
+        call_audit(FakeBucket(good_objects()), "--deep")
+
+
+def deep_pcm(clip_second_verse=False):
+    """PCM the patched decoder returns for any blob."""
+    second = (
+        join_pcm(pcm_clipped(0.3), pcm_sine(0.7))
+        if clip_second_verse else pcm_sine(1.0)
+    )
+    pcm = join_pcm(pcm_sine(1.0), second, pcm_sine(1.0))
+    return pcm, SR
+
+
+def call_audit_deep(bucket, pcm_pair, out, *argv):
+    """--deep run with the decoder patched to canned PCM;
+    writes into the caller's ``out`` buffer."""
+    decode = patch(
+        "bible.management.commands.audit_audio_files"
+        ".audio_deep.decode_mp3_bytes",
+        return_value=pcm_pair,
+    )
+    with patch(
+        "bible.management.commands.audit_audio_files"
+        ".gcs.get_default_client",
+        return_value=FakeClient(bucket),
+    ), decode:
+        call_command("audit_audio_files", *argv, stdout=out)
+
+
+def test_command_deep_flags_clipped_verse():
+    objects = {
+        NUM24_MP3: make_mp3(100),
+        NUM24_JSON: make_sidecar(
+            duration=3.0, size=9600, timestamps=[
+                {"verse_start": 13, "timestamp": 0.0},
+                {"verse_start": 14, "timestamp": 1.0},
+                {"verse_start": 15, "timestamp": 2.0},
+            ],
+        ),
+    }
+    out = StringIO()
+    with pytest.raises(CommandError):
+        call_audit_deep(
+            FakeBucket(objects),
+            deep_pcm(clip_second_verse=True),
+            out, "--deep",
+        )
+    text = out.getvalue()
+    assert "clipped" in text
+    assert "verse 14" in text
+    assert "deep=True" in text
+
+
+def test_command_deep_clean_audio_passes():
+    out = StringIO()
+    call_audit_deep(
+        FakeBucket(good_objects()),
+        deep_pcm(), out, "--deep",
+    )
+    assert "suspects=0" in out.getvalue()
+
+
+def test_command_deep_decode_failure_is_issue_not_crash():
+    out = StringIO()
+    with patch(
+        "bible.management.commands.audit_audio_files"
+        ".gcs.get_default_client",
+        return_value=FakeClient(FakeBucket(good_objects())),
+    ), patch(
+        "bible.management.commands.audit_audio_files"
+        ".audio_deep.decode_mp3_bytes",
+        side_effect=ValueError("boom"),
+    ):
+        with pytest.raises(CommandError):
+            call_command(
+                "audit_audio_files", "--deep", stdout=out,
+            )
+    assert "decode_failed" in out.getvalue()

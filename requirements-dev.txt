@@ -7,3 +7,7 @@
 debugpy==1.8.22
 pytest==9.2.0
 pytest-django==4.14.0
+# MP3->PCM decoder for `audit_audio_files --deep` (content
+# checks). Dev-only: never add to requirements.txt — the prod
+# image must not ship a decoder.
+miniaudio==1.71

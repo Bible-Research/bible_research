@@ -1933,16 +1933,54 @@ Suspects print as `SUSPECT <name>  code: detail` lines and the
 command exits non-zero, so a scheduler/CI alert can key off the
 exit status. `--verbose` also prints `OK` lines.
 
-**Scope limit**: the checks catch *storage-level* corruption
-(upload truncation, stray bytes, stale sidecars). They cannot
-hear *content* defects baked into the TTS output — clipping,
-voice glitches — because no decoder ships in the image; spot
-checks can decode a suspect object locally (`afconvert` on
-macOS, `ffmpeg` elsewhere) into WAV.
+#### `--deep` — content-level checks (local/dev only)
 
-The command is not wired into `run_all_jobs` or terraform —
-running it on a schedule is an ops decision (a `manual` JOBS
-entry plus a Cloud Scheduler trigger would be the way).
+The structural checks above catch *storage-level* corruption;
+they cannot hear *content* defects baked into the TTS output.
+`--deep` decodes every candidate `*_audio.mp3` to PCM and
+analyses it per verse using the `*_timestamps.json` sidecar
+(`bible/services/audio_deep.py`):
+
+- **`clipped`** — a verse segment with ≥8 *consecutive*
+  near-full-scale samples (a hard clip baked into the
+  synthesis, e.g. NUM.24:14's ~310-sample clipped speech
+  onset) or ≥128 rail hits in total. Thresholds are tunable
+  via `--clip-min-run` / `--clip-min-total`; a loud clean
+  signal tops out a few samples short of the rail, so only
+  real clipping trips this.
+- **`silent_segment`** — a verse segment ≥0.75 s whose peak
+  stays under ~-40 dBFS (dead air where speech is expected).
+- **`loudness_outlier`** — a verse whose RMS is >3× or <0.3×
+  the chapter median (needs ≥4 audible segments).
+- **No sidecar** → whole-file fallback: file-level clipping
+  plus interior `silent_region` gaps ≥2.5 s (leading/trailing
+  quiet is ignored as natural boundary padding). A decode
+  failure surfaces as a `decode_failed` issue instead of
+  aborting the audit.
+
+```bash
+python manage.py audit_audio_files --deep \
+  --fileset-id LVSGLU8 --book NUM --limit 10
+```
+
+Two deliberate constraints:
+
+- **Decoder is dev-only**: decoding needs `miniaudio`, pinned
+  in `requirements-dev.txt` and *not* in `requirements.txt` —
+  the production image stays free of a decoder. Without it
+  `--deep` exits with an install hint. (`--deep` +
+  `--metadata-only` is rejected: content checks need the MP3
+  downloads that mode skips.)
+- **Not free-tier safe**: `--deep` downloads every candidate
+  MP3, so a full pass reads the whole bucket — roughly a
+  ~15¢ GCS egress charge per ~1 GB of artifacts. Run it
+  locally, scoped with `--fileset-id`/`--book`/`--limit`; do
+  not wire it into `run_all_jobs` or terraform.
+
+The non-deep command is likewise not wired into
+`run_all_jobs`/terraform — running it on a schedule is an ops
+decision (a `manual` JOBS entry plus a Cloud Scheduler
+trigger would be the way).
 
 ---
 
