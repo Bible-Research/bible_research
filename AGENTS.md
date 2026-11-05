@@ -351,6 +351,9 @@ resolved:
   normalized to `settings.GEMINI_API_KEYS`. The Edge command
   is keyless (unofficial Microsoft endpoint, default voice
   `lv-LV-EveritaNeural`, exact per-verse timestamps).
+- GCP secrets: never create a new Secret Manager secret — new
+  credentials go in as appended KEY=VALUE lines on the shared
+  `env-file` secret (each extra secret adds cost).
 - Dependencies: `requirements.txt` pins the runtime stack to
   the versions installed in `venv/` (verify with `pip freeze`);
   `requirements-dev.txt` adds pytest/pytest-django/debugpy.
