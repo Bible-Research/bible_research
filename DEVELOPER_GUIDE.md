@@ -1878,6 +1878,72 @@ Differences from the Gemini pipeline:
   `dom:3` Google TTS entry can never piggyback (it needs a
   plain run on day 3, which no trigger performs).
 
+### Audio Artifact Audit
+
+`manage.py audit_audio_files` is a **read-only** health check
+over the generated-audio artifacts in `AUDIO_BUCKET_NAME`
+(validation logic lives in `bible/services/audio_audit.py`,
+unit-testable without GCS). It lists blobs under
+`audio/`, `audio_chapter/`, `audio_gemini/` and `audio_edge/`
+(`--prefix` overrides the list) and validates each
+`*_audio.mp3` plus its `*_timestamps.json` sidecar:
+
+- **Frame-stream integrity**: every byte must belong to a
+  valid MPEG Layer III frame (a leading ID3v2 tag is skipped);
+  stray bytes or a truncated tail are flagged `desync`, empty
+  or sub-one-frame files `too_small`, unparseable streams
+  `unparseable`/`no_frames`, absurd duration/implied bitrate
+  `bad_duration`/`bad_bitrate`.
+- **Sidecar integrity**: the JSON must parse, carry a positive
+  `duration_seconds`, and have monotonic verse timestamps
+  inside the declared duration.
+- **Cross-checks** (needs both artifacts): `size_mismatch`
+  (sidecar `file_size_bytes` vs listing size),
+  `duration_mismatch` (mutagen duration vs sidecar
+  `duration_seconds`, >0.75 s), `timestamp_out_of_range`
+  (a verse offset past the real MP3 end — truncation after
+  the sidecar was written).
+- **Pairing**: an MP3 without a sidecar is `missing_sidecar`;
+  a sidecar without an MP3 is `orphan_sidecar` — but only in
+  directories that actually hold MP3s, so JSON-only layouts
+  like `timestamps_generated/` never produce false orphans.
+
+**Usage**:
+
+```bash
+# Cheap listing-level pass — pairs, sidecars, size agreement;
+# downloads only the ~1 KB sidecar JSONs, never the MP3s.
+# This is the mode meant for frequent (e.g. daily) runs
+# inside free-tier limits.
+python manage.py audit_audio_files --metadata-only
+
+# Full pass — downloads every MP3 and walks its frames.
+python manage.py audit_audio_files
+
+# Scoped runs.
+python manage.py audit_audio_files --fileset-id LVSGLU8
+python manage.py audit_audio_files --book NUM --limit 10
+python manage.py audit_audio_files --prefix audio_edge
+
+# Machine-readable report for automation.
+python manage.py audit_audio_files --metadata-only --json
+```
+
+Suspects print as `SUSPECT <name>  code: detail` lines and the
+command exits non-zero, so a scheduler/CI alert can key off the
+exit status. `--verbose` also prints `OK` lines.
+
+**Scope limit**: the checks catch *storage-level* corruption
+(upload truncation, stray bytes, stale sidecars). They cannot
+hear *content* defects baked into the TTS output — clipping,
+voice glitches — because no decoder ships in the image; spot
+checks can decode a suspect object locally (`afconvert` on
+macOS, `ffmpeg` elsewhere) into WAV.
+
+The command is not wired into `run_all_jobs` or terraform —
+running it on a schedule is an ops decision (a `manual` JOBS
+entry plus a Cloud Scheduler trigger would be the way).
+
 ---
 
 ## Authentication & Authorization

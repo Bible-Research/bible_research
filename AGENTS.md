@@ -335,6 +335,13 @@ resolved:
   modes `"gemini"`/`"edge"` in `bible/services/storage/gcs.py`)
   with day-keyed lock objects under `state/`; no fileset serves
   them yet.
+- `bible/management/commands/audit_audio_files.py` — read-only
+  GCS audio health check (frame-stream + sidecar validation in
+  `bible/services/audio_audit.py`). `--metadata-only` lists
+  pairs and checks sidecar size agreement without downloading
+  MP3s (the free-tier-friendly mode); exits non-zero on
+  suspects. Not wired into `run_all_jobs`/terraform — see
+  DEVELOPER_GUIDE "Audio Artifact Audit".
 - `bible/management/commands/generate_gemini_audio.py` and
   `generate_edge_audio.py`: local mode (default) writes
   `tts-out/` + `gemini-tts-state.json`; `--upload-gcs`
