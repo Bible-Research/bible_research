@@ -344,8 +344,12 @@ resolved:
   loudness outliers) via the dev-only `miniaudio` decoder in
   `bible/services/audio_deep.py` — local use only, downloads
   the whole candidate set (GCS egress cost), never wire into
-  `run_all_jobs`/terraform. See DEVELOPER_GUIDE "Audio
-  Artifact Audit".
+  `run_all_jobs`/terraform. Remediation = regeneration: a
+  `--deep --json` manifest feeds a repair job that deletes
+  the bad MP3 + sidecar and re-synthesizes via the engine
+  matching the prefix, under the same free-tier budget
+  guards as the generation jobs. See DEVELOPER_GUIDE
+  "Audio Artifact Audit".
 - `bible/management/commands/generate_gemini_audio.py` and
   `generate_edge_audio.py`: local mode (default) writes
   `tts-out/` + `gemini-tts-state.json`; `--upload-gcs`

@@ -1977,10 +1977,53 @@ Two deliberate constraints:
   locally, scoped with `--fileset-id`/`--book`/`--limit`; do
   not wire it into `run_all_jobs` or terraform.
 
-The non-deep command is likewise not wired into
-`run_all_jobs`/terraform — running it on a schedule is an ops
-decision (a `manual` JOBS entry plus a Cloud Scheduler
-trigger would be the way).
+#### Running it locally
+
+```bash
+cd bible_research
+source venv/bin/activate
+# Dev-only decoder for --deep (miniaudio):
+pip install -r requirements-dev.txt
+
+# Django settings — local config.yaml (gitignored) already
+# points at prod; GCS access needs Application Default
+# Credentials, and on this network the Netskope CA bundle:
+gcloud auth application-default login      # once
+export SSL_CERT_FILE=/tmp/combined-ca.pem  # see AGENTS.md
+
+# Free-tier-safe listing pass (no MP3 downloads):
+python manage.py audit_audio_files --metadata-only
+
+# Full content sweep — downloads every MP3:
+python manage.py audit_audio_files --deep --book NUM
+```
+
+#### Scheduling — do NOT automate this command
+
+`audit_audio_files` is deliberately **not wired into
+`run_all_jobs` or terraform**, and must not be: `--deep`
+requires the dev-only decoder (absent in the prod image) and
+downloads the entire bucket, and `--metadata-only` runs are
+cheap enough to do ad-hoc. If a scheduled structural pass is
+ever wanted, the entry point is a `manual` `JOBS` row plus a
+Cloud Scheduler trigger — decide that separately; the repair
+workflow below is the intended consumer instead.
+
+#### Remediation workflow
+
+Broken files are fixed by *regeneration*, not repair in
+place — TTS output is non-deterministic, so re-synthesizing
+the same verse/chapter almost always yields clean audio:
+
+1. Run `--deep` locally and collect the suspects as a
+   manifest (machine-readable `--json` report).
+2. A repair job consumes the manifest: for each entry it
+   deletes the bad `*_audio.mp3` (and `*_timestamps.json`)
+   from the bucket and re-runs the generation path that
+   produced it (Google TTS verse/chapter mode, Gemini, or
+   Edge, keyed by the prefix), bounded by the same
+   free-tier budget guards the generation jobs use.
+3. Repaired entries are marked so re-runs are idempotent.
 
 ---
 
