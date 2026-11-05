@@ -327,7 +327,12 @@ resolved:
   `generate_chapter_audio` (`dom:3`, unscheduled),
   `generate_audio_timestamps` (`last_day_of_month`, started by
   the `eom-stt-timestamps` scheduler — spends the month's STT
-  free minutes before they reset on the 1st),
+  free minutes before they reset on the 1st; NOTE: output is
+  currently LOW quality — GLU8 is only a proxy reference text
+  since DBT has no LVR/NLI text, so artifacts land at
+  ~0.09-0.28 alignment scores / `low_confidence`; revisit when
+  a matching Latvian text is licensable — see
+  DEVELOPER_GUIDE "Generated Timestamps"),
   `generate_gemini_audio` (`manual`) and `generate_edge_audio`
   (`manual`; started only by the daily scheduler's `--only`
   override — the Everita voice). Generated artifacts land under
