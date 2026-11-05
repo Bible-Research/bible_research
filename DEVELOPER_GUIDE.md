@@ -1740,6 +1740,30 @@ opus/webm variants are the same recordings). Missing or
 unreadable artifacts still answer `{"data": []}` (an artifact
 read failure degrades like a miss, never a 502).
 
+> **Current state (2026-10-31): works mechanically, but
+> output quality is LOW.** STT word-offsets alone cannot
+> locate verse boundaries — verse numbers must be derived by
+> aligning the transcript to the *text that was actually
+> recorded*. DBT serves no text for LAVLVR/LAVNLI, so the
+> aligner uses the GLU8 SWORD text as a proxy (the closest
+> Latvian text available locally). The 1953 LVR wording
+> diverges enough from Glück that alignment scores land at
+> ~0.09–0.28 — every verse below `MIN_ALIGNMENT_SCORE` is
+> mostly interpolated guesses, and artifacts ship
+> `meta.low_confidence: true`. Known artifact defects seen:
+> duplicated timestamps for unanchored verses and
+> interpolated tails exceeding `duration_seconds`.
+>
+> **Do not invest in the aligner before the text problem is
+> solved**: with a matching text the same pipeline should
+> score ~0.9+. The unblock is a licensed LVR/NLI text source
+> (check api.scripture.api.bible — `ApiBibleClient` has no
+> list-bibles method yet — or another licensor). Until then
+> the `eom-stt-timestamps` scheduler keeps generating
+> low-confidence artifacts; delete `timestamps_generated/`
+> objects and re-run once a matching reference text is
+> registered in `timestamps_registry.py`.
+
 **Worklist**: `GET /bibles/filesets/{fileset_id}` — the
 fileset's real chapter coverage (one row per chapter file,
 carrying the signed `path` MP3 URL and `duration`) — minus
