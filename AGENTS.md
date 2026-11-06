@@ -2,6 +2,8 @@
 
 Guidance for AI agents working in this repository. Read this before
 editing; trust the code over any doc that disagrees with it.
+Cross-repo contracts are spec'd in the workspace-level `openspec/`
+(see workspace AGENTS.md).
 
 ## What this is
 
