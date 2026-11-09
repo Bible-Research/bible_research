@@ -210,9 +210,14 @@ at the next GAE deploy.
   ```
 
 - Writes and DDL fail with `InsufficientPrivilege` — never attempt
-  them. `manage.py dbshell` needs a local `psql` client (not
-  installed); prefer `manage.py shell` or a `psycopg2` script built
-  on `settings.DATABASES`.
+  them. `manage.py dbshell` needs a `psql` client — installed at
+  `/opt/homebrew/opt/postgresql@16/bin/psql` but off agent PATH;
+  prefer `manage.py shell` or a `psycopg2` script built on
+  `settings.DATABASES`.
+- `db_backups/local_db_backup.sh` (prod dump — DEVELOPER_GUIDE
+  "Database Backups") needs `pg_dump` matching the server major:
+  Aiven runs PG16 but PATH's `pg_dump` is v14 and aborts. Run with
+  `export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"` first.
 - For a writable local database, repoint `config.yaml`'s `default`
   to SQLite (`ENGINE: django.db.backends.sqlite3`,
   `NAME: db.sqlite3` — a file already exists in the repo root).
