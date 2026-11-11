@@ -1,5 +1,12 @@
 # Bible Research API - Developer Guide
 
+> **How this doc fits in**: this is the detailed human-facing
+> reference (setup, endpoints, ops). `AGENTS.md` is the
+> agent-facing contract — where the two disagree, trust
+> `AGENTS.md`, and trust the code over both. Cross-repo
+> contracts (provider routing, `error`/`error_code`, auth) are
+> spec'd in the workspace-level `openspec/`.
+
 ## Table of Contents
 1. [Project Overview](#project-overview)
 2. [Architecture](#architecture)
@@ -2453,6 +2460,6 @@ For questions or issues:
 
 ---
 
-**Last Updated**: 2026-10-28
+**Last Updated**: 2026-11-11
 
 [bible-brain]: https://www.faithcomesbyhearing.com/bible-brain/api-reference
