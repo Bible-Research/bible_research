@@ -386,6 +386,18 @@ Universal rules — follow exactly:
 
 ## Housekeeping
 
+- CORS is narrowed to known browser consumers
+  (`CORS_ALLOWED_ORIGINS` + `CORS_ALLOWED_ORIGIN_REGEXES` in
+  `settings.py`): the `bibleresearch.vercel.app` prod domain,
+  `*-industr-analysers-projects.vercel.app` PR previews,
+  Capacitor WebView origins (`capacitor://`/`localhost`), and
+  `http://localhost:<port>` dev servers. Token auth means no
+  cookies/CSRF, so this bounds page embedding, not access —
+  non-browser callers are unaffected. A new browser consumer
+  must be added to the list. Transport hardening is GCP-gated
+  on `IS_GCP_ENVIRONMENT` (X-Forwarded-Proto trust,
+  http→https redirect, Secure session/CSRF cookies);
+  `ALLOWED_HOSTS` is `.appspot.com` + localhost.
 - `terraform/scheduler.tf`: the *monthly* Google TTS Cloud
   Scheduler stays intentionally commented out — do NOT enable it.
   The `daily-edge-audio` job IS enabled: it triggers `all-jobs`

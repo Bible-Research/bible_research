@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import logging
 import os
 import sys
+import textwrap
 from pathlib import Path
 
 import dj_database_url
@@ -23,7 +24,17 @@ from .dotenv import load_dotenv, load_dotenv_file
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-ALLOWED_HOSTS = ["*"]
+# The app is only ever served on its GAE appspot host
+# (bible-research-489314.ey.r.appspot.com, plus
+# <version>-dot-…appspot.com version-preview URLs covered by
+# the leading-dot suffix match) and localhost dev — there is
+# no custom domain.
+ALLOWED_HOSTS = [
+    ".appspot.com",
+    "localhost",
+    "127.0.0.1",
+    "[::1]",
+]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -50,12 +61,36 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
+    # Only /admin uses sessions; every DRF view is csrf_exempt,
+    # so this protects the admin forms without affecting the
+    # token-authenticated API.
+    'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True
+# Browser-context consumers of this API. Token auth means no
+# cookies/CSRF, so CORS bounds which sites may embed the API in
+# a web page — it is not an authentication boundary, and
+# non-browser callers (curl, scripts, Postman) send no Origin
+# header and are unaffected. Add new browser consumers here.
+CORS_ALLOWED_ORIGINS = [
+    # reactive-bible production SPA
+    "https://bibleresearch.vercel.app",
+    # Capacitor app WebView (iOS origin is capacitor://; Android
+    # defaults to https://localhost, http://localhost if the
+    # app is ever built with an http server scheme)
+    "capacitor://localhost",
+    "http://localhost",
+    "https://localhost",
+]
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    # Vercel PR preview deploys of the reactive-bible project
+    r"^https://.*-industr-analysers-projects\.vercel\.app$",
+    # Local dev servers on any port (Vite uses :5173)
+    r"^http://localhost:\d+$",
+]
 
 # Let Sentry's distributed-tracing headers through CORS preflight
 # so frontend errors correlate with backend traces (the default
@@ -65,11 +100,6 @@ CORS_ALLOW_HEADERS = (
     'sentry-trace',
     'baggage',
 )
-
-# Allow all Vercel automatically deployed PR preview origins
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://.*-vincent-uches-projects\.vercel\.app$",
-]
 
 ROOT_URLCONF = 'bible_research.urls'
 
@@ -110,6 +140,20 @@ IS_GCP_ENVIRONMENT = (
     or os.environ.get('K_SERVICE') is not None
     or os.environ.get('CLOUD_RUN_JOB') is not None
 )
+
+# --- Proxy / transport security ---
+# GAE's frontend terminates TLS and forwards the client scheme
+# in X-Forwarded-Proto; trusting it lets request.is_secure()
+# (and anything downstream — https redirects, Secure cookies)
+# see the real scheme. The redirect and cookie hardening stay
+# GCP-only so local dev keeps working over plain HTTP; ``_ah/``
+# paths are exempt from the redirect in case GAE-internal
+# requests ever arrive without the header.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_SSL_REDIRECT = IS_GCP_ENVIRONMENT
+SECURE_REDIRECT_EXEMPT = [r'^_ah/']
+SESSION_COOKIE_SECURE = IS_GCP_ENVIRONMENT
+CSRF_COOKIE_SECURE = IS_GCP_ENVIRONMENT
 
 _dotenv_loaded = False
 if os.environ.get('DOTENV'):
