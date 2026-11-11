@@ -398,6 +398,11 @@ Universal rules — follow exactly:
   on `IS_GCP_ENVIRONMENT` (X-Forwarded-Proto trust,
   http→https redirect, Secure session/CSRF cookies);
   `ALLOWED_HOSTS` is `.appspot.com` + localhost.
+- All implementation work happens in a git worktree
+  (`worktrees/<slug>` inside this repo — gitignored) — never
+  the main checkout; remove the worktree + branch once the PR
+  merges green. Full workflow: workspace `../AGENTS.md`
+  "Repo-specific rules".
 - `terraform/scheduler.tf`: the *monthly* Google TTS Cloud
   Scheduler stays intentionally commented out — do NOT enable it.
   The `daily-edge-audio` job IS enabled: it triggers `all-jobs`
