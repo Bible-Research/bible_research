@@ -305,12 +305,87 @@ resolved:
   receiver on Image calls `delete_original`, so cascade
   deletes (note/tag/user) no longer orphan GCS blobs.
 
+## Conventions / rules
+
+Universal rules — follow exactly:
+
+1. **Max 79 chars per line, every file type.** Verify:
+   `awk 'length > 79 {print FILENAME":"NR}' <file>`. Fix
+   violations you introduce plus long lines in files already
+   being modified. Exempt: formatter output (e.g. Prettier at
+   printWidth 80 may emit 80-char lines) and vendored upstream
+   skill files under `.agents/skills/` and `.devin/skills/`
+   (`openspec-*`, `vercel-react-best-practices/`) — refresh
+   tools own them.
+2. **Commit format** `Type: Capitalized message` —
+   `Feat:`/`Fix:`/`Docs:`/`Refactor:`/`Test:`/`Chore:`.
+3. **Commit on feature branches only, never `main`.**
+   Name branches `<type>/<slug>` with the commit types
+   (`feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `chore/`).
+   Stage only files changed this session, by path — never
+   `git add -A`, `git add .` or `git commit -a`; confirm the
+   staged set with `git status` first; leave the user's own
+   dirty files alone; never commit plan/scratch markdown.
+4. **Dangerous commands — never run** the destructive/deploy
+   commands listed under "Repo-specific rules" below; write
+   the change and tell the user the command to run instead.
+5. **Scoped verification** — run only the tests/checks for
+   what you changed, not the whole suite.
+6. **PR bodies go to a temp file** + `gh pr create
+   --body-file`, never inline `--body`; delete the temp file
+   after. See `.devin/skills/create-pr/`.
+7. **Every PR body includes a UI verification / QC section** —
+   concrete steps (pages, clicks, expected result) exercising
+   the change end-to-end through the UI. Omit only when
+   genuinely unreachable from the UI — then give an
+   equivalent (curl command, log line, file to inspect).
+8. **GitHub remote targeting**: when `origin` is the user's
+   fork (an `upstream` remote exists), ALL GitHub operations
+   — issues, PRs, comments, releases — target the fork via
+   `--repo <owner>/<fork>`; never upstream unless asked.
+   Otherwise `origin` is the target.
+9. **No secrets in code.** Secrets live in gitignored local
+   files / env vars / GCP Secret Manager. Never create new
+   Secret Manager secrets — append KEY=VALUE lines to the
+   shared `env-file` secret (each extra secret adds cost).
+10. **Update docs after functionality changes** — this file
+    and the repo's other contract docs (README /
+    DEVELOPER_GUIDE / docs/*) — in the same change.
+11. **`docs/plans/` is frozen** — existing files stay as
+    history with their status headers (implemented / partial /
+    in progress / not implemented / reverted); nothing new is
+    added there or anywhere else — all new planning goes
+    through OpenSpec (`openspec-propose` for changes,
+    `openspec-explore`/change artifacts for investigations).
+12. **This file is self-updating.** Missing tool → tell the
+    user what to install instead of grinding through failing
+    alternatives. Discovered flow/local quirk → write it into
+    the relevant AGENTS.md and commit that doc update
+    alongside the work that discovered it.
+
+
+### Repo-specific rules
+
+- **Dangerous commands — never run**: `makemigrations`,
+  `migrate`, `sqlmigrate` (workspace rule — even if a task
+  seems to need it, e.g. tests failing on missing tables;
+  tell the user the needed command); `gcloud app deploy` and
+  other mutating `gcloud` calls; `terraform apply`. Deploys
+  are CI's job — see the workspace AGENTS.md "Deployments"
+  section for the manual-deploy contract.
+- **Commits/PRs target `Bible-Research/bible_research`**
+  (`origin`) — the only remote.
+- **Test logins**: `testuser`, `guest` — create via
+  `python scripts/create_test_user.py` if a local DB lacks
+  them (pytest's in-memory DB makes its own). The shared UI
+  test account is `Tester5` / `password123` (workspace
+  AGENTS.md).
+- **OpenSpec lives at the workspace root** — never run
+  `openspec init` in this repo; cross-repo contracts are
+  spec'd there (workspace AGENTS.md, "OpenSpec").
+
 ## Housekeeping
 
-- Max line length is 79 chars — every file type, enforced.
-- NEVER run `migrate`/`makemigrations`/`sqlmigrate` — workspace rule.
-- Commit format: `Type: Capitalized message`; never commit to `main`;
-  stage only files you changed.
 - `terraform/scheduler.tf`: the *monthly* Google TTS Cloud
   Scheduler stays intentionally commented out — do NOT enable it.
   The `daily-edge-audio` job IS enabled: it triggers `all-jobs`
@@ -390,23 +465,16 @@ resolved:
 - Local pip/requests hit an SSL-intercept proxy: pip needs
   `--trusted-host pypi.org --trusted-host
   files.pythonhosted.org`; one-off `requests` scripts need
-  `verify=False`. `terraform` is installed but not on agent
-  PATH (`/opt/homebrew/bin`).
+  `verify=False`.
 - `bible/services/dbt/dbt_client/` is a slimmed vendored
   OpenAPI client imported via a `sys.path` append in
   `dbt/client.py` — not a pip package; don't add it to
   requirements or remove the path patch.
-- This machine sits behind a Netskope TLS-intercepting proxy
-  (`ca.gocardless.goskope.com`): pip/requests/aiohttp/grpc all
-  fail with "self signed certificate in certificate chain"
-  unless pointed at a combined CA bundle. Build one:
-  `cat $(venv/bin/python -c 'import certifi;print(certifi.where())') \
-    "/Library/Application Support/Netskope/STAgent/data/nscacert.pem" \
-    > /tmp/combined-ca.pem`
-  (optionally append `security find-certificate -a -c gocardless
-  -p`), then export `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` /
-  `PIP_CERT` / `CURL_CA_BUNDLE` /
-  `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` to it. gRPC also needs
-  REST transport (`transport="rest"`) — the proxy strips ALPN.
-  See `tts-out/voice-comparison/README.md` for a worked example.
+- Python egress (pip/requests/aiohttp/grpc) fails behind this
+  machine's TLS-intercepting proxy unless pointed at the
+  combined CA bundle — build/env details live in the global
+  machine-environment notes (`~/.config/devin/AGENTS.md`).
+  gRPC additionally needs REST transport
+  (`transport="rest"`) — the proxy strips ALPN. See
+  `tts-out/voice-comparison/README.md` for a worked example.
 - If docs and code disagree, the code wins — fix the doc.
