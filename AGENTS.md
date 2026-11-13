@@ -118,6 +118,26 @@ is no `__init__.py` in `bible/utils/` — it is a namespace package.
 Docs: `/api/v1/docs/` (Swagger), `/api/v1/schema/`, `/api/v1/redoc/`.
 Token login: `POST /api/token/`.
 
+## Vercel edge caching
+
+The frontend proxies `/api/*` through Vercel's CDN, which
+caches rewrite responses where the API emits
+`Vercel-CDN-Cache-Control` (stripped before the browser —
+never relaxes the client-facing `Cache-Control` posture).
+`bible/utils/edge_cache.py`'s `VercelEdgeCacheMixin` marks
+only the anonymous-identical catalog endpoints:
+`bible/translations/` and `bible/languages/`
+(`max-age=86400, stale-while-revalidate=604800`) and
+`bible/copyright/` (`max-age=604800,
+stale-while-revalidate=86400`). Never mark: `bible/` verse
+and audio payloads (licensed content must not sit in
+third-party caches), `bible/search/` (verse snippets),
+`bible/timestamps/` (regenerated monthly — staleness risk),
+and every user-scoped `annotations/`/`users/` endpoint. The
+mixin skips non-2xx responses and `no-store`/`private`
+bodies, so errors and degraded payloads are never marked.
+See DEVELOPER_GUIDE "Vercel edge caching".
+
 ## Error contract
 
 Provider failures surface as `error` + `error_code` fields built by
