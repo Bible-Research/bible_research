@@ -145,6 +145,33 @@ All locmem cache keys carry a `v1:` namespace prefix (the
 in-process LRUs above are module-level `OrderedDict`s, not
 Django cache entries).
 
+### Vercel edge caching
+
+The frontend proxies `/api/*` through Vercel's CDN with
+"cache responses from external rewrites" enabled, so the
+edge stores responses where the API emits
+`Vercel-CDN-Cache-Control`. Vercel strips that header before
+the browser, so it steers the edge alone and never relaxes
+the browser-facing `Cache-Control` posture.
+`bible/utils/edge_cache.py`'s `VercelEdgeCacheMixin` marks
+the anonymous-identical catalog endpoints:
+
+- `GET /api/v1/bible/translations/` and
+  `GET /api/v1/bible/languages/` —
+  `max-age=86400, stale-while-revalidate=604800`.
+- `GET /api/v1/bible/copyright/` —
+  `max-age=604800, stale-while-revalidate=86400`.
+
+Everything else stays unmarked on purpose: `/api/v1/bible/`
+verse text and audio payloads are licensed content that must
+not sit in third-party caches, `/bible/search/` returns verse
+snippets, `/bible/timestamps/` regenerates monthly (staleness
+risk), and every `annotations/`/`users/` endpoint is
+user-scoped. The mixin only marks 2xx GET responses without
+a `no-store`/`private` `Cache-Control`, so errors and
+degraded bodies are never marked; `Authorization` requests
+bypass the Vercel cache regardless.
+
 ### Project Structure
 ```
 bible_research/
