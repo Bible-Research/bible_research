@@ -383,6 +383,14 @@ Universal rules — follow exactly:
 - **OpenSpec lives at the workspace root** — never run
   `openspec init` in this repo; cross-repo contracts are
   spec'd there (workspace AGENTS.md, "OpenSpec").
+- **All implementation work happens in a git worktree**
+  (`worktrees/<slug>` inside this repo — gitignored; cut
+  from `origin/main`, needs its own venv + `config.yaml`
+  symlink) — never the main checkout. Once the PR's checks
+  are green, remove the worktree + local branch right away —
+  don't wait for the merge (the PR lives on the remote
+  branch). Full lifecycle: workspace `../AGENTS.md`
+  "Repo-specific rules".
 
 ## Housekeeping
 
