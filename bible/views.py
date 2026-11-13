@@ -11,6 +11,11 @@ from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
 from bible.utils.bible_books import get_dbt_book_id
+from bible.utils.edge_cache import (
+    EDGE_CACHE_CATALOG_DIRECTIVE,
+    EDGE_CACHE_STATIC_DIRECTIVE,
+    VercelEdgeCacheMixin,
+)
 from bible.utils.error_responses import (
     MISSING_PARAMETER,
     bad_request,
@@ -504,16 +509,19 @@ class AudioTimestampView(APIView):
         ),
     ],
 )
-class CopyrightView(APIView):
+class CopyrightView(VercelEdgeCacheMixin, APIView):
     """Return copyright info for a Bible translation.
 
     Successful responses are cached for
     ``_COPYRIGHT_CACHE_TTL_SECONDS`` — copyright text is static —
     and carry ``Cache-Control: public`` for CDN/browser caches.
-    Error and client-input responses are never cached.
+    Error and client-input responses are never cached. The mixin
+    also marks successes ``Vercel-CDN-Cache-Control`` so the
+    Vercel edge can cache the proxied response.
     """
 
     permission_classes = [AllowAny]
+    edge_cache_directive = EDGE_CACHE_STATIC_DIRECTIVE
 
     def get(self, request, format=None):
         bible_id = request.query_params.get('bible_id')
@@ -793,7 +801,7 @@ class BibleSearchView(APIView):
         ),
     ],
 )
-class TranslationListView(APIView):
+class TranslationListView(VercelEdgeCacheMixin, APIView):
     """
     Lists available Bible translations, merging the live DBT
     ``/bibles`` list with the bundled registry translations.
@@ -801,7 +809,10 @@ class TranslationListView(APIView):
     Successful responses are cached per ``language_iso`` for
     ``_TRANSLATIONS_CACHE_TTL_SECONDS`` and carry
     ``Cache-Control: public`` — an anonymous request used to cost
-    a live DBT call every time.
+    a live DBT call every time. The mixin also marks them
+    ``Vercel-CDN-Cache-Control`` so the Vercel edge can cache
+    the proxied response; ``degraded`` bodies stay
+    ``no-store`` and are never marked.
 
     A DBT outage does not fail the request: the service falls
     back to the static registry entries and the response carries
@@ -818,6 +829,7 @@ class TranslationListView(APIView):
     """
 
     permission_classes = [AllowAny]
+    edge_cache_directive = EDGE_CACHE_CATALOG_DIRECTIVE
 
     def get(self, request, *args, **kwargs):
         language_iso = request.query_params.get('language_iso')
@@ -906,10 +918,14 @@ class TranslationListView(APIView):
             return provider_error_response(e)
 
 
-class LanguageListView(APIView):
+class LanguageListView(VercelEdgeCacheMixin, APIView):
     """
     Lists languages that have Bible content, fetched live from
     the DBT API.
+
+    The anonymous catalog response is identical for every
+    caller, so the mixin marks it ``Vercel-CDN-Cache-Control``
+    for the Vercel edge cache.
 
     Query Parameters:
         - search: Case-insensitive substring match on the
@@ -931,6 +947,7 @@ class LanguageListView(APIView):
     """
 
     permission_classes = [AllowAny]
+    edge_cache_directive = EDGE_CACHE_CATALOG_DIRECTIVE
 
     def get(self, request, *args, **kwargs):
         search = request.query_params.get('search')
