@@ -1,6 +1,7 @@
 __pycache__
 logs/*
 venv
+worktrees/
 ca.pem
 .env
 staticfiles
@@ -20,7 +21,8 @@ tts-out/
 gemini-tts-state.json
 gemini-tts-state.json.tmp
 
-# Terraform: ignore local secret overrides only (committed *.auto.tfvars set region/project).
+# Terraform: ignore local secret overrides only
+# (committed *.auto.tfvars set region/project).
 terraform/terraform.tfvars
 terraform/tfplan
 terraform/.terraform/
