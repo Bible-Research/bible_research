@@ -8,8 +8,8 @@ updates:
     open-pull-requests-limit: 10
     groups:
       # Batch non-breaking updates into single PRs to reduce
-      # Dependabot noise. Major updates still get their own PRs so
-      # they can be reviewed (and auto-merge skips them).
+      # Dependabot noise. Major updates still get their own PRs;
+      # auto-merge applies to majors too — CI is the only gate.
       production-dependencies:
         dependency-type: "production"
         update-types:

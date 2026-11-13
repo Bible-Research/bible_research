@@ -29,18 +29,10 @@ jobs:
       # a user instead of github-actions[bot].
       GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
-      - name: Fetch Dependabot metadata
-        id: metadata
-        uses: dependabot/fetch-metadata@v3
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # Major bumps stay manual (a human merges them). For
-      # requirement-range PRs update-type is null; CI gates those.
+      # All Dependabot PRs auto-merge — patch, minor, and major
+      # alike. CI is the only gate: a major that breaks the build
+      # never reaches the merge step.
       - name: Wait for checks to pass
-        if: >
-          steps.metadata.outputs.update-type !=
-          'version-update:semver-major'
         run: |
           # Poll check runs directly: this job's own "automerge"
           # check appears on the PR, so `gh pr checks --watch`
@@ -92,15 +84,9 @@ jobs:
       # AUTOMERGE_TOKEN PAT this runs as the repo admin and
       # satisfies it (org policy blocks GITHUB_TOKEN approvals).
       - name: Approve PR
-        if: >
-          steps.metadata.outputs.update-type !=
-          'version-update:semver-major'
         run: gh pr review "$PR_URL" --approve
 
       - name: Merge PR
-        if: >
-          steps.metadata.outputs.update-type !=
-          'version-update:semver-major'
         run: |
           if out=$(gh pr merge "$PR_URL" --squash 2>&1); then
             echo "$out"
