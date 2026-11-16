@@ -274,14 +274,15 @@ at the next GAE deploy.
   `DATABASE_URL` to `stagingdb` — never `defaultdb`. The
   shared `env-file` secret carries prod's `defaultdb` URL,
   so a staging deploy must supply `DATABASE_URL` explicitly
-  (a real env var wins over the DOTENV-carried value).
-  `DB_SSL_CERT` is the same Aiven CA PEM in every
-  environment. See DEVELOPER_GUIDE "Environment Variables".
+  — inside its own DOTENV payload or as a real env var
+  (env vars win over DOTENV-carried values). `DB_SSL_CERT`
+  is the same Aiven CA PEM in every environment. See
+  DEVELOPER_GUIDE "Environment Variables".
 - `stagingdb` was seeded from `defaultdb` (2026-11-16): prod
   schema via `pg_dump --schema-only`, all `bible_verse`
   rows, `django_migrations`/content types/auth permissions,
-  and the
-  `Tester5`/`Daniels` accounts with their tokens, tags,
+  and the `Tester5`/`Daniels` accounts with their tokens,
+  tags,
   notes, comments and reading positions — prod ids and
   password hashes preserved, so the same logins work on
   staging. Other prod users were NOT copied; reseed by
