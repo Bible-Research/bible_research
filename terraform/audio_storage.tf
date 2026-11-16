@@ -49,6 +49,18 @@ resource "google_storage_bucket" "bible_audio" {
       type = "AbortIncompleteMultipartUpload"
     }
   }
+
+  # The frontend fetch()es signed audio URLs to preload the next
+  # chapter's MP3 into a blob (zero-network chapter transitions on
+  # a frozen lock-screen renderer). Media-element streaming does
+  # not need CORS, but fetch() from the app origins does — without
+  # this the prefetch silently degrades to streaming.
+  cors {
+    origin          = var.cors_origins
+    method          = ["GET"]
+    response_header = ["Content-Type", "Content-Length"]
+    max_age_seconds = 3600
+  }
 }
 
 resource "google_storage_bucket_iam_member" "appspot_audio_reader" {
