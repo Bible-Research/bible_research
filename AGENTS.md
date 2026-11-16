@@ -282,10 +282,9 @@ at the next GAE deploy.
   schema via `pg_dump --schema-only`, all `bible_verse`
   rows, `django_migrations`/content types/auth permissions,
   and the `Tester5`/`Daniels` accounts with their tokens,
-  tags,
-  notes, comments and reading positions — prod ids and
-  password hashes preserved, so the same logins work on
-  staging. Other prod users were NOT copied; reseed by
+  tags, notes, comments and reading positions — prod ids
+  and password hashes preserved, so the same logins work
+  on staging. Other prod users were NOT copied; reseed by
   re-running the same pg_dump/COPY procedure.
 
 ## Models / IDs
