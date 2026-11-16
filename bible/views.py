@@ -821,9 +821,10 @@ class BibleStructureView(VercelEdgeCacheMixin, APIView):
     ``_STRUCTURE_CACHE_TTL_SECONDS`` and marked
     ``Vercel-CDN-Cache-Control`` like ``bible/translations/``.
     ``degraded`` bodies (the SWORD canonical-name overlay
-    fetch failed, so English module names shipped) stay
-    ``no-store``, are never marked and are never written to
-    the process cache — they recover as soon as the fetch does.
+    fetch failed, so English module names shipped) and
+    anomalous empty-``books`` bodies stay ``no-store``, are
+    never marked and are never written to the process cache —
+    they recover as soon as the fetch does.
 
     Example:
         /api/v1/bible/structure/?fileset_id=LVSGLU8
@@ -849,9 +850,10 @@ class BibleStructureView(VercelEdgeCacheMixin, APIView):
         try:
             body, degraded = get_structure(fileset_id)
             response = Response(body)
-            # Degraded bodies are never cached downstream —
-            # the mixin's edge-mark also skips ``no-store``.
-            if degraded:
+            # Degraded bodies and empty-``books`` anomalies are
+            # never cached downstream — the mixin's edge-mark
+            # also skips ``no-store``.
+            if degraded or not body.get('books'):
                 response['Cache-Control'] = 'no-store'
             else:
                 response['Cache-Control'] = (

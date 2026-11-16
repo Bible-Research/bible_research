@@ -352,7 +352,9 @@ def test_empty_fallback_body_is_not_cached_per_fileset(
 ):
     """The per-fileset cache must not pin ``{books: []}``
     either: a canonical-fallback fileset whose first fetch
-    comes back empty retries on the next request."""
+    comes back empty retries on the next request. The anomaly
+    body itself ships ``no-store`` — the spec forbids caching
+    it at any tier, so the edge mark is never applied."""
     get_books = mock_get_client.return_value.get_books
     get_books.side_effect = [
         {'data': []},
@@ -362,6 +364,8 @@ def test_empty_fallback_body_is_not_cached_per_fileset(
     first = client.get(STRUCTURE_URL, {'fileset_id': 'ENGNIV_API'})
     assert first.status_code == status.HTTP_200_OK
     assert first.json()['books'] == []
+    assert first['Cache-Control'] == 'no-store'
+    assert 'Vercel-CDN-Cache-Control' not in first
 
     second = client.get(STRUCTURE_URL, {'fileset_id': 'ENGNIV_API'})
     assert second.status_code == status.HTTP_200_OK
