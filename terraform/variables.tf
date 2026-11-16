@@ -27,15 +27,15 @@ variable "github_repo" {
 #   (GCS allows one * per origin, and signed URLs stay
 #   bearer-token gated);
 # https://localhost — Capacitor Android webview (androidScheme);
-# http://localhost:* — vite dev server (vite auto-bumps the port
-#   when 5173 is busy).
+# http://localhost:5173 — vite dev server (GCS matches the port
+#   literally; other dev ports fall back to streaming).
 variable "cors_origins" {
   type = list(string)
   default = [
     "https://bibleresearch.vercel.app",
     "https://*-industr-analysers-projects.vercel.app",
     "https://localhost",
-    "http://localhost:*",
+    "http://localhost:5173",
   ]
   description = "Origins allowed to fetch signed GCS URLs directly."
 }
