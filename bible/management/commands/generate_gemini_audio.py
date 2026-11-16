@@ -45,6 +45,7 @@ from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import canonical_sword_fileset_id
 from bible.utils.provider_errors import (
     capture_internal_exception,
+    capture_provider_exception,
 )
 
 logger = logging.getLogger(__name__)
@@ -313,7 +314,10 @@ class Command(BaseCommand):
                     "Failed to generate %s %s: %s",
                     book_id, chap, exc,
                 )
-                capture_internal_exception(exc, tags=_JOB_TAG)
+                # Self-routing: a Gemini API outage stays
+                # warning-level; a code bug reports at error
+                # level.
+                capture_provider_exception(exc, tags=_JOB_TAG)
                 continue
             finally:
                 # Requests spent on a failed chapter still count

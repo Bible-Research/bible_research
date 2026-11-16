@@ -1213,3 +1213,47 @@ class SentryReleaseTests(TestCase):
 
         with patch.dict('os.environ', {}, clear=True):
             self.assertIsNone(sentry_release())
+
+
+class CredentialScrubTests(TestCase):
+    """``before_send`` strips query-string credentials from
+    exception values — a missed sanitize path still cannot leak
+    ``?key=`` into Sentry."""
+
+    def test_dbt_key_is_redacted(self):
+        event = {
+            'exception': {
+                'values': [{
+                    'type': 'HTTPError',
+                    'value': (
+                        '500 Server Error for url: '
+                        'https://b4.dbt.io/api/bibles?key=SECRET'
+                    ),
+                }],
+            },
+        }
+
+        result = sentry_before_send(event, {})
+
+        value = result['exception']['values'][0]['value']
+        self.assertNotIn('SECRET', value)
+        self.assertIn('key=<redacted>', value)
+
+    def test_signed_url_credentials_are_redacted(self):
+        event = {
+            'exception': {
+                'values': [{
+                    'type': 'HTTPError',
+                    'value': (
+                        '403 for url: https://x/y.mp3?'
+                        'X-Amz-Signature=ABC123&sig=ZZ'
+                    ),
+                }],
+            },
+        }
+
+        result = sentry_before_send(event, {})
+
+        value = result['exception']['values'][0]['value']
+        self.assertNotIn('ABC123', value)
+        self.assertNotIn('sig=ZZ', value)

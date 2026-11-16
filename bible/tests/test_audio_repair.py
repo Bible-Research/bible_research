@@ -670,7 +670,7 @@ def test_apply_regen_failure_is_captured(tmp_path):
         f"{_CMD}.Synthesizer", return_value=inst,
     )
     with patch(
-        f"{_CMD}.capture_internal_exception"
+        f"{_CMD}.capture_provider_exception"
     ) as mock_capture:
         out, started, exc = _run(path, mocks, "--apply")
     # The command exits nonzero on failed repairs — the capture

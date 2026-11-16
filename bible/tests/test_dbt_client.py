@@ -163,3 +163,34 @@ def test_get_books_error_hides_url_credential(dbt_client):
     assert 'key=' not in str(exc.value)
     assert 'SECRET' not in str(exc.value)
     assert exc.value.response is resp
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.get_bibles(),
+        lambda c: c.get_fileset_files("X"),
+        lambda c: c.get_timestamps("X", "GEN", "1"),
+        lambda c: c.get_copyright("X"),
+        lambda c: c.search("X", "god"),
+        lambda c: c.get_languages(),
+    ],
+)
+def test_request_errors_hide_url_credential(dbt_client, call):
+    """Every raw-``requests`` method re-raises a credential-free
+    copy — the original's ``str()`` embeds ``?key=``."""
+    resp = Mock()
+    resp.status_code = 500
+    original = requests.exceptions.HTTPError(
+        "500 Server Error for url: "
+        "https://b4.dbt.io/api/bibles?key=SECRET"
+    )
+    original.response = resp
+    dbt_client.session.get.side_effect = original
+
+    with pytest.raises(requests.exceptions.HTTPError) as exc:
+        call(dbt_client)
+
+    assert 'key=' not in str(exc.value)
+    assert 'SECRET' not in str(exc.value)
+    assert exc.value.response is resp

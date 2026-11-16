@@ -16,6 +16,8 @@ import logging
 import math
 from io import BytesIO
 
+import requests
+
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from mutagen.mp3 import MP3
@@ -114,6 +116,9 @@ class Command(BaseCommand):
             )
         if not fileset_ids:
             raise CommandError("no usable --fileset-ids given")
+        # Dedupes _dbt_has_timestamps captures to one event per
+        # fileset per run.
+        self._dbt_check_reported = set()
 
         book_filter = (
             options["book"].strip().upper()
@@ -143,7 +148,9 @@ class Command(BaseCommand):
                     "with the remaining filesets.",
                     fileset_id,
                 )
-                capture_internal_exception(exc, tags=_JOB_TAG)
+                # Self-routing: a DBT/STT outage stays warning;
+                # a client-side bug reports at error level.
+                capture_provider_exception(exc, tags=_JOB_TAG)
                 self.stdout.write(
                     f"fileset={fileset_id} failed"
                 )
@@ -186,7 +193,17 @@ class Command(BaseCommand):
         response = dbt.session.get(
             url, timeout=_MP3_DOWNLOAD_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            # ``str(e)`` embeds the signed URL — its query-string
+            # credentials would land in logs and Sentry.
+            raise requests.exceptions.HTTPError(
+                f"MP3 download failed "
+                f"({type(e).__name__}, status="
+                f"{response.status_code})",
+                response=response,
+            ) from None
         return response.content
 
     @staticmethod
@@ -207,18 +224,22 @@ class Command(BaseCommand):
                 "proceeding to generate.",
                 fileset_id, book_id, chap, exc_info=True,
             )
-            # Upstream blip -> warning stream; a client-side bug
-            # -> error-level internal_error; a 404 "no coverage"
-            # answer -> not_found, never sent (classified
-            # inside).
-            capture_provider_exception(
-                exc,
-                tags={
-                    **_JOB_TAG,
-                    'fileset_id': fileset_id,
-                    'endpoint': 'bible/timestamps',
-                },
-            )
+            # One event per fileset per run is enough — a DBT
+            # outage otherwise emits a warning per chapter while
+            # still burning STT budget. Upstream blip -> warning
+            # stream; a client-side bug -> error-level
+            # internal_error; a 404 "no coverage" answer ->
+            # not_found, never sent (classified inside).
+            if fileset_id not in self._dbt_check_reported:
+                self._dbt_check_reported.add(fileset_id)
+                capture_provider_exception(
+                    exc,
+                    tags={
+                        **_JOB_TAG,
+                        'fileset_id': fileset_id,
+                        'endpoint': 'bible/timestamps',
+                    },
+                )
             return False
         return bool((result or {}).get("data"))
 
@@ -424,7 +445,9 @@ class Command(BaseCommand):
                     "Failed to generate timestamps %s %s %s: %s",
                     fileset_id, book_id, chap, exc,
                 )
-                capture_internal_exception(exc, tags=_JOB_TAG)
+                # Self-routing: STT/GCS outages stay warning;
+                # code bugs report at error level.
+                capture_provider_exception(exc, tags=_JOB_TAG)
                 consecutive_failures += 1
                 if (
                     max_failures

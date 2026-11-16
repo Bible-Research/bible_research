@@ -410,14 +410,14 @@ def test_max_failures_aborts_on_consecutive_errors():
 
 
 def test_per_chapter_stt_failure_is_captured():
-    """A tolerated per-chapter STT failure reports an
-    error-level event tagged with the job label."""
+    """A tolerated per-chapter STT failure reports a
+    self-routing provider capture tagged with the job label."""
     stt = _fake_stt()
     stt.long_running_recognize_uri.side_effect = RuntimeError(
         "recognizer blew up"
     )
     with patch(
-        f"{_CMD}.capture_internal_exception"
+        f"{_CMD}.capture_provider_exception"
     ) as mock_capture:
         _run(["--fileset-ids", "LATLVRN1DA"], stt=stt)
     assert mock_capture.call_count == 2
@@ -425,3 +425,17 @@ def test_per_chapter_stt_failure_is_captured():
         mock_capture.call_args.kwargs["tags"]["job"]
         == "generate_audio_timestamps"
     )
+
+
+def test_dbt_check_failure_reports_once_per_fileset():
+    """The per-chapter DBT coverage check emits at most one
+    provider event per fileset per run."""
+    dbt = _fake_dbt()
+    dbt.get_timestamps.side_effect = RuntimeError("dbt down")
+    with patch(
+        f"{_CMD}.capture_provider_exception"
+    ) as mock_capture:
+        _run(["--fileset-ids", "LATLVRN1DA"], dbt=dbt)
+    assert mock_capture.call_count == 1
+    kwargs = mock_capture.call_args.kwargs
+    assert kwargs["tags"]["fileset_id"] == "LATLVRN1DA"

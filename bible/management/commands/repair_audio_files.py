@@ -51,6 +51,7 @@ from bible.services.google_tts.synthesizer import Synthesizer
 from bible.services.storage import gcs
 from bible.utils.provider_errors import (
     capture_internal_exception,
+    capture_provider_exception,
 )
 
 logger = logging.getLogger(__name__)
@@ -288,7 +289,10 @@ class Command(BaseCommand):
                         f"FAILED {name}  regen_failed: "
                         f"{exc.__class__.__name__}"
                     )
-                    capture_internal_exception(
+                    # Self-routing: a Cloud TTS outage stays
+                    # warning-level; a code bug reports at error
+                    # level.
+                    capture_provider_exception(
                         exc, tags=_JOB_TAG,
                     )
                     failed += 1

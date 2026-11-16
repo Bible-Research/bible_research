@@ -1,5 +1,6 @@
 """Shared helpers for the ``bible_research`` project package."""
 import os
+import re
 from urllib.parse import urlparse
 
 from django.core.exceptions import DisallowedHost
@@ -19,6 +20,15 @@ _SENSITIVE_PATH_PREFIXES = (
 # hitting the API with a bogus ``Host`` header produces a 400, not
 # a bug. ``sentry_before_send`` drops the event entirely.
 _SCANNER_NOISE_EXCEPTIONS = (DisallowedHost,)
+
+# DBT (and signed-URL) credentials ride in ``?key=``/``&key=``
+# query params; transport exceptions stringify the full URL into
+# the event's exception value. Defense in depth on top of the
+# credential-free re-raises in ``dbt/client.py`` — a missed path
+# still cannot leak the key.
+_CREDENTIAL_QUERY_RE = re.compile(
+    r'([?&](?:key|X-Amz-Signature|sig|token)=)[^&\s"\']+'
+)
 
 # Interactive docs/schema routes serve humans, not API traffic —
 # excluded from tracing so they don't crowd the sampled pool.
@@ -68,6 +78,15 @@ def sentry_before_send(event, hint):
         and isinstance(exc_info[1], _SCANNER_NOISE_EXCEPTIONS)
     ):
         return None
+
+    for value in (
+        event.get('exception', {}).get('values') or ()
+    ):
+        text = value.get('value')
+        if isinstance(text, str):
+            value['value'] = _CREDENTIAL_QUERY_RE.sub(
+                r'\1<redacted>', text,
+            )
 
     request = event.get('request')
     if not isinstance(request, dict):

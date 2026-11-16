@@ -569,7 +569,7 @@ def test_per_chapter_failure_is_captured(
     sword_factory.return_value = worklist_client
     _FakeSynth.outcome = RuntimeError("synth blew up")
 
-    with patch(f"{_CMD}.capture_internal_exception") as cap:
+    with patch(f"{_CMD}.capture_provider_exception") as cap:
         _invoke(tmp_path)
 
     assert cap.call_count >= 1

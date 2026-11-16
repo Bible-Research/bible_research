@@ -1,7 +1,6 @@
 """Request middleware for the ``bible_research`` project package."""
 import logging
-
-from django.core.cache import cache
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
@@ -9,13 +8,15 @@ logger = logging.getLogger(__name__)
 # ``BearerTokenAuthentication`` accepts ``Bearer <key>``.
 _TOKEN_SCHEMES = frozenset({'token', 'bearer'})
 
-# Locmem-cached token key -> user id, so the middleware does not
-# double the per-request auth query on every API call. A miss is
-# cached too (as ``0``): token keys are immutable, so an invalid
-# key can never become valid — caching it also stops a scanner
-# spraying bad tokens from hitting the DB per request.
-_SENTRY_USER_CACHE_PREFIX = 'v1:sentry-user:'
-_SENTRY_USER_CACHE_TTL = 300
+# Private bounded LRU of token key -> user id, so the middleware
+# does not double the per-request auth query on every API call.
+# A miss is cached too (as ``0``): token keys are immutable, so
+# an invalid key can never become valid. Deliberately NOT the
+# shared Django cache — a spray of unique bad tokens would
+# otherwise evict legitimate entries (throttle counters,
+# provider caches).
+_TOKEN_USER_CACHE_MAX = 200
+_token_user_cache = OrderedDict()
 
 
 class SentryUserMiddleware:
@@ -60,9 +61,9 @@ def _resolve_sentry_user_id(request):
         return None
     key = key.strip()
 
-    cache_key = f'{_SENTRY_USER_CACHE_PREFIX}{key}'
-    cached = cache.get(cache_key)
+    cached = _token_user_cache.get(key)
     if cached is not None:
+        _token_user_cache.move_to_end(key)
         return cached or None
 
     from rest_framework.authtoken.models import Token
@@ -80,5 +81,7 @@ def _resolve_sentry_user_id(request):
             exc_info=True,
         )
         return None
-    cache.set(cache_key, user_id, _SENTRY_USER_CACHE_TTL)
+    _token_user_cache[key] = user_id
+    while len(_token_user_cache) > _TOKEN_USER_CACHE_MAX:
+        _token_user_cache.popitem(last=False)
     return user_id or None
