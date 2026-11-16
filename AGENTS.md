@@ -267,8 +267,8 @@ at the next GAE deploy.
   read-only agent investigation works there exactly like on
   `defaultdb`. For a writable remote dev DB, repoint
   `config.yaml`'s `default` at `stagingdb`/`staging_rw`
-  (password from the staging deploy's DOTENV — ask the
-  user).
+  (password from the staging deploy's `DATABASE_URL` — ask
+  the user).
 - Non-production backend deployments (e.g. a Vercel staging
   env whose config arrives via the `DOTENV` variable) set
   `DATABASE_URL` to `stagingdb` — never `defaultdb`. The
@@ -279,7 +279,8 @@ at the next GAE deploy.
   environment. See DEVELOPER_GUIDE "Environment Variables".
 - `stagingdb` was seeded from `defaultdb` (2026-11-16): prod
   schema via `pg_dump --schema-only`, all `bible_verse`
-  rows, `django_migrations`/content types, and the
+  rows, `django_migrations`/content types/auth permissions,
+  and the
   `Tester5`/`Daniels` accounts with their tokens, tags,
   notes, comments and reading positions — prod ids and
   password hashes preserved, so the same logins work on
