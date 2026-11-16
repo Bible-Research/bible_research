@@ -12,6 +12,9 @@ from bible.services.google_tts.synthesizer import Synthesizer
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import canonical_sword_fileset_id
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +166,10 @@ class Command(BaseCommand):
                         "Failed to generate %s %s: %s",
                         book_id, chap, exc,
                     )
+                    capture_internal_exception(
+                        exc,
+                        tags={'job': 'generate_chapter_audio'},
+                    )
                     continue
 
                 try:
@@ -178,6 +185,10 @@ class Command(BaseCommand):
                         "Failed to upload %s %s: %s",
                         book_id, chap, exc,
                     )
+                    capture_internal_exception(
+                        exc,
+                        tags={'job': 'generate_chapter_audio'},
+                    )
                     continue
 
                 generated += 1
@@ -191,12 +202,16 @@ class Command(BaseCommand):
                 if delta > 0:
                     try:
                         gcs.increment_monthly_usage(fileset_id, delta)
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         logger.exception(
                             "Failed to persist usage delta=%d for "
                             "%s %s; in-memory budget still reflects "
                             "the spend but GCS counter is stale.",
                             delta, book_id, chap,
+                        )
+                        capture_internal_exception(
+                            exc,
+                            tags={'job': 'generate_chapter_audio'},
                         )
 
         # If every pending chapter hit the generic

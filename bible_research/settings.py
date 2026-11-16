@@ -17,7 +17,12 @@ from pathlib import Path
 import dj_database_url
 from corsheaders.defaults import default_headers
 
-from .utils import sentry_before_send
+from .utils import (
+    PROFILES_SAMPLE_RATE,
+    sentry_before_send,
+    sentry_release,
+    sentry_traces_sampler,
+)
 
 from .dotenv import load_dotenv, load_dotenv_file
 
@@ -66,6 +71,11 @@ MIDDLEWARE = [
     # token-authenticated API.
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    # Attaches the user pk to the Sentry scope before the view
+    # runs (resolves token auth itself — DRF only authenticates
+    # inside the view). Must stay after AuthenticationMiddleware
+    # for session users. No-op without a configured SENTRY_DSN.
+    'bible_research.middleware.SentryUserMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -356,19 +366,30 @@ if SENTRY_DSN:
             ),
         ],
         # Auth-endpoint request bodies carry passwords —
-        # sentry_before_send drops them; send_default_pii=False
-        # keeps IPs/usernames off events as well.
+        # sentry_before_send drops them (plus DisallowedHost
+        # scanner noise); send_default_pii=False keeps
+        # IPs/usernames off events — the user id comes from
+        # SentryUserMiddleware setting scope user = {'id': pk}.
         before_send=sentry_before_send,
         send_default_pii=False,
+        # Ctrl+C/shutdown noise is never a defect.
+        ignore_errors=[KeyboardInterrupt],
         # GCP is the only production deploy path; every other
         # environment (local dev, CI) reports 'development'.
         environment=(
             'production' if IS_GCP_ENVIRONMENT else 'development'
         ),
-        # GAE sets GAE_VERSION per deploy — free release tracking
-        # with no CI changes.
-        release=os.environ.get('GAE_VERSION'),
-        traces_sample_rate=0.1,
+        # SENTRY_RELEASE wins when set (Cloud Run jobs carry no
+        # GAE_VERSION); GAE_VERSION is the per-deploy fallback.
+        release=sentry_release(),
+        # Per-route sampling: 0 for /_ah/ health checks and the
+        # docs/schema pages, ~0.3 for /api/ endpoints (low
+        # traffic — single F1), 0.1 elsewhere.
+        traces_sampler=sentry_traces_sampler,
+        # Profile 10% of the sampled transactions — provider
+        # calls and SWORD scans are the slow paths worth
+        # profiling.
+        profiles_sample_rate=PROFILES_SAMPLE_RATE,
     )
 
 # Audio / Cloud TTS settings are resolved from a single source per

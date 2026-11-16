@@ -43,8 +43,13 @@ from bible.services.gemini_tts.synthesizer import (
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import canonical_sword_fileset_id
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+)
 
 logger = logging.getLogger(__name__)
+
+_JOB_TAG = {'job': 'generate_gemini_audio'}
 
 # ~15 requests/day per free-tier project; leave one in reserve.
 DEFAULT_MAX_REQUESTS = 14
@@ -308,6 +313,7 @@ class Command(BaseCommand):
                     "Failed to generate %s %s: %s",
                     book_id, chap, exc,
                 )
+                capture_internal_exception(exc, tags=_JOB_TAG)
                 continue
             finally:
                 # Requests spent on a failed chapter still count
@@ -341,6 +347,7 @@ class Command(BaseCommand):
                     "Failed to persist %s %s artifacts: %s",
                     book_id, chap, exc,
                 )
+                capture_internal_exception(exc, tags=_JOB_TAG)
                 continue
 
             state.mark_completed(book_id, chap)

@@ -407,3 +407,21 @@ def test_max_failures_aborts_on_consecutive_errors():
     )
     assert stt.long_running_recognize_uri.call_count == 3
     assert "reason=consecutive_failures" in out
+
+
+def test_per_chapter_stt_failure_is_captured():
+    """A tolerated per-chapter STT failure reports an
+    error-level event tagged with the job label."""
+    stt = _fake_stt()
+    stt.long_running_recognize_uri.side_effect = RuntimeError(
+        "recognizer blew up"
+    )
+    with patch(
+        f"{_CMD}.capture_internal_exception"
+    ) as mock_capture:
+        _run(["--fileset-ids", "LATLVRN1DA"], stt=stt)
+    assert mock_capture.call_count == 2
+    assert (
+        mock_capture.call_args.kwargs["tags"]["job"]
+        == "generate_audio_timestamps"
+    )

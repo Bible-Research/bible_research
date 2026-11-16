@@ -13,6 +13,12 @@ from datetime import date
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+    sentry_capture_message,
+    sentry_flush,
+)
+
 logger = logging.getLogger(__name__)
 
 # label, argv, schedule — runs only when `schedule` matches today (UTC)
@@ -175,27 +181,49 @@ class Command(BaseCommand):
             return
 
         failed = []
-        for label, argv, _schedule in entries:
-            self.stdout.write(f"running: {label} {' '.join(argv)}")
-            # Catch SystemExit too — a sub-job that calls
-            # sys.exit() must not abort the whole pass. A clean
-            # exit (code 0 or None) is not a failure.
-            # KeyboardInterrupt still propagates and stops the run.
-            try:
-                call_command(label, *argv)
-            except (Exception, SystemExit) as exc:
-                if (
-                    isinstance(exc, SystemExit)
-                    and exc.code in (None, 0)
-                ):
-                    continue
-                logger.exception("sub-job %s failed", label)
-                failed.append(label)
+        try:
+            for label, argv, _schedule in entries:
+                self.stdout.write(
+                    f"running: {label} {' '.join(argv)}"
+                )
+                # Catch SystemExit too — a sub-job that calls
+                # sys.exit() must not abort the whole pass. A clean
+                # exit (code 0 or None) is not a failure.
+                # KeyboardInterrupt still propagates and stops the
+                # run.
+                try:
+                    call_command(label, *argv)
+                except (Exception, SystemExit) as exc:
+                    if (
+                        isinstance(exc, SystemExit)
+                        and exc.code in (None, 0)
+                    ):
+                        continue
+                    logger.exception("sub-job %s failed", label)
+                    # CommandError/SystemExit exits bypass every
+                    # exception-based Sentry integration — capture
+                    # explicitly so job failures reach the error
+                    # queue.
+                    capture_internal_exception(
+                        exc, tags={'job': label},
+                    )
+                    failed.append(label)
 
-        if failed:
-            raise CommandError(
-                f"sub-jobs failed: {', '.join(failed)}"
-            )
+            if failed:
+                # Aggregate event so one failed pass surfaces
+                # once even when several sub-jobs failed.
+                sentry_capture_message(
+                    "run_all_jobs: sub-jobs failed: "
+                    f"{', '.join(failed)}",
+                    tags={'job': 'run_all_jobs'},
+                )
+                raise CommandError(
+                    f"sub-jobs failed: {', '.join(failed)}"
+                )
+        finally:
+            # Cloud Run jobs are short-lived processes — buffered
+            # events are lost unless flushed before exit.
+            sentry_flush(timeout=5)
 
     def _select(self, options, today):
         """Filter JOBS down to the entries to run this pass."""

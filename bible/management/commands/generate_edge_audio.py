@@ -41,8 +41,14 @@ from bible.services.gemini_tts.state import RunState, today_pacific
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import canonical_sword_fileset_id
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+    capture_provider_exception,
+)
 
 logger = logging.getLogger(__name__)
+
+_JOB_TAG = {'job': 'generate_edge_audio'}
 
 # A verse is one request (~1 s synth + pacing); 60 chapters is
 # ~30-40 min, comfortably inside the Job's 5400 s timeout.
@@ -207,6 +213,10 @@ class Command(BaseCommand):
         started = time.monotonic()
         max_chapters = options["max_chapters"]
         max_seconds = options["max_minutes"] * 60
+        # An endpoint outage fails every chapter — one Sentry
+        # event per run is enough (the fingerprint groups them
+        # anyway); the log keeps the per-chapter record.
+        edge_failure_reported = False
 
         for book_id, chap in pending:
             if generated >= max_chapters:
@@ -232,12 +242,28 @@ class Command(BaseCommand):
                     "edge-tts failed at %s %s: %s",
                     book_id, chap, exc,
                 )
+                # Upstream outage tolerated per-chapter — the
+                # warning-level provider stream, not the error
+                # queue (edge-tts carries no HTTP status, so the
+                # classifier needs the explicit upstream hint).
+                if not edge_failure_reported:
+                    edge_failure_reported = True
+                    capture_provider_exception(
+                        exc, 'provider_error',
+                        tags={
+                            **_JOB_TAG,
+                            'fileset_id': fileset_id,
+                            'provider': 'EdgeTTSProvider',
+                        },
+                        upstream=True,
+                    )
                 continue
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "Failed to generate %s %s: %s",
                     book_id, chap, exc,
                 )
+                capture_internal_exception(exc, tags=_JOB_TAG)
                 continue
 
             try:
@@ -260,6 +286,7 @@ class Command(BaseCommand):
                     "Failed to persist %s %s artifacts: %s",
                     book_id, chap, exc,
                 )
+                capture_internal_exception(exc, tags=_JOB_TAG)
                 continue
 
             if state is not None:

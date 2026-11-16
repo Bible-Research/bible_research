@@ -49,8 +49,13 @@ from bible.services.google_tts.budget import BudgetExceeded, CharBudget
 from bible.services.google_tts.client import QuotaExceeded
 from bible.services.google_tts.synthesizer import Synthesizer
 from bible.services.storage import gcs
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+)
 
 logger = logging.getLogger(__name__)
+
+_JOB_TAG = {'job': 'repair_audio_files'}
 
 # Conventional manifest object the ``manual`` run_all_jobs entry
 # uses when no --manifest is given.
@@ -283,6 +288,9 @@ class Command(BaseCommand):
                         f"FAILED {name}  regen_failed: "
                         f"{exc.__class__.__name__}"
                     )
+                    capture_internal_exception(
+                        exc, tags=_JOB_TAG,
+                    )
                     failed += 1
                     continue
 
@@ -302,6 +310,9 @@ class Command(BaseCommand):
                         f"FAILED {name}  upload_failed: "
                         f"{exc.__class__.__name__}"
                     )
+                    capture_internal_exception(
+                        exc, tags=_JOB_TAG,
+                    )
                     failed += 1
                     continue
                 ok = True
@@ -314,11 +325,14 @@ class Command(BaseCommand):
                 if delta > 0:
                     try:
                         gcs.increment_monthly_usage(fs, delta)
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         logger.exception(
                             "Failed to persist usage delta=%d "
                             "for %s; GCS counter is stale.",
                             delta, name,
+                        )
+                        capture_internal_exception(
+                            exc, tags=_JOB_TAG,
                         )
             if not ok:
                 continue
@@ -331,12 +345,15 @@ class Command(BaseCommand):
                     "manifest": manifest_uri,
                     "chars_used": artifacts.chars_used,
                 })
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "Failed to write repair ledger for %s; the "
                     "artifact IS repaired but a re-run would "
                     "regenerate it again.",
                     name,
+                )
+                capture_internal_exception(
+                    exc, tags=_JOB_TAG,
                 )
             repaired += 1
             self.stdout.write(

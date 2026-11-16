@@ -185,33 +185,58 @@ credentials.
 
 Project `bible-research-api` (org `bible-research`, de.sentry.io);
 init lives in `bible_research/settings.py` and is DSN-gated — no
-DSN, no traffic. What each stream means:
+DSN, no traffic. The DSN is an entry inside the shared
+`env-file` GCP secret (env var `SENTRY_DSN` or config.yaml
+locally). What each stream means:
 
 - `DjangoIntegration` captures unhandled 500s at level error —
   real bugs.
 - `capture_internal_exception` (in
-  `bible/utils/provider_errors.py`) reports caught server bugs at
-  level error, tagged `error_code:internal_error` — real bugs,
+  `bible/utils/provider_errors.py`) reports caught server-side
+  failures at level error, tagged `error_code:internal_error` —
+  GCS signing/counter/deletion failures, unexpected DB
+  `IntegrityError`/`OperationalError` (deadlocks) in reorder/move,
+  SWORD data corruption, timestamp-artifact read failures, and
+  Cloud Run job failures (also tagged `job:<label>`;
+  `run_all_jobs` adds an aggregate `capture_message` and
+  `sentry_sdk.flush(timeout=5)` before exit). Real bugs —
   agent-fixable.
 - `capture_provider_exception` reports upstream outages at level
   warning, tagged `error_code` in {`rate_limited`,
   `provider_error`} — the `_CAPTURED_ERROR_CODES` allowlist, so
   `not_found`/`book_not_in_fileset` are never sent. Trend-only;
-  NOT auto-fix candidates.
+  NOT auto-fix candidates. Classification:
+  `is_upstream_failure` treats exceptions carrying an upstream
+  status plus `requests`/`urllib3`/DBT-`ApiException`/
+  `google.api_core` families as upstream; anything else caught
+  at the provider boundary is re-routed to error-level
+  `internal_error` (a `TypeError` in response shaping is our
+  bug, not an upstream blip).
+- Triage tags: `fileset_id`, `provider`, `endpoint`,
+  `job:<label>`; fingerprints group on `{{ default }}` +
+  `error_code` (+`fileset_id` when known) so one bad fileset
+  can't spawn unbounded issue groups. `SentryUserMiddleware`
+  sets scope user `{'id': pk}` (pk only —
+  `send_default_pii=False` stays).
 - `LoggingIntegration(level=INFO, event_level=None)` — INFO+
   log records are breadcrumbs only, never events; DEBUG is
-  dropped entirely.
-- `sentry_before_send` (`bible_research/utils.py`) strips
-  `request.data` on `/api/token` and `/api/v1/users/` paths
-  (password-bearing bodies).
+  dropped entirely. `ignore_errors` skips `KeyboardInterrupt`;
+  `sentry_before_send` (`bible_research/utils.py`) drops
+  `DisallowedHost` scanner noise and strips `request.data` on
+  `/api/token` and `/api/v1/users/` paths (password-bearing
+  bodies).
+- Performance: `traces_sampler` → 0 for `/_ah/` + docs/schema
+  routes, ~0.3 for `/api/`, 0.1 elsewhere;
+  `profiles_sample_rate=0.1`; explicit spans wrap provider
+  calls, GCS reads/signing, and SWORD module scans.
 
 The agent-fix queue for this project is `is:unresolved
 level:error environment:production` — warning-level provider
 events are excluded by the level filter. Events carry
 `environment:production` on GCP and `development` elsewhere,
-with `release` = `GAE_VERSION`, so the environment filter
-skips dev noise and `resolvedInNextRelease` resolves an issue
-at the next GAE deploy.
+with `release` = `SENTRY_RELEASE` else `GAE_VERSION`, so the
+environment filter skips dev noise and `resolvedInNextRelease`
+resolves an issue at the next GAE deploy.
 
 ## Auth quirks
 

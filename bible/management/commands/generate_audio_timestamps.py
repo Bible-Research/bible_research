@@ -40,8 +40,14 @@ from bible.services.google_stt.client import (
 )
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+    capture_provider_exception,
+)
 
 logger = logging.getLogger(__name__)
+
+_JOB_TAG = {'job': 'generate_audio_timestamps'}
 
 _MP3_DOWNLOAD_TIMEOUT_SECONDS = 60
 
@@ -131,12 +137,13 @@ class Command(BaseCommand):
                     max_chapters=options["max_chapters"],
                     max_failures=options["max_failures"],
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "STT run failed for fileset %s; continuing "
                     "with the remaining filesets.",
                     fileset_id,
                 )
+                capture_internal_exception(exc, tags=_JOB_TAG)
                 self.stdout.write(
                     f"fileset={fileset_id} failed"
                 )
@@ -194,11 +201,23 @@ class Command(BaseCommand):
         proceed rather than skipping the chapter every run."""
         try:
             result = dbt.get_timestamps(fileset_id, book_id, chap)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "DBT timestamps check failed for %s %s %s; "
                 "proceeding to generate.",
                 fileset_id, book_id, chap, exc_info=True,
+            )
+            # Upstream blip -> warning stream; a client-side bug
+            # -> error-level internal_error; a 404 "no coverage"
+            # answer -> not_found, never sent (classified
+            # inside).
+            capture_provider_exception(
+                exc,
+                tags={
+                    **_JOB_TAG,
+                    'fileset_id': fileset_id,
+                    'endpoint': 'bible/timestamps',
+                },
             )
             return False
         return bool((result or {}).get("data"))
@@ -340,13 +359,18 @@ class Command(BaseCommand):
                         gcs.delete_stt_staging_audio(
                             fileset_id, book_id, chap,
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "stt_staging cleanup failed for %s "
                             "%s %s; the lifecycle rule is the "
                             "backstop.",
                             fileset_id, book_id, chap,
                             exc_info=True,
+                        )
+                        # Tolerated (lifecycle rule cleans up)
+                        # but still a real infra failure.
+                        capture_internal_exception(
+                            exc, tags=_JOB_TAG,
                         )
                 # The LRO completed — the full chapter duration
                 # is billed even when the transcript is empty.
@@ -400,6 +424,7 @@ class Command(BaseCommand):
                     "Failed to generate timestamps %s %s %s: %s",
                     fileset_id, book_id, chap, exc,
                 )
+                capture_internal_exception(exc, tags=_JOB_TAG)
                 consecutive_failures += 1
                 if (
                     max_failures
@@ -420,13 +445,16 @@ class Command(BaseCommand):
                 if delta > 0:
                     try:
                         gcs.increment_stt_monthly_usage(delta)
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         logger.exception(
                             "Failed to persist STT usage "
                             "delta=%d for %s %s; in-memory "
                             "budget still reflects the spend "
                             "but the GCS counter is stale.",
                             delta, book_id, chap,
+                        )
+                        capture_internal_exception(
+                            exc, tags=_JOB_TAG,
                         )
             if complete_reason != "all_done":
                 break

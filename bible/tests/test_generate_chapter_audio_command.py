@@ -303,3 +303,41 @@ def test_dry_run_reports_each_mode_without_touching_gcs(
     assert "mode=verse" in text
     assert "mode=chapter" in text
     acquire.assert_not_called()
+
+
+@patch(f"{_CMD}.capture_internal_exception")
+@patch(f"{_CMD}.get_default_sword_client")
+@patch(f"{_CMD}.gcs.mark_run_complete")
+@patch(f"{_CMD}.gcs.increment_monthly_usage")
+@patch(f"{_CMD}.gcs.read_monthly_usage")
+@patch(f"{_CMD}.gcs.acquire_run_lock")
+@patch(f"{_CMD}.gcs.upload_chapter_artifacts")
+@patch(f"{_CMD}.gcs.list_completed_chapters")
+@patch(f"{_CMD}.Synthesizer")
+def test_per_chapter_failure_is_captured(
+    synth_cls, list_done, upload, acquire, read_usage, increment,
+    mark_complete, get_sword, mock_capture,
+):
+    """A tolerated per-chapter synthesis failure still reports
+    an error-level event tagged with the job label."""
+    acquire.return_value = (True, "acquired")
+    read_usage.return_value = 0
+    list_done.return_value = set()
+    get_sword.return_value.list_chapters.return_value = [
+        ("GEN", 1), ("GEN", 2), ("GEN", 3),
+    ]
+    inst = MagicMock()
+    inst.run.side_effect = RuntimeError("synth blew up")
+    synth_cls.return_value = inst
+
+    out = StringIO()
+    call_command(
+        "generate_chapter_audio", "--fileset-id", "LVSGLU8",
+        stdout=out,
+    )
+
+    assert mock_capture.call_count == 3
+    assert (
+        mock_capture.call_args.kwargs["tags"]["job"]
+        == "generate_chapter_audio"
+    )

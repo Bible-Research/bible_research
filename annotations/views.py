@@ -25,6 +25,9 @@ from bible.utils.bible_books import (
     get_book_name_from_id,
     get_dbt_book_id,
 )
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+)
 from bible_research.permissions import GuestReadOnly
 
 from .models import (
@@ -1145,10 +1148,20 @@ class NoteViewSet(viewsets.ModelViewSet):
             logger.error(
                 f'Unexpected IntegrityError in reorder: {e}'
             )
+            # Not an expected conflict — a real DB failure the
+            # generic 409 must not hide from Sentry.
+            capture_internal_exception(
+                e,
+                tags={'endpoint': 'notes/reorder'},
+            )
             return _db_error_response()
-        except OperationalError:
+        except OperationalError as e:
             # e.g. a deadlock aborting the transaction — retryable.
             logger.error('OperationalError (deadlock?) in reorder')
+            capture_internal_exception(
+                e,
+                tags={'endpoint': 'notes/reorder'},
+            )
             return _db_error_response()
 
     @extend_schema(
@@ -1419,10 +1432,20 @@ class NoteViewSet(viewsets.ModelViewSet):
             logger.error(
                 f'Unexpected IntegrityError in move: {e}'
             )
+            # Not an expected conflict — a real DB failure the
+            # generic 409 must not hide from Sentry.
+            capture_internal_exception(
+                e,
+                tags={'endpoint': 'notes/move'},
+            )
             return _db_error_response()
-        except OperationalError:
+        except OperationalError as e:
             # e.g. a deadlock aborting the transaction — retryable.
             logger.error('OperationalError (deadlock?) in move')
+            capture_internal_exception(
+                e,
+                tags={'endpoint': 'notes/move'},
+            )
             return _db_error_response()
 
 

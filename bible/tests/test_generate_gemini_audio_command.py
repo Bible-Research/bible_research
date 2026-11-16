@@ -557,3 +557,23 @@ def test_local_mode_never_touches_gcs(
 
     for name, mock in gcs_mocks.items():
         assert not mock.called, f"gcs.{name} called in local mode"
+
+
+@patch(f"{_CMD}.GeminiSynthesizer", _FakeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_per_chapter_failure_is_captured(
+    sword_factory, tmp_path, worklist_client,
+):
+    """A tolerated per-chapter synthesis failure reports an
+    error-level event tagged with the job label."""
+    sword_factory.return_value = worklist_client
+    _FakeSynth.outcome = RuntimeError("synth blew up")
+
+    with patch(f"{_CMD}.capture_internal_exception") as cap:
+        _invoke(tmp_path)
+
+    assert cap.call_count >= 1
+    assert (
+        cap.call_args.kwargs["tags"]["job"]
+        == "generate_gemini_audio"
+    )
