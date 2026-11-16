@@ -27,6 +27,10 @@ BOOK_NAME_RE = re.compile(r"^[A-Za-z0-9 .'\-]{1,60}$")
 # USFM book ids are 3 alphanumeric chars (``GEN``, ``1SA``).
 USFM_BOOK_ID_RE = re.compile(r"^[A-Za-z0-9]{3}$")
 
+# Search resume cursors are opaque base64url tokens
+# (``[A-Za-z0-9_-]`` plus ``=`` padding), well under 64 chars.
+SEARCH_CURSOR_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}={0,2}$")
+
 
 def is_valid_fileset_id(value):
     """True when ``value`` is a plausible fileset id."""
@@ -57,3 +61,10 @@ def is_valid_book_id_list(value):
         USFM_BOOK_ID_RE.match(token.strip())
         for token in value.split(',')
     )
+
+
+def is_valid_search_cursor(value):
+    """True when ``value`` is shaped like a search resume
+    cursor (base64url charset, bounded length). Only a charset
+    gate — decode/range validation happens at the provider."""
+    return bool(SEARCH_CURSOR_RE.match(value or ""))

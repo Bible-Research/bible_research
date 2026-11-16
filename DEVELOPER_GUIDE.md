@@ -918,6 +918,9 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
   filter
 - `group_by`: Set to `book` to return every match grouped by
   book instead of a paginated list
+- `cursor`: Resume token for grouped SWORD searches (see
+  "Resumable SWORD scans" below); ignored by other providers
+  and by paginated mode
 
 **Response** (default paginated mode):
 ```json
@@ -982,6 +985,45 @@ within each group are sorted by chapter and verse:
 scanned for SWORD). `meta.truncated` is true when a safety cap
 cut results off (5000 results for DBT/API.Bible/SWORD, 30 pages
 for ESV).
+
+**Resumable SWORD scans** (grouped mode only): a SWORD grouped
+search walks the local module's ~1,189 chapters under a
+per-request wall-clock budget (6 seconds). When the budget
+expires mid-scan the response is a normal `200` carrying the
+matches found so far plus two extra `meta` fields:
+
+```json
+{
+  "meta": {
+    "total": 120,
+    "truncated": true,
+    "next_cursor": "djE6NTAw",
+    "progress": {
+      "chapters_scanned": 500,
+      "chapters_total": 1189
+    }
+  }
+}
+```
+
+Resend the same request with `cursor=<next_cursor>` to resume
+where the scan stopped — each window returns only matches not
+yet reported, and `progress` is cumulative so clients can show
+a determinate indicator. `next_cursor` is absent when the scan
+completes; a `cursor` that fails to decode or points past the
+end of the worklist returns `400` with
+`error_code: invalid_parameter`. The `search` throttle
+(`30/min`) applies to every window request — iterative clients
+fit comfortably.
+
+**SWORD search feature flag**: SWORD-fileset searches (both
+paginated and grouped) are gated by the `sword_search`
+`FeatureFlag` row, toggleable at runtime via Django admin — a
+kill switch for disabling the local scan without a redeploy. A
+missing row means enabled. When disabled, requests carrying a
+SWORD `fileset_id` return `403` with
+`error_code: search_disabled` before any provider work;
+ESV/API.Bible/DBT searches are unaffected.
 
 ### Tags
 

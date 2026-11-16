@@ -30,6 +30,16 @@ class PassageNotFoundError(ValueError):
         self.client_message = client_message
 
 
+class InvalidSearchCursorError(ValueError):
+    """The ``cursor`` query param is not a decodable scan
+    position — a client-input failure (400
+    ``invalid_parameter``), deliberately NOT a provider error
+    even though it is raised inside the provider layer.
+    Subclasses ``ValueError`` for consistency with the other
+    parameter-validation failures.
+    """
+
+
 class TimestampsNotGeneratedError(PassageNotFoundError):
     """The audio exists but its timestamp sidecar does not yet.
 

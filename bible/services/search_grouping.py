@@ -5,13 +5,19 @@ Used by ``bible.views.BibleSearchView`` when a request carries
 then bucket them into per-book groups in canonical order.
 """
 
+import base64
+import binascii
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from bible.utils.bible_books import (
     BOOK_ORDER_MAP,
     get_book_name_from_id,
     get_dbt_book_id,
+)
+from bible.utils.provider_errors import (
+    InvalidSearchCursorError,
 )
 
 logger = logging.getLogger(__name__)
@@ -21,6 +27,58 @@ MAX_RESULTS = 5000
 MAX_ESV_PAGES = 30
 ESV_PAGE_SIZE = 100
 ESV_PAGE_WORKERS = 4
+
+# Wall-clock budget for one SWORD scan window: a request scans
+# chapters until this many seconds elapse, then returns what it
+# has plus a resume cursor. Sized well under gunicorn's 30s
+# worker timeout so a slow scan can never get its worker killed.
+SEARCH_SCAN_BUDGET_SECONDS = 6
+
+# ``next_cursor`` wire format: ``base64url("v1:<index>")`` where
+# index is a position in the fileset's chapter worklist. Opaque
+# to clients, stateless, and deterministic because the worklist
+# is stable per (fileset_id, books).
+_SCAN_CURSOR_PREFIX = 'v1:'
+
+
+def encode_scan_cursor(index):
+    """Serialize a chapter-worklist position as an opaque token."""
+    raw = f'{_SCAN_CURSOR_PREFIX}{index}'.encode('ascii')
+    return base64.urlsafe_b64encode(raw).decode('ascii')
+
+
+def decode_scan_cursor(cursor):
+    """Inverse of ``encode_scan_cursor``.
+
+    Raises ``InvalidSearchCursorError`` when the value is not a
+    well-formed cursor — the view maps that to a 400
+    ``invalid_parameter`` response.
+    """
+    try:
+        raw = base64.b64decode(
+            cursor.encode('ascii'), altchars=b'-_',
+            validate=True,
+        )
+        text = raw.decode('ascii')
+    except (binascii.Error, UnicodeError, ValueError) as e:
+        raise InvalidSearchCursorError(
+            'cursor could not be decoded'
+        ) from e
+    if not text.startswith(_SCAN_CURSOR_PREFIX):
+        raise InvalidSearchCursorError(
+            'cursor has an unknown format'
+        )
+    try:
+        index = int(text[len(_SCAN_CURSOR_PREFIX):])
+    except ValueError as e:
+        raise InvalidSearchCursorError(
+            'cursor carries no position'
+        ) from e
+    if index < 0:
+        raise InvalidSearchCursorError(
+            'cursor position is negative'
+        )
+    return index
 
 
 def parse_esv_results(results):
@@ -304,19 +362,12 @@ def fetch_esv_matches(client, query):
     return verses, total, total_pages > MAX_ESV_PAGES
 
 
-def scan_sword_matches(
-    client, fileset_id, query, books, max_matches=None,
-):
-    """Scan SWORD chapters and return ``(matches, truncated)``.
-
-    ``books`` (comma-separated USFM ids) restricts the chapters
-    scanned. Matches stay in the chapter order the client
-    returns; grouping sorts them canonically anyway.
-
-    ``max_matches`` bounds the local scan: once that many matches
-    are collected the remaining chapters are skipped and
-    ``truncated`` is ``True`` (the match count is then a lower
-    bound, not the true total). ``None`` scans everything.
+def sword_chapter_worklist(client, fileset_id, books):
+    """Return the ordered ``[(book_id, chapter), ...]`` scan
+    worklist for a fileset — the module's full chapter list,
+    restricted to the ``books`` filter when given. Shared by
+    ``scan_sword_matches`` and the grouped-search provider, which
+    needs the total for cursor validation and ``meta.progress``.
     """
     chapters = client.list_chapters(fileset_id)
 
@@ -328,11 +379,68 @@ def scan_sword_matches(
             (b, c) for b, c in chapters
             if b.upper() in allowed
         ]
+    return chapters
+
+
+def scan_sword_matches(
+    client, fileset_id, query, books, max_matches=None,
+    deadline_s=None, start_index=0,
+):
+    """Scan SWORD chapters and return
+    ``(matches, truncated, next_index)``.
+
+    ``books`` (comma-separated USFM ids) restricts the chapters
+    scanned. Matches stay in the chapter order the client
+    returns; grouping sorts them canonically anyway.
+
+    ``max_matches`` bounds the local scan: once that many matches
+    are collected the remaining chapters are skipped and
+    ``truncated`` is ``True`` (the match count is then a lower
+    bound, not the true total). ``None`` scans everything.
+
+    ``deadline_s`` is a wall-clock budget in seconds, checked
+    between chapters: when it expires the scan stops and
+    ``next_index`` carries the position of the first unscanned
+    chapter so a follow-up request can resume there (the grouped
+    endpoint emits it as ``meta.next_cursor``). ``start_index``
+    resumes a previous window.
+
+    ``next_index`` is the position of the first unscanned
+    chapter whenever the scan stopped early — deadline expiry
+    or the ``max_matches`` cap — and ``None`` only on a full
+    scan. Callers deciding whether to emit a resume cursor must
+    still check the stop reason: a capped result is deliberately
+    terminal (a cursor would let clients page past the cap).
+
+    ``truncated`` is ``True`` whenever the worklist was not
+    fully scanned (cap or deadline) — ``total`` is then a lower
+    bound.
+    """
+    chapters = sword_chapter_worklist(client, fileset_id, books)
 
     needle = query.lower()
     matches = []
     truncated = False
-    for idx, (book_id, chapter) in enumerate(chapters):
+    next_index = None
+    deadline = (
+        time.monotonic() + deadline_s
+        if deadline_s is not None
+        else None
+    )
+    total = len(chapters)
+    for idx in range(start_index, total):
+        if (
+            deadline is not None
+            and idx > start_index
+            and time.monotonic() >= deadline
+        ):
+            # Budget spent between chapters: report the matches
+            # collected so far plus the resume position. At
+            # least one chapter always scans (a zero/negative
+            # budget still makes progress).
+            next_index = idx
+            break
+        book_id, chapter = chapters[idx]
         try:
             verses = client.get_chapter_verses(
                 fileset_id, book_id, chapter
@@ -371,7 +479,11 @@ def scan_sword_matches(
             # Only flag truncation when chapters remain unscanned
             # — reaching the cap on the final chapter means the
             # whole module was scanned and the total is exact.
-            truncated = idx < len(chapters) - 1
+            truncated = idx < total - 1
+            if truncated:
+                next_index = idx + 1
             matches = matches[:max_matches]
             break
-    return matches, truncated
+    if next_index is not None:
+        truncated = True
+    return matches, truncated, next_index
