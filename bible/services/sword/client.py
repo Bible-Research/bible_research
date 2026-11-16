@@ -186,6 +186,54 @@ class SwordClient:
                     out.append((book_id, chap))
         return out
 
+    def get_structure(
+        self, fileset_id: str
+    ) -> List[Dict[str, Any]]:
+        """Return ``[{book_id, name, name_short, testament,
+        chapters}]`` read from the module's own structure —
+        real coverage, not the bundled 66-book canon.
+
+        Book names are the module's own (LvGluck8 stores
+        English names); the provider resolver overlays the
+        canonical names for the fileset's language. Books that
+        cannot be mapped to a USFM id are skipped, like
+        ``list_chapters``."""
+        canon = canonical_sword_fileset_id(fileset_id)
+        if canon is None:
+            raise ValueError(
+                f"Unknown SWORD fileset: {fileset_id!r}"
+            )
+        _modules, bible = self._load(canon)
+
+        name_to_id = {
+            name.lower(): code for name, code, _ in _BIBLE_BOOKS
+        }
+        out: List[Dict[str, Any]] = []
+        for testament, books in bible.get_structure().get_books().items():
+            mapped_testament = (
+                'NT' if str(testament).lower() == 'nt' else 'OT'
+            )
+            for book in books:
+                norm = normalize_sword_book_name(book.name)
+                book_id = name_to_id.get(norm)
+                if book_id is None:
+                    logger.warning(
+                        "SWORD module %s book %r has no book_id "
+                        "mapping in _BIBLE_BOOKS; skipping.",
+                        canon, book.name,
+                    )
+                    continue
+                out.append({
+                    'book_id': book_id,
+                    'name': book.name,
+                    'name_short': book.name,
+                    'testament': mapped_testament,
+                    'chapters': list(
+                        range(1, book.num_chapters + 1)
+                    ),
+                })
+        return out
+
     def get_translation_listing(self) -> List[Dict[str, Any]]:
         """Return registry entries shaped like DBT translations."""
         out = []
