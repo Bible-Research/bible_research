@@ -65,7 +65,16 @@ uniform capability surface:
   (`get_passage_body` in the same module wraps it with the
   response shaping + `error`/`error_code` mapping);
 - `get_audio`, `get_timestamps`, `search`, `search_grouped`,
-  `get_copyright`, `translation_listing`.
+  `get_copyright`, `translation_listing`, `get_structure`.
+
+`get_structure()` returns the provider's raw book rows for the
+`/api/v1/bible/structure/` endpoint —
+`bible/services/structure.py` normalises them to
+`{book_id, name, name_short, testament, chapters}`, filters to
+the 66-book USFM canon, and falls back to the canonical bible
+for the fileset's `language_iso` when the provider has no
+structure source (`{'eng': 'ENGESV', 'lvs': 'LAVNLI',
+'rus': 'RUSSYN'}`, default `ENGESV`).
 
 Coverage misses raise `PassageNotFoundError` (subclassed by
 `TimestampsNotGeneratedError` for the "audio exists but its
@@ -101,6 +110,13 @@ DRF throttling and these provider-data caches:
 - `GET /api/v1/bible/copyright/` — cached per
   `(provider, bible_id)` for 24 h (copyright text is static)
   with `Cache-Control: public, max-age=86400`.
+- `GET /api/v1/bible/structure/` — the resolved
+  `{books: [...]}` body is cached per `fileset_id` for 24 h
+  with `Cache-Control: public, max-age=86400`; the canonical
+  per-language name overlay shares one entry per language.
+  Errors and `degraded` bodies (a failed SWORD
+  canonical-name overlay keeps the module's English names)
+  are never cached anywhere.
 - `read_timestamps_json` (GCS `_timestamps.json` sidecars) —
   cached per `(fileset, voice, book, chapter, mode)` for 24 h;
   the artifact is nominally immutable (the generator only
@@ -156,8 +172,9 @@ the browser-facing `Cache-Control` posture.
 `bible/utils/edge_cache.py`'s `VercelEdgeCacheMixin` marks
 the anonymous-identical catalog endpoints:
 
-- `GET /api/v1/bible/translations/` and
-  `GET /api/v1/bible/languages/` —
+- `GET /api/v1/bible/translations/`,
+  `GET /api/v1/bible/languages/` and
+  `GET /api/v1/bible/structure/` —
   `max-age=86400, stale-while-revalidate=604800`.
 - `GET /api/v1/bible/copyright/` —
   `max-age=604800, stale-while-revalidate=86400`.
@@ -550,8 +567,9 @@ upstream), `429` when `error_code` is `rate_limited`, otherwise
 ```
 
 The other provider-backed endpoints — `/api/v1/bible/timestamps/`,
-`/api/v1/bible/copyright/`, `/api/v1/bible/search/`, and
-`/api/v1/bible/translations/` — surface upstream failures with the
+`/api/v1/bible/copyright/`, `/api/v1/bible/search/`,
+`/api/v1/bible/structure/`, and `/api/v1/bible/translations/` —
+surface upstream failures with the
 same `error`/`error_code` fields and the same HTTP status mapping
 (`429`/`404`/`502`). Timestamp 404s for missing coverage ("not
 yet generated" GCS artifacts, empty API.Bible timecodes) carry
@@ -776,6 +794,59 @@ Grouping rules (see `bible/services/fileset_groups.py`):
 ```
 GET /api/v1/bible/translations/?language_iso=eng
 ```
+
+#### Get Bible Structure
+```
+GET /api/v1/bible/structure/?fileset_id=LVSGLU8
+```
+Returns the books/chapters a fileset actually covers, with
+book names localized to the fileset's language. Replaces the
+frontend's old assumption that every translation has the same
+66-book English structure.
+
+**Response**:
+```json
+{
+  "books": [
+    {
+      "book_id": "GEN",
+      "name": "1. Mozus grāmata",
+      "name_short": "1. Mozus",
+      "testament": "OT",
+      "chapters": [1, 2, 3]
+    }
+  ]
+}
+```
+- `books` is ordered OT-then-NT by the 66-book USFM canon;
+  non-book ids (`C01`) and deuterocanon entries are dropped.
+- `chapters` is the ordered list of covered chapter numbers.
+- Sourcing is provider-aware (`bible/services/structure.py`):
+  DBT filesets read their own bible via
+  `v4_bible_books(verify_content=true)` (the fileset's owning
+  bible is resolved through the translations listing when the
+  id prefix is not the bible id, e.g. `LATLVRN1DA` →
+  `LAVLVR`); SWORD filesets read the local module's structure
+  and overlay canonical-language names; `ENGKJV` uses the
+  bundled English table; providers that cannot answer fall
+  back to the canonical bible for the fileset's
+  `language_iso` (`eng`→`ENGESV`, `lvs`→`LAVNLI`,
+  `rus`→`RUSSYN`, default `ENGESV`).
+
+**Query Parameters**:
+- `fileset_id` (required): Fileset ID or a listing abbr;
+  charset-validated like the passage endpoint.
+
+**Errors**: same `error`/`error_code` contract —
+`missing_parameter`/`invalid_parameter` (400), `rate_limited`
+(429), `not_found` (404 — also for a fileset id whose owning
+bible cannot be resolved upstream), `provider_error` (502).
+Successful responses are cached for 24 h and edge-marked like
+`/bible/translations/`; failures are never cached. A failed
+SWORD canonical-name overlay degrades instead of failing:
+the module's own names ship with `"degraded": true` and
+`Cache-Control: no-store` — never cached anywhere, like the
+translations endpoint's degraded posture.
 
 #### List Languages
 ```

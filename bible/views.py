@@ -39,6 +39,7 @@ from bible.services.providers import (
     get_passage_body,
     provider_for,
 )
+from bible.services.structure import get_structure
 from .serializers import BiblePassageSerializer
 from .services.translation_service import TranslationService
 from .services.dbt.client import get_default_dbt_client
@@ -79,6 +80,9 @@ _MAX_SEARCH_QUERY_LENGTH = 200
 # match. Degraded/error responses are never cached.
 _TRANSLATIONS_CACHE_TTL_SECONDS = 6 * 60 * 60
 _COPYRIGHT_CACHE_TTL_SECONDS = 24 * 60 * 60
+# Structure (books/chapters per fileset) changes only when a
+# fileset is republished upstream — same posture as copyright.
+_STRUCTURE_CACHE_TTL_SECONDS = 24 * 60 * 60
 
 
 def _parse_chapter_part(chapter_part):
@@ -784,6 +788,87 @@ class BibleSearchView(APIView):
                 "Error in BibleSearchView: %s", e
             )
             return provider_error_response(e)
+
+
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='fileset_id',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Fileset ID (e.g. ENGESV, LVSGLU8, ENGNIV_API) '
+                'or a listing abbr (GLU8, NIV).'
+            ),
+            required=True,
+        ),
+    ],
+)
+class BibleStructureView(VercelEdgeCacheMixin, APIView):
+    """Return the books/chapters a fileset actually covers.
+
+    ``{books: [{book_id, name, name_short, testament,
+    chapters}]}`` — ``chapters`` is the covered chapter-number
+    list and names are localized to the fileset's language.
+    Sourcing is provider-aware (see
+    ``bible.services.structure``): DBT filesets read their own
+    bible, SWORD the local module + canonical language names,
+    ``ENGKJV`` the bundled English table, everything else falls
+    back to the canonical bible for the fileset's
+    ``language_iso``.
+
+    Anonymous-identical catalog data: cached process-wide for
+    ``_STRUCTURE_CACHE_TTL_SECONDS`` and marked
+    ``Vercel-CDN-Cache-Control`` like ``bible/translations/``.
+    ``degraded`` bodies (the SWORD canonical-name overlay
+    fetch failed, so English module names shipped) and
+    anomalous empty-``books`` bodies stay ``no-store``, are
+    never marked and are never written to the process cache —
+    they recover as soon as the fetch does.
+
+    Example:
+        /api/v1/bible/structure/?fileset_id=LVSGLU8
+    """
+
+    permission_classes = [AllowAny]
+    edge_cache_directive = EDGE_CACHE_CATALOG_DIRECTIVE
+
+    def get(self, request, *args, **kwargs):
+        fileset_id = request.query_params.get('fileset_id')
+        if not fileset_id:
+            return bad_request(
+                "fileset_id is required.",
+                code=MISSING_PARAMETER,
+            )
+        # ``fileset_id`` selects the provider and reaches
+        # upstream URL paths on the DBT branch.
+        if not is_valid_fileset_id(fileset_id):
+            return bad_request(
+                "fileset_id contains invalid characters."
+            )
+
+        try:
+            body, degraded = get_structure(fileset_id)
+            response = Response(body)
+            # Degraded bodies and empty-``books`` anomalies are
+            # never cached downstream — the mixin's edge-mark
+            # also skips ``no-store``.
+            if degraded or not body.get('books'):
+                response['Cache-Control'] = 'no-store'
+            else:
+                response['Cache-Control'] = (
+                    f"public, max-age="
+                    f"{_STRUCTURE_CACHE_TTL_SECONDS}"
+                )
+            return response
+        except Exception as e:
+            logger.exception(
+                "Error fetching structure for fileset_id=%s: %s",
+                fileset_id, e,
+            )
+            return provider_error_response(
+                e, not_found_message='Structure not found'
+            )
 
 
 @extend_schema(

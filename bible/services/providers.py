@@ -202,6 +202,16 @@ class Provider:
         rows)."""
         raise NotImplementedError
 
+    def get_structure(self):
+        """Return this provider's book list as raw rows — at
+        minimum ``{book_id, chapters}``, plus ``name``/
+        ``name_short``/``testament`` where the source supplies
+        them. ``bible.services.structure`` normalises and filters
+        them; providers that cannot answer leave the base stub's
+        ``NotImplementedError``, which the resolver maps to the
+        canonical per-language fallback."""
+        raise NotImplementedError
+
 
 def _registry_copyright(fileset_id, license_text):
     """One flattened copyright row for a registry-served id —
@@ -386,6 +396,9 @@ class _CachingProvider(Provider):
 
     def translation_listing(self, language_iso=None):
         return self._inner.translation_listing(language_iso)
+
+    def get_structure(self):
+        return self._inner.get_structure()
 
 
 class ESVProvider(Provider):
@@ -796,6 +809,15 @@ class SwordProvider(Provider):
             language_iso,
         )
 
+    def get_structure(self):
+        """Module coverage (books + chapter counts) read from the
+        local SWORD module. The names here are the module's own —
+        for LvGluck8 they are English, so the structure resolver
+        overlays the canonical per-language names."""
+        return get_default_sword_client().get_structure(
+            self.fileset_id
+        )
+
 
 class DbtProvider(Provider):
     """DBT API v4 (b4.dbt.io) — the fallback for every fileset id
@@ -1060,6 +1082,42 @@ class DbtProvider(Provider):
             params['language_code'] = language_iso.upper()
         response = get_default_dbt_client().get_bibles(**params)
         return response.get('data', [])
+
+    def get_structure(self):
+        """Book list of the fileset's owning bible via
+        ``v4_bible_books(verify_content=true)`` — the bible's
+        real coverage and own-language names.
+
+        The owning bible is normally the id truncated to 6
+        chars (``ENGESVN2DA`` → ``ENGESV``); when that 404s the
+        fileset uses a different prefix than its bible
+        (``LATLVRN1DA`` → ``LAVLVR``) and is resolved by scanning
+        the cached translations listing."""
+        client = get_default_dbt_client()
+        base = (self.fileset_id or '').split('-')[0]
+        bible_id = base[:6] if len(base) > 6 else base
+        try:
+            result = client.get_books(bible_id, verify_content=True)
+            return (result or {}).get('data') or []
+        except Exception as e:
+            if upstream_status_code(e) != 404:
+                raise
+            # Local import — bible.services.structure imports
+            # this module lazily, so a top-level edge would be
+            # circular. The fallback must stay inside the
+            # ``except`` suite: ``except ... as e`` unbinds
+            # ``e`` when the suite exits, so only a bare
+            # ``raise`` here can re-raise the original 404.
+            from bible.services.structure import (
+                fileset_to_bible_id,
+            )
+            resolved = fileset_to_bible_id(self.fileset_id)
+            if resolved is None or resolved == bible_id:
+                raise
+            result = client.get_books(
+                resolved, verify_content=True
+            )
+            return (result or {}).get('data') or []
 
 
 # ---------------------------------------------------------------------------

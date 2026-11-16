@@ -33,7 +33,8 @@ provider. All routing goes through the facade in
 the provider object and callers use its uniform surface
 (`get_chapter`, `get_passage`, `get_audio`, `get_timestamps`,
 `search`, `search_grouped`, `get_copyright`,
-`translation_listing`). `get_passage_body()` in the same module is
+`translation_listing`, `get_structure`).
+`get_passage_body()` in the same module is
 the `/api/v1/bible/` fetch+shape path the view calls; the
 serializer only validates input. Dispatch order:
 
@@ -48,9 +49,21 @@ serializer only validates input. Dispatch order:
 Copyright routing uses the same facade: ESV/SWORD ids (and abbrs)
 answer from registry `license` metadata, API.Bible ids fetch the
 live statement (audio fileset ids read the audio bible's entry),
-other ids proxy DBT. Note enrichment batches by
-(fileset, book, chapter) through a serializer-context cache —
-one upstream call per chapter per page, not per note.
+other ids proxy DBT. Structure routing (`/bible/structure/`)
+goes through `bible/services/structure.py`: DBT filesets read
+their own bible via `v4_bible_books(verify_content=true)`,
+SWORD reads the local module + canonical-language names,
+`ENGKJV` uses the bundled English table, and unanswerable
+providers fall back to the canonical bible for the fileset's
+`language_iso` (`eng`→`ENGESV`, `lvs`→`LAVNLI`,
+`rus`→`RUSSYN`, default `ENGESV`); rows are filtered to the
+66-book USFM canon. A failed SWORD canonical-name overlay
+degrades instead of failing: the module's English names ship
+with `degraded: true` and `no-store` — never cached anywhere
+(same posture as `bible/translations/` degraded bodies). Note
+enrichment batches by (fileset, book, chapter) through a
+serializer-context cache — one upstream call per chapter per
+page, not per note.
 
 `provider_for` wraps ESV/SWORD/DBT providers in
 `_CachingProvider`: whole-chapter text is served from the
@@ -104,6 +117,7 @@ is no `__init__.py` in `bible/utils/` — it is a namespace package.
 - `GET /api/v1/bible/translations/?language_iso=`
 - `GET /api/v1/bible/timestamps/?fileset_id=&book=&chapter=`
 - `GET /api/v1/bible/copyright/?bible_id=`
+- `GET /api/v1/bible/structure/?fileset_id=`
 - `GET /api/v1/bible/search/?query=&fileset_id=&limit=&page=`
 - `GET /api/v1/bible/languages/?search=&code=&page=&limit=`
 
@@ -126,10 +140,10 @@ caches rewrite responses where the API emits
 never relaxes the client-facing `Cache-Control` posture).
 `bible/utils/edge_cache.py`'s `VercelEdgeCacheMixin` marks
 only the anonymous-identical catalog endpoints:
-`bible/translations/` and `bible/languages/`
-(`max-age=86400, stale-while-revalidate=604800`) and
-`bible/copyright/` (`max-age=604800,
-stale-while-revalidate=86400`). Never mark: `bible/` verse
+`bible/translations/`, `bible/languages/` and
+`bible/structure/` (`max-age=86400,
+stale-while-revalidate=604800`) and `bible/copyright/`
+(`max-age=604800, stale-while-revalidate=86400`). Never mark: `bible/` verse
 and audio payloads (licensed content must not sit in
 third-party caches), `bible/search/` (verse snippets),
 `bible/timestamps/` (regenerated monthly — staleness risk),
