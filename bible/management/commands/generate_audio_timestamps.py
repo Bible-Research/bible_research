@@ -44,11 +44,29 @@ from bible.services.sword.client import get_default_sword_client
 from bible.utils.provider_errors import (
     capture_internal_exception,
     capture_provider_exception,
+    is_upstream_failure,
 )
 
 logger = logging.getLogger(__name__)
 
 _JOB_TAG = {'job': 'generate_audio_timestamps'}
+
+
+def _stt_failure_is_upstream(exc):
+    """``upstream`` override for the generic failure catches.
+
+    Bare ``TimeoutError`` (the LRO wait) and a
+    ``BilledRecognizeError`` with no cause can only mean the STT
+    upstream failed. A wrapped cause classifies on its own
+    merits — a post-LRO parsing bug must not hide at warning
+    level.
+    """
+    if isinstance(exc, BilledRecognizeError):
+        cause = exc.__cause__
+        return is_upstream_failure(cause) if cause else True
+    if isinstance(exc, TimeoutError):
+        return True
+    return None
 
 _MP3_DOWNLOAD_TIMEOUT_SECONDS = 60
 
@@ -156,14 +174,7 @@ class Command(BaseCommand):
                 capture_provider_exception(
                     exc,
                     tags=_JOB_TAG,
-                    upstream=(
-                        True
-                        if isinstance(
-                            exc,
-                            (TimeoutError, BilledRecognizeError),
-                        )
-                        else None
-                    ),
+                    upstream=_stt_failure_is_upstream(exc),
                 )
                 self.stdout.write(
                     f"fileset={fileset_id} failed"
@@ -473,14 +484,7 @@ class Command(BaseCommand):
                 capture_provider_exception(
                     exc,
                     tags=_JOB_TAG,
-                    upstream=(
-                        True
-                        if isinstance(
-                            exc,
-                            (TimeoutError, BilledRecognizeError),
-                        )
-                        else None
-                    ),
+                    upstream=_stt_failure_is_upstream(exc),
                 )
                 consecutive_failures += 1
                 if (

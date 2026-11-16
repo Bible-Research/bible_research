@@ -20,6 +20,7 @@ from corsheaders.defaults import default_headers
 from .utils import (
     PROFILES_SAMPLE_RATE,
     sentry_before_send,
+    sentry_before_send_transaction,
     sentry_release,
     sentry_traces_sampler,
 )
@@ -371,6 +372,9 @@ if SENTRY_DSN:
         # IPs/usernames off events — the user id comes from
         # SentryUserMiddleware setting scope user = {'id': pk}.
         before_send=sentry_before_send,
+        # Transaction events bypass before_send — same scrubs
+        # (spans/breadcrumbs can carry credential URLs).
+        before_send_transaction=sentry_before_send_transaction,
         send_default_pii=False,
         # Frame locals would ship request params — including
         # the ``?key=`` DBT credential and signed-URL secrets —

@@ -153,6 +153,29 @@ def sentry_before_send(event, hint):
     return event
 
 
+def sentry_before_send_transaction(event, hint):
+    """Scrub a transaction event before it leaves the process.
+
+    ``before_send`` does not apply to transactions — spans,
+    breadcrumbs, and the request block can carry the same
+    credential URLs (outbound DBT ``?key=`` params land in
+    httplib breadcrumbs and span data). Same scrubs, minus the
+    scanner-noise drop which only applies to exceptions.
+    """
+    for crumb in (
+        (event.get('breadcrumbs') or {}).get('values') or ()
+    ):
+        _scrub_event_strings(crumb)
+    _scrub_event_strings(event.get('spans'))
+    request = event.get('request')
+    if isinstance(request, dict):
+        _scrub_event_strings(request)
+        path = urlparse(request.get('url') or '').path
+        if path.startswith(_SENSITIVE_PATH_PREFIXES):
+            request.pop('data', None)
+    return event
+
+
 def sentry_traces_sampler(sampling_context):
     """Per-route trace sample rate for ``traces_sampler``.
 

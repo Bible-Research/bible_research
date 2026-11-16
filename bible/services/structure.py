@@ -57,7 +57,10 @@ from bible.utils.bible_books import (
     _book_title,
     get_book_name_from_id,
 )
-from bible.utils.provider_errors import upstream_status_code
+from bible.utils.provider_errors import (
+    capture_provider_exception,
+    upstream_status_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,11 +298,16 @@ def _canonical_name_map(language_iso):
             b['book_id']: (b['name'], b['name_short'])
             for b in _canonical_books(language_iso)
         }
-    except Exception:
+    except Exception as e:
         logger.warning(
             'Canonical book-name fetch failed for iso=%s; '
             'keeping provider names.',
             language_iso, exc_info=True,
+        )
+        # Upstream outage -> warning; a code bug -> error.
+        capture_provider_exception(
+            e,
+            tags={'endpoint': 'bible/languages'},
         )
         return None
 
@@ -358,6 +366,10 @@ def fileset_to_bible_id(fileset_id):
         # would stick for the whole TTL. Logged by
         # type+status only: ``requests`` exceptions
         # stringify with the ``?key=`` credential.
+        capture_provider_exception(
+            e,
+            tags={'endpoint': 'bible/languages'},
+        )
         logger.warning(
             'Fileset->bible listing scan failed for '
             'fileset_id=%s: %s (status=%s)',

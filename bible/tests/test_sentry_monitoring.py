@@ -1327,3 +1327,43 @@ class RequestsClientBugClassificationTests(TestCase):
         self.assertTrue(is_upstream_failure(
             requests.exceptions.ConnectTimeout('timed out')
         ))
+
+
+class TransactionScrubTests(TestCase):
+    """Transaction events bypass ``before_send`` — the dedicated
+    hook must apply the same credential scrubs to spans,
+    breadcrumbs, and the request block."""
+
+    def test_transaction_credentials_are_scrubbed(self):
+        from bible_research.utils import (
+            sentry_before_send_transaction,
+        )
+
+        event = {
+            'spans': [{
+                'data': {
+                    'url': 'https://b4.dbt.io/api?key=SECRET',
+                },
+            }],
+            'breadcrumbs': {
+                'values': [{
+                    'data': {
+                        'url': 'https://x/y.mp3?sig=ZZ',
+                    },
+                }],
+            },
+            'request': {
+                'url': 'https://x/api/token',
+                'data': {'password': 'pw'},
+            },
+        }
+
+        result = sentry_before_send_transaction(event, {})
+
+        self.assertNotIn(
+            'SECRET', str(result['spans'])
+        )
+        self.assertNotIn(
+            'sig=ZZ', str(result['breadcrumbs'])
+        )
+        self.assertNotIn('data', result['request'])
