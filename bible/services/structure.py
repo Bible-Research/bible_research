@@ -29,6 +29,8 @@ canonical-name overlay fetch failed, so English module names
 shipped instead) carries ``'degraded': True``, is never cached
 or edge-marked — mirroring the ``bible/translations/``
 ``no-store`` posture — and recovers as soon as the fetch does.
+An empty book list is an upstream anomaly, not real coverage,
+and is likewise never cached — the next request retries.
 """
 import json
 import logging
@@ -102,7 +104,9 @@ def get_structure(fileset_id):
     Cached per ``fileset_id`` — identical for every anonymous
     caller, mirroring ``bible/translations/`` posture. Degraded
     bodies are never cached: they must recover as soon as the
-    upstream fetch does.
+    upstream fetch does. Neither is an empty book list — it is
+    an upstream anomaly, not real coverage, and caching it
+    would pin the empty body for the whole TTL.
     """
     key = (fileset_id or '').strip().upper()
     cache_key = f'{_CACHE_PREFIX}{key}'
@@ -113,7 +117,7 @@ def get_structure(fileset_id):
     body = {'books': books}
     if degraded:
         body['degraded'] = True
-    else:
+    elif books:
         cache.set(cache_key, body, _CACHE_TTL_SECONDS)
     return body, degraded
 
@@ -267,7 +271,12 @@ def _canonical_books(language_iso):
         return cached
     result = get_default_dbt_client().get_books(bible_id)
     books = _normalize_books((result or {}).get('data') or [])
-    cache.set(cache_key, books, _CACHE_TTL_SECONDS)
+    if books:
+        # An empty canon is an upstream anomaly — caching it
+        # would pin ``{books: []}``/``degraded`` responses for
+        # the whole TTL (same stance as "never cache a failed
+        # scan" in ``fileset_to_bible_id``).
+        cache.set(cache_key, books, _CACHE_TTL_SECONDS)
     return books
 
 

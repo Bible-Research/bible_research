@@ -315,3 +315,57 @@ def test_repeat_request_is_cached(mock_get_client, client):
     assert first.status_code == status.HTTP_200_OK
     assert second.json() == first.json()
     mock_get_client.return_value.get_books.assert_called_once()
+
+
+@pytest.mark.django_db
+@patch('bible.services.structure.get_default_dbt_client')
+def test_empty_canonical_result_is_not_cached(
+    mock_get_client, client
+):
+    """An upstream ``{'data': []}`` is an anomaly — caching the
+    empty canonical list would pin SWORD responses ``degraded``
+    for the whole TTL (each retry hits the cached ``[]``). The
+    next request must retry upstream and recover."""
+    get_books = mock_get_client.return_value.get_books
+    get_books.side_effect = [
+        {'data': []},
+        {'data': [_dbt_book('GEN', '1. Mozus grāmata', 50, 'OT')]},
+    ]
+
+    first = client.get(STRUCTURE_URL, {'fileset_id': 'LVSGLU8'})
+    assert first.status_code == status.HTTP_200_OK
+    assert first.json()['degraded'] is True
+    assert first.json()['books'][0]['name'] == 'Genesis'
+
+    second = client.get(STRUCTURE_URL, {'fileset_id': 'LVSGLU8'})
+    assert second.status_code == status.HTTP_200_OK
+    assert 'degraded' not in second.json()
+    by_id = {b['book_id']: b for b in second.json()['books']}
+    assert by_id['GEN']['name'] == '1. Mozus grāmata'
+    assert get_books.call_count == 2
+
+
+@pytest.mark.django_db
+@patch('bible.services.structure.get_default_dbt_client')
+def test_empty_fallback_body_is_not_cached_per_fileset(
+    mock_get_client, client
+):
+    """The per-fileset cache must not pin ``{books: []}``
+    either: a canonical-fallback fileset whose first fetch
+    comes back empty retries on the next request."""
+    get_books = mock_get_client.return_value.get_books
+    get_books.side_effect = [
+        {'data': []},
+        {'data': [_dbt_book('GEN', 'Genesis', 50, 'OT')]},
+    ]
+
+    first = client.get(STRUCTURE_URL, {'fileset_id': 'ENGNIV_API'})
+    assert first.status_code == status.HTTP_200_OK
+    assert first.json()['books'] == []
+
+    second = client.get(STRUCTURE_URL, {'fileset_id': 'ENGNIV_API'})
+    assert second.status_code == status.HTTP_200_OK
+    books = second.json()['books']
+    assert [b['book_id'] for b in books] == ['GEN']
+    assert books[0]['name'] == 'Genesis'
+    assert get_books.call_count == 2
