@@ -99,6 +99,15 @@ per-chapter coverage with signed `path` + `duration` (unlike
 `/bibles/{bible_id}/book`, which keys on the bible id and unions
 sibling filesets; a `*DA` fileset id 404s there).
 
+`DBTClient` methods that hit `/bibles/{id}/book`
+(`get_books`/`get_book`/`get_chapters`) use raw `session.get`
+like `get_bibles`/`get_fileset_files` — the vendored OpenAPI
+client's `v4_bible_books` deserialization is broken (its
+`V4BibleBooksData` model references phantom types `Id`, `Name`,
+`Chapters`… that were never generated) and it returns model
+objects, not the dicts callers index into. Don't route new
+book-list calls through `bibles_api`.
+
 API.Bible text responses carry a `meta` block with FUMS fields the
 frontend must report (license requirement). The API.Bible client
 needs `API_BIBLE_KEY` (settings/`config.yaml`); the registry and

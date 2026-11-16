@@ -174,18 +174,45 @@ class DBTClient:
         """
         Get books for a specific Bible.
 
+        Uses requests directly — the generated OpenAPI client
+        deserializes ``v4_bible_books`` into a ``V4BibleBooksData``
+        model whose ``openapi_types`` reference phantom classes
+        (``Id``, ``Name``, ``Chapters``…) that were never
+        generated, so every call dies in deserialization with
+        ``AttributeError: module 'openapi_client.models' has no
+        attribute 'Id'``. The raw JSON body is also what callers
+        expect (``result.get('data')``), unlike the model objects
+        ``_make_request`` would return.
+
         Args:
             bible_id: Bible ID
             **kwargs: Additional query parameters
+                (``verify_content``, ``book_id``, …)
 
         Returns:
             Dictionary with book data
         """
-        return self._make_request(
-            self.bibles_api.v4_bible_books,
-            bible_id,
-            **kwargs
-        )
+        params = kwargs.copy()
+        params['v'] = 4
+        params['key'] = self.api_key
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}/bibles/{bible_id}/book",
+                params=params,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            _log_request_error("DBT books request error", e)
+            if e.response is not None and (
+                e.response.status_code == 401
+            ):
+                logger.error(
+                    "Authentication failed. Check your API key."
+                )
+            raise
 
     def get_book(
         self,
@@ -205,15 +232,11 @@ class DBTClient:
             Dictionary with book details
         """
         # Note: There is no direct endpoint for a specific book
-        # Use v4_bible_books and filter the results
-        books = self._make_request(
-            self.bibles_api.v4_bible_books,
-            bible_id,
-            **kwargs
-        )
+        # Use the books endpoint and filter the results
+        books = self.get_books(bible_id, **kwargs)
         if 'data' in books:
             for book in books['data']:
-                if book.get('id') == book_id:
+                if book.get('book_id') == book_id:
                     return {'data': book}
         return {'data': None}
 
@@ -235,14 +258,13 @@ class DBTClient:
             Dictionary with chapter data
         """
         # Note: Need to get the chapters from the book endpoint
-        books = self._make_request(
-            self.bibles_api.v4_bible_books,
-            bible_id,
-            **kwargs
-        )
+        books = self.get_books(bible_id, **kwargs)
         if 'data' in books:
             for book in books['data']:
-                if book.get('id') == book_id and 'chapters' in book:
+                if (
+                    book.get('book_id') == book_id
+                    and 'chapters' in book
+                ):
                     return {'data': book['chapters']}
         return {'data': []}
 

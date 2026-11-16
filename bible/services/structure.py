@@ -305,31 +305,47 @@ def fileset_to_bible_id(fileset_id):
     (``ENGESVN2DA`` → ``ENGESV``), but some DBT filesets use a
     different prefix than their bible (``LATLVRN1DA`` belongs to
     bible ``LAVLVR``). Those are found by scanning the
-    translations listing, cached process-wide.
+    translations listing filtered to the fileset's own
+    language — DBT paginates ``/bibles`` at 50 rows regardless
+    of ``limit`` (~3300 bibles total), so an unfiltered scan
+    only ever sees page one. Results merge into the cached
+    process-wide map; misses are recorded as ``None`` so an
+    unresolvable id does not rescan on every request.
     """
     base = (fileset_id or '').split('-')[0]
     mapping = cache.get(_FILESET_BIBLE_MAP_KEY)
     if mapping is None:
         mapping = {}
-        try:
-            result = get_default_dbt_client().get_bibles(limit=500)
-            for bible in result.get('data') or []:
-                abbr = bible.get('abbr')
-                if not abbr:
-                    continue
-                for _source, filesets in (
-                    bible.get('filesets') or {}
-                ).items():
-                    for fs in filesets or []:
-                        fs_id = fs.get('id')
-                        if fs_id:
-                            mapping[fs_id] = abbr
-                            mapping.setdefault(
-                                fs_id.split('-')[0], abbr
-                            )
-        except Exception:
-            # Never cache a failed scan — a transient outage
-            # would stick for the whole TTL.
-            return None
-        cache.set(_FILESET_BIBLE_MAP_KEY, mapping, _CACHE_TTL_SECONDS)
+    if fileset_id in mapping or base in mapping:
+        return mapping.get(fileset_id) or mapping.get(base)
+    iso = _language_iso_for(fileset_id)
+    try:
+        result = get_default_dbt_client().get_bibles(
+            language=iso.upper() if iso else None,
+            limit=500,
+        )
+        for bible in result.get('data') or []:
+            abbr = bible.get('abbr')
+            if not abbr:
+                continue
+            for _source, filesets in (
+                bible.get('filesets') or {}
+            ).items():
+                for fs in filesets or []:
+                    fs_id = fs.get('id')
+                    if fs_id:
+                        mapping[fs_id] = abbr
+                        mapping.setdefault(
+                            fs_id.split('-')[0], abbr
+                        )
+    except Exception:
+        # Never cache a failed scan — a transient outage
+        # would stick for the whole TTL.
+        return None
+    # Record the miss too — the listing is authoritative, so
+    # an unresolvable id stays unresolved for the TTL instead
+    # of rescanning on every request.
+    mapping[fileset_id] = mapping.get(fileset_id)
+    mapping[base] = mapping.get(base)
+    cache.set(_FILESET_BIBLE_MAP_KEY, mapping, _CACHE_TTL_SECONDS)
     return mapping.get(fileset_id) or mapping.get(base)
