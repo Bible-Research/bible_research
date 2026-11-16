@@ -259,6 +259,20 @@ at the next GAE deploy.
 - For a writable local database, repoint `config.yaml`'s `default`
   to SQLite (`ENGINE: django.db.backends.sqlite3`,
   `NAME: db.sqlite3` — a file already exists in the repo root).
+- Staging database `stagingdb` lives on the same Aiven
+  instance. `staging_rw` owns it (read/write + `CREATEDB`, so
+  it can run `migrate` and Django's test-DB creation); its
+  password is a deploy secret, never committed. `ai_agent`
+  has `CONNECT` plus `SELECT` on `staging_rw`-created tables
+  via default privileges, so read-only agent investigation
+  works there exactly like on `defaultdb`. For a writable
+  remote dev DB, repoint `config.yaml`'s `default` at
+  `stagingdb`/`staging_rw`.
+- Non-production backend deployments (e.g. a Vercel staging
+  env whose config arrives via the `DOTENV` variable) set
+  `DATABASE_URL` to `stagingdb` — never `defaultdb`.
+  `DB_SSL_CERT` is the same Aiven CA PEM in every
+  environment. See DEVELOPER_GUIDE "Environment Variables".
 
 ## Models / IDs
 

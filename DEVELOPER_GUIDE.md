@@ -2437,6 +2437,19 @@ export DBT_KEY='your-dbt-api-key'
 export DATABASE_URL='postgresql://user:pass@host:5432/dbname'
 ```
 
+**Staging database**: non-production deployments (e.g. a
+Vercel staging backend whose config arrives via the `DOTENV`
+variable) set `DATABASE_URL` to the `stagingdb` database on
+the same Aiven PostgreSQL instance — never `defaultdb`.
+Connect as `staging_rw` (database owner, read/write);
+`ai_agent` has read-only access, matching local dev's
+posture. `DB_SSL_CERT` is the same Aiven CA PEM in every
+environment. A staging `DATABASE_URL` looks like:
+
+```bash
+DATABASE_URL=postgres://staging_rw:<pw>@<host>:10104/stagingdb?sslmode=require
+```
+
 ### Static Files
 
 ```bash
