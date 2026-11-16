@@ -2440,8 +2440,11 @@ export DATABASE_URL='postgresql://user:pass@host:5432/dbname'
 **Staging database**: non-production deployments (e.g. a
 Vercel staging backend whose config arrives via the `DOTENV`
 variable) set `DATABASE_URL` to the `stagingdb` database on
-the same Aiven PostgreSQL instance — never `defaultdb`.
-Connect as `staging_rw` (database owner, read/write);
+the same Aiven PostgreSQL instance — never `defaultdb`. The
+shared `env-file` secret carries prod's `defaultdb` URL, so
+a staging deploy must supply `DATABASE_URL` explicitly
+inside its own DOTENV payload. Connect as `staging_rw`
+(database owner, read/write);
 `ai_agent` has read-only access, matching local dev's
 posture. `DB_SSL_CERT` is the same Aiven CA PEM in every
 environment. A staging `DATABASE_URL` looks like:

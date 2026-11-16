@@ -260,19 +260,21 @@ at the next GAE deploy.
   to SQLite (`ENGINE: django.db.backends.sqlite3`,
   `NAME: db.sqlite3` — a file already exists in the repo root).
 - Staging database `stagingdb` lives on the same Aiven
-  instance. `staging_rw` owns it (read/write + `CREATEDB`, so
-  it can run `migrate` and Django's test-DB creation); its
-  password is a deploy secret, never committed. `ai_agent`
-  has `CONNECT` plus `SELECT` on `staging_rw`-created tables
-  via default privileges, so read-only agent investigation
-  works there exactly like on `defaultdb`. For a writable
-  remote dev DB, repoint `config.yaml`'s `default` at
-  `stagingdb`/`staging_rw`.
+  instance. `staging_rw` owns it (read/write + `CREATEDB`);
+  its password is a deploy secret, never committed.
+  `ai_agent` has `CONNECT` plus `SELECT` on
+  `staging_rw`-created tables via default privileges, so
+  read-only agent investigation works there exactly like on
+  `defaultdb`. For a writable remote dev DB, repoint
+  `config.yaml`'s `default` at `stagingdb`/`staging_rw`.
 - Non-production backend deployments (e.g. a Vercel staging
   env whose config arrives via the `DOTENV` variable) set
-  `DATABASE_URL` to `stagingdb` — never `defaultdb`.
-  `DB_SSL_CERT` is the same Aiven CA PEM in every
-  environment. See DEVELOPER_GUIDE "Environment Variables".
+  `DATABASE_URL` to `stagingdb` — never `defaultdb`. The
+  shared `env-file` secret carries prod's `defaultdb` URL,
+  so a staging deploy must supply `DATABASE_URL` explicitly
+  inside its own DOTENV payload. `DB_SSL_CERT` is the same
+  Aiven CA PEM in every environment. See DEVELOPER_GUIDE
+  "Environment Variables".
 
 ## Models / IDs
 
