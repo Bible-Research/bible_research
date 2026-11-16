@@ -18,15 +18,19 @@ variable "github_repo" {
   default = "Bible-Research/bible_research"
 }
 
-# Allowed origins for GCS bucket CORS policy.
-# Override in tfvars or via -var for production deployments.
+# Allowed origins for GCS bucket CORS policy. The default covers
+# production; override in tfvars or via -var for other
+# deployments.
 # https://bibleresearch.vercel.app — production SPA;
+# https://*-industr-analysers-projects.vercel.app — Vercel PR
+#   previews (GCS allows one wildcard per origin);
 # https://localhost — Capacitor Android webview (androidScheme);
 # http://localhost:5173 — vite dev server.
 variable "cors_origins" {
   type = list(string)
   default = [
     "https://bibleresearch.vercel.app",
+    "https://*-industr-analysers-projects.vercel.app",
     "https://localhost",
     "http://localhost:5173",
   ]
