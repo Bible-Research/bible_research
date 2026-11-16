@@ -1,5 +1,6 @@
 """Request middleware for the ``bible_research`` project package."""
 import logging
+import threading
 from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ _TOKEN_SCHEMES = frozenset({'token', 'bearer'})
 # provider caches).
 _TOKEN_USER_CACHE_MAX = 200
 _token_user_cache = OrderedDict()
+_token_user_cache_lock = threading.Lock()
 
 
 class SentryUserMiddleware:
@@ -61,10 +63,11 @@ def _resolve_sentry_user_id(request):
         return None
     key = key.strip()
 
-    cached = _token_user_cache.get(key)
-    if cached is not None:
-        _token_user_cache.move_to_end(key)
-        return cached or None
+    with _token_user_cache_lock:
+        cached = _token_user_cache.get(key)
+        if cached is not None:
+            _token_user_cache.move_to_end(key)
+            return cached or None
 
     from rest_framework.authtoken.models import Token
     try:
@@ -81,7 +84,8 @@ def _resolve_sentry_user_id(request):
             exc_info=True,
         )
         return None
-    _token_user_cache[key] = user_id
-    while len(_token_user_cache) > _TOKEN_USER_CACHE_MAX:
-        _token_user_cache.popitem(last=False)
+    with _token_user_cache_lock:
+        _token_user_cache[key] = user_id
+        while len(_token_user_cache) > _TOKEN_USER_CACHE_MAX:
+            _token_user_cache.popitem(last=False)
     return user_id or None

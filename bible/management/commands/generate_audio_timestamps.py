@@ -16,11 +16,10 @@ import logging
 import math
 from io import BytesIO
 
-import requests
-
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from mutagen.mp3 import MP3
+import requests
 
 from bible.services.dbt.client import get_default_dbt_client
 from bible.services.dbt.timestamps_registry import (
@@ -95,6 +94,12 @@ class Command(BaseCommand):
             ),
         )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Dedupes _dbt_has_timestamps captures to one event per
+        # fileset per run.
+        self._dbt_check_reported = set()
+
     def handle(self, *args, **options):
         raw_ids = [
             s.strip()
@@ -116,9 +121,6 @@ class Command(BaseCommand):
             )
         if not fileset_ids:
             raise CommandError("no usable --fileset-ids given")
-        # Dedupes _dbt_has_timestamps captures to one event per
-        # fileset per run.
-        self._dbt_check_reported = set()
 
         book_filter = (
             options["book"].strip().upper()
@@ -149,8 +151,20 @@ class Command(BaseCommand):
                     fileset_id,
                 )
                 # Self-routing: a DBT/STT outage stays warning;
-                # a client-side bug reports at error level.
-                capture_provider_exception(exc, tags=_JOB_TAG)
+                # a client-side bug reports at error level. The
+                # typed STT wrapper errors carry no HTTP status.
+                capture_provider_exception(
+                    exc,
+                    tags=_JOB_TAG,
+                    upstream=(
+                        True
+                        if isinstance(
+                            exc,
+                            (TimeoutError, BilledRecognizeError),
+                        )
+                        else None
+                    ),
+                )
                 self.stdout.write(
                     f"fileset={fileset_id} failed"
                 )
@@ -190,14 +204,21 @@ class Command(BaseCommand):
     # ---------------------------------------------------------
 
     def _download_mp3(self, dbt, url):
-        response = dbt.session.get(
-            url, timeout=_MP3_DOWNLOAD_TIMEOUT_SECONDS,
-        )
+        # Any ``requests`` failure here stringifies the signed
+        # URL — its query-string credentials would land in logs
+        # and Sentry, so both call sites re-raise sanitized.
+        try:
+            response = dbt.session.get(
+                url, timeout=_MP3_DOWNLOAD_TIMEOUT_SECONDS,
+            )
+        except requests.exceptions.RequestException as e:
+            raise requests.exceptions.ConnectionError(
+                f"MP3 download failed "
+                f"({type(e).__name__})",
+            ) from None
         try:
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            # ``str(e)`` embeds the signed URL — its query-string
-            # credentials would land in logs and Sentry.
             raise requests.exceptions.HTTPError(
                 f"MP3 download failed "
                 f"({type(e).__name__}, status="
@@ -446,8 +467,21 @@ class Command(BaseCommand):
                     fileset_id, book_id, chap, exc,
                 )
                 # Self-routing: STT/GCS outages stay warning;
-                # code bugs report at error level.
-                capture_provider_exception(exc, tags=_JOB_TAG)
+                # code bugs report at error level. The typed
+                # STT wrapper errors carry no HTTP status —
+                # force upstream like the EdgeTTSError path.
+                capture_provider_exception(
+                    exc,
+                    tags=_JOB_TAG,
+                    upstream=(
+                        True
+                        if isinstance(
+                            exc,
+                            (TimeoutError, BilledRecognizeError),
+                        )
+                        else None
+                    ),
+                )
                 consecutive_failures += 1
                 if (
                     max_failures
@@ -488,7 +522,9 @@ class Command(BaseCommand):
         # lock "running"; it goes stale after LOCK_STALE_HOURS.
         if (
             attempted and generated == 0
-            and complete_reason == "all_done"
+            and complete_reason in (
+                "all_done", "consecutive_failures",
+            )
         ):
             complete_reason = "all_failed"
             logger.error(

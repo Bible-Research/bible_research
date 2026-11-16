@@ -372,6 +372,11 @@ if SENTRY_DSN:
         # SentryUserMiddleware setting scope user = {'id': pk}.
         before_send=sentry_before_send,
         send_default_pii=False,
+        # Frame locals would ship request params — including
+        # the ``?key=`` DBT credential and signed-URL secrets —
+        # with every exception. They are off; the sanitized
+        # exception values + before_send scrub carry context.
+        include_local_variables=False,
         # Ctrl+C/shutdown noise is never a defect.
         ignore_errors=[KeyboardInterrupt],
         # GCP is the only production deploy path; every other

@@ -171,7 +171,24 @@ def is_upstream_failure(exc: Exception) -> bool:
     if upstream_status_code(exc) is not None:
         return True
     families = _upstream_exception_families()
-    return bool(families) and isinstance(exc, families)
+    if not families or not isinstance(exc, families):
+        return False
+    # A handful of ``requests`` exceptions are client-side bugs
+    # (a malformed URL we built), not upstream failures.
+    try:
+        import requests
+        client_bugs = (
+            requests.exceptions.MissingSchema,
+            requests.exceptions.InvalidSchema,
+            requests.exceptions.InvalidURL,
+            requests.exceptions.InvalidHeader,
+            requests.exceptions.InvalidProxyURL,
+        )
+        if isinstance(exc, client_bugs):
+            return False
+    except ImportError:
+        pass
+    return True
 
 
 def _sentry_capture(exc, error_code, level, tags=None,

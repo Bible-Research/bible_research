@@ -82,7 +82,7 @@ def _reraise_credential_free(context, exc):
         ) from None
     raise requests.exceptions.ConnectionError(
         f"{context} ({type(exc).__name__})"
-    ) from exc
+    ) from None
 
 
 class DBTClient:

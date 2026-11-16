@@ -21,14 +21,44 @@ _SENSITIVE_PATH_PREFIXES = (
 # a bug. ``sentry_before_send`` drops the event entirely.
 _SCANNER_NOISE_EXCEPTIONS = (DisallowedHost,)
 
-# DBT (and signed-URL) credentials ride in ``?key=``/``&key=``
-# query params; transport exceptions stringify the full URL into
-# the event's exception value. Defense in depth on top of the
+# DBT (and signed-URL) credentials ride in query params;
+# transport exceptions stringify the full URL into the event's
+# exception value. Defense in depth on top of the
 # credential-free re-raises in ``dbt/client.py`` — a missed path
-# still cannot leak the key.
+# still cannot leak the key. Covers the DBT ``key`` param plus
+# the AWS/CloudFront presign params (the signed MP3 URLs come
+# from DBT ``path`` fields — exact scheme unconfirmed, so both
+# families are scrubbed).
 _CREDENTIAL_QUERY_RE = re.compile(
-    r'([?&](?:key|X-Amz-Signature|sig|token)=)[^&\s"\']+'
+    r'([?&](?:key|token|sig|signature|policy|key-pair-id|'
+    r'expires|x-amz-signature)=)[^&\s"\']+',
+    re.IGNORECASE,
 )
+
+# Stack-frame variable / breadcrumb-dict keys whose values are
+# credentials — matched against ``vars`` keys and breadcrumb
+# ``data`` keys in ``before_send``.
+_SENSITIVE_VAR_NAME_RE = re.compile(
+    r'(key|secret|token|password|credential|signature)',
+    re.IGNORECASE,
+)
+
+
+def _scrub_event_strings(value):
+    """Apply ``_CREDENTIAL_QUERY_RE`` to every string nested in
+    *value* (dicts/lists/strings), mutating in place."""
+    if isinstance(value, str):
+        return _CREDENTIAL_QUERY_RE.sub(r'\1<redacted>', value)
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if _SENSITIVE_VAR_NAME_RE.search(str(k)):
+                value[k] = '<redacted>'
+            else:
+                value[k] = _scrub_event_strings(v)
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            value[i] = _scrub_event_strings(v)
+    return value
 
 # Interactive docs/schema routes serve humans, not API traffic —
 # excluded from tracing so they don't crowd the sampled pool.
@@ -80,13 +110,37 @@ def sentry_before_send(event, hint):
         return None
 
     for value in (
-        event.get('exception', {}).get('values') or ()
+        (event.get('exception') or {}).get('values') or ()
     ):
         text = value.get('value')
         if isinstance(text, str):
             value['value'] = _CREDENTIAL_QUERY_RE.sub(
                 r'\1<redacted>', text,
             )
+        # include_local_variables is off, but scrub anyway —
+        # frame vars can carry ``params['key']=SECRET`` and the
+        # raw exception whose repr embeds the credential URL.
+        for frame in (
+            (value.get('stacktrace') or {}).get('frames') or ()
+        ):
+            frame_vars = frame.get('vars')
+            if not isinstance(frame_vars, dict):
+                continue
+            for var_name in list(frame_vars):
+                if _SENSITIVE_VAR_NAME_RE.search(str(var_name)):
+                    frame_vars[var_name] = '<redacted>'
+                else:
+                    frame_vars[var_name] = _scrub_event_strings(
+                        frame_vars[var_name],
+                    )
+
+    # Log breadcrumbs (LoggingIntegration INFO+) can carry the
+    # formatted ``logger.exception`` message — which interpolates
+    # the raw exception, URL and all.
+    for crumb in (
+        (event.get('breadcrumbs') or {}).get('values') or ()
+    ):
+        _scrub_event_strings(crumb)
 
     request = event.get('request')
     if not isinstance(request, dict):

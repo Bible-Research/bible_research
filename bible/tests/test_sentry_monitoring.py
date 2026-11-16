@@ -1257,3 +1257,73 @@ class CredentialScrubTests(TestCase):
         value = result['exception']['values'][0]['value']
         self.assertNotIn('ABC123', value)
         self.assertNotIn('sig=ZZ', value)
+
+    def test_frame_vars_and_breadcrumbs_are_scrubbed(self):
+        event = {
+            'exception': {
+                'values': [{
+                    'type': 'HTTPError',
+                    'value': 'boom',
+                    'stacktrace': {
+                        'frames': [{
+                            'vars': {
+                                'params': {
+                                    'key': 'SECRET',
+                                    'v': '4',
+                                },
+                                'e': (
+                                    'HTTPError(url: '
+                                    'https://x?key=SECRET)'
+                                ),
+                                'harmless': 42,
+                            },
+                        }],
+                    },
+                }],
+            },
+            'breadcrumbs': {
+                'values': [{
+                    'message': (
+                        'Failed for url: '
+                        'https://x/y.mp3?sig=SECRET'
+                    ),
+                }],
+            },
+        }
+
+        result = sentry_before_send(event, {})
+
+        frame_vars = (
+            result['exception']['values'][0]
+            ['stacktrace']['frames'][0]['vars']
+        )
+        self.assertEqual(frame_vars['params']['key'], '<redacted>')
+        self.assertEqual(frame_vars['params']['v'], '4')
+        self.assertNotIn('SECRET', frame_vars['e'])
+        self.assertEqual(frame_vars['harmless'], 42)
+        crumb = result['breadcrumbs']['values'][0]
+        self.assertNotIn('SECRET', crumb['message'])
+
+    def test_missing_exception_block_is_tolerated(self):
+        event = {'request': {'url': 'https://x/api/v1/bible/'}}
+        result = sentry_before_send(event, {})
+        self.assertIsNotNone(result)
+
+
+class RequestsClientBugClassificationTests(TestCase):
+    """``requests`` exceptions that can only be our bug (bad URL
+    construction) are NOT upstream failures."""
+
+    def test_missing_schema_is_internal(self):
+        import requests
+
+        self.assertFalse(is_upstream_failure(
+            requests.exceptions.MissingSchema('no scheme')
+        ))
+
+    def test_transport_timeout_is_upstream(self):
+        import requests
+
+        self.assertTrue(is_upstream_failure(
+            requests.exceptions.ConnectTimeout('timed out')
+        ))

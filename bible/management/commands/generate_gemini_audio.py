@@ -28,6 +28,8 @@ from django.core.management.base import BaseCommand, CommandError
 
 from bible.services.gemini_tts.client import (
     DEFAULT_VOICE_NAME,
+    GeminiApiError,
+    GeminiResponseError,
     GeminiTTSClient,
     QuotaExceeded,
 )
@@ -309,12 +311,24 @@ class Command(BaseCommand):
                 )
                 reason = "quota_exhausted"
                 break
+            except (GeminiApiError, GeminiResponseError) as exc:
+                logger.warning(
+                    "Gemini API failure at %s %s: %s",
+                    book_id, chap, exc,
+                )
+                # Typed provider errors carry no HTTP status —
+                # force the upstream (warning) stream like the
+                # EdgeTTSError path in generate_edge_audio.
+                capture_provider_exception(
+                    exc, tags=_JOB_TAG, upstream=True,
+                )
+                continue
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "Failed to generate %s %s: %s",
                     book_id, chap, exc,
                 )
-                # Self-routing: a Gemini API outage stays
+                # Self-routing: an upstream outage stays
                 # warning-level; a code bug reports at error
                 # level.
                 capture_provider_exception(exc, tags=_JOB_TAG)
