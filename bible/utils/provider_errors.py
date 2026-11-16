@@ -169,6 +169,12 @@ def is_upstream_failure(exc: Exception) -> bool:
     be reported as a routine provider blip.
     """
     if upstream_status_code(exc) is not None:
+        # google.api_core/gemini-style ``.code`` values in the
+        # 400-403 range are our-side config/IAM/request bugs,
+        # not upstream outages — report them as internal.
+        code = getattr(exc, 'code', None)
+        if isinstance(code, int) and 400 <= code < 404:
+            return False
         return True
     families = _upstream_exception_families()
     if not families or not isinstance(exc, families):

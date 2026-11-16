@@ -30,8 +30,10 @@ _SCANNER_NOISE_EXCEPTIONS = (DisallowedHost,)
 # from DBT ``path`` fields — exact scheme unconfirmed, so both
 # families are scrubbed).
 _CREDENTIAL_QUERY_RE = re.compile(
-    r'([?&](?:key|token|sig|signature|policy|key-pair-id|'
-    r'expires|x-amz-signature)=)[^&\s"\']+',
+    r'((?:[?&]|^)(?:key|token|sig|signature|policy|'
+    r'key-pair-id|expires|x-amz-signature|x-amz-credential|'
+    r'x-amz-security-token|x-goog-signature|x-goog-credential|'
+    r'x-goog-expires|x-goog-signedheaders)=)[^&\s"\']+',
     re.IGNORECASE,
 )
 

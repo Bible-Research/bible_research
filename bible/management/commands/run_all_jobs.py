@@ -168,20 +168,32 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         today = date.today()  # container runs in UTC
-        entries = self._select(options, today)
-
-        if options["dry_run"]:
-            for label, argv, schedule in entries:
-                self.stdout.write(
-                    f"would run: {label} {' '.join(argv)} "
-                    f"(schedule={schedule})"
-                )
-            if not entries:
-                self.stdout.write("nothing scheduled to run")
-            return
-
         failed = []
         try:
+            # Selection can raise CommandError on a typo'd JOBS
+            # schedule literal — a code bug that must still be
+            # captured (and flushed by the finally below). A bad
+            # --only label is operator error and stays silent.
+            try:
+                entries = self._select(options, today)
+            except CommandError as exc:
+                if not options["only"]:
+                    capture_internal_exception(
+                        exc, tags={'job': 'run_all_jobs'},
+                    )
+                raise
+
+            if options["dry_run"]:
+                for label, argv, schedule in entries:
+                    self.stdout.write(
+                        f"would run: {label} {' '.join(argv)} "
+                        f"(schedule={schedule})"
+                    )
+                if not entries:
+                    self.stdout.write(
+                        "nothing scheduled to run"
+                    )
+                return
             for label, argv, _schedule in entries:
                 self.stdout.write(
                     f"running: {label} {' '.join(argv)}"
