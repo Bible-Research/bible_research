@@ -188,7 +188,12 @@ def _normalize_books(rows, name_map=None):
         if not name_short:
             name_short = name
         chapters = []
-        for chapter in row.get('chapters') or []:
+        chapters_raw = row.get('chapters') or []
+        if isinstance(chapters_raw, str):
+            # Some DBT rows report chapters as a
+            # comma-joined string instead of a list.
+            chapters_raw = chapters_raw.split(',')
+        for chapter in chapters_raw:
             try:
                 chapters.append(int(chapter))
             except (TypeError, ValueError):
@@ -331,6 +336,8 @@ def fileset_to_bible_id(fileset_id):
             limit=500,
         )
         for bible in result.get('data') or []:
+            if not isinstance(bible, dict):
+                continue
             abbr = bible.get('abbr')
             if not abbr:
                 continue
@@ -338,6 +345,8 @@ def fileset_to_bible_id(fileset_id):
                 bible.get('filesets') or {}
             ).items():
                 for fs in filesets or []:
+                    if not isinstance(fs, dict):
+                        continue
                     fs_id = fs.get('id')
                     if fs_id:
                         mapping[fs_id] = abbr

@@ -204,6 +204,12 @@ class DBTClient:
             )
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.JSONDecodeError:
+            # ``response.json()`` failures carry no URL in
+            # ``str()`` and re-raising ``type(e)(...)`` below
+            # would crash — its ``__init__`` takes json's
+            # (msg, doc, pos) signature, not ``response=``.
+            raise
         except requests.exceptions.RequestException as e:
             _log_request_error("DBT books request error", e)
             if e.response is not None and (
