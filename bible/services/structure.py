@@ -6,8 +6,8 @@ how those books are named in the fileset's language. Sourcing
 follows the same ``provider_for`` dispatch as passage requests:
 
 - DBT-backed filesets read their own bible's book list
-  (``v4_bible_books`` with ``verify_content``) — the bible's
-  authentic coverage and orthography.
+  (``GET /bibles/{id}/book`` with ``verify_content``) — the
+  bible's authentic coverage and orthography.
 - SWORD filesets read the local module's coverage; names are
   overlaid from the canonical bible for the fileset's language
   because module names (e.g. LvGluck8) are English, not
@@ -315,14 +315,17 @@ def fileset_to_bible_id(fileset_id):
     recorded as ``None`` so an unresolvable id does not
     rescan on every request.
     """
-    base = (fileset_id or '').split('-')[0]
+    fileset_id = (fileset_id or '').strip().upper()
+    base = fileset_id.split('-')[0]
     mapping = cache.get(_FILESET_BIBLE_MAP_KEY)
     if mapping is None:
         mapping = {}
     if fileset_id in mapping or base in mapping:
         return mapping.get(fileset_id) or mapping.get(base)
-    iso = _language_iso_for(fileset_id)
     try:
+        # Inside the try: a crash here must never mask the
+        # original upstream error this resolves for the caller.
+        iso = _language_iso_for(fileset_id)
         result = get_default_dbt_client().get_bibles(
             language=iso.upper() if iso else None,
             limit=500,

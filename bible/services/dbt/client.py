@@ -222,7 +222,7 @@ class DBTClient:
                 e.response.status_code
                 if e.response is not None else 'n/a'
             )
-            raise requests.exceptions.HTTPError(
+            raise type(e)(
                 f"DBT books request failed "
                 f"({type(e).__name__}, status={status})",
                 response=e.response,
@@ -249,7 +249,10 @@ class DBTClient:
         # Use the books endpoint and filter the results
         books = self.get_books(bible_id, **kwargs)
         for book in books.get('data') or []:
-            if book.get('book_id') == book_id:
+            if (
+                isinstance(book, dict)
+                and book.get('book_id') == book_id
+            ):
                 return {'data': book}
         return {'data': None}
 
@@ -274,7 +277,8 @@ class DBTClient:
         books = self.get_books(bible_id, **kwargs)
         for book in books.get('data') or []:
             if (
-                book.get('book_id') == book_id
+                isinstance(book, dict)
+                and book.get('book_id') == book_id
                 and 'chapters' in book
             ):
                 return {'data': book['chapters']}

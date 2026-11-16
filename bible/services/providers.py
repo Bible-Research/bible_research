@@ -1071,12 +1071,13 @@ class DbtProvider(Provider):
         """Raw DBT ``/bibles`` rows — the caller folds them
         through ``TranslationService._process_translations``.
 
-        Note: the listing is truncated at ``limit=500`` rows
-        (first page only). DBT hosts more bibles than that, so
-        long-tail translations never reach the endpoint —
-        accepted for now because the frontend's selector only
-        needs the well-known set; paging the full catalog would
-        multiply upstream calls on an anonymous endpoint."""
+        Note: the listing is truncated to the first page —
+        DBT paginates ``/bibles`` at ~50 rows regardless of
+        ``limit``, so long-tail translations never reach the
+        endpoint — accepted for now because the frontend's
+        selector only needs the well-known set; paging the
+        full catalog would multiply upstream calls on an
+        anonymous endpoint."""
         params = {'limit': 500}
         if language_iso:
             params['language_code'] = language_iso.upper()
@@ -1085,8 +1086,8 @@ class DbtProvider(Provider):
 
     def get_structure(self):
         """Book list of the fileset's owning bible via
-        ``v4_bible_books(verify_content=true)`` — the bible's
-        real coverage and own-language names.
+        ``GET /bibles/{id}/book?verify_content=true`` — the
+        bible's real coverage and own-language names.
 
         The owning bible is normally the id truncated to 6
         chars (``ENGESVN2DA`` → ``ENGESV``); when that 404s the
