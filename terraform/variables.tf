@@ -3,10 +3,13 @@ variable "project_id" {
   default = "bible-research-489314"
 }
 
+# App Engine and Artifact Registry use europe-west3; audio
+# resources follow Artifact Registry (see main.tf
+# app_engine_region).
 variable "region" {
   type        = string
   default     = "europe-west3"
-  description = "Default provider region. App Engine and Artifact Registry use europe-west3; audio resources follow Artifact Registry (see main.tf app_engine_region)."
+  description = "Default provider region (see comment)."
 }
 
 # GitHub repository allowed to authenticate via WIF.
@@ -17,10 +20,17 @@ variable "github_repo" {
 
 # Allowed origins for GCS bucket CORS policy.
 # Override in tfvars or via -var for production deployments.
+# https://bibleresearch.vercel.app — production SPA;
+# https://localhost — Capacitor Android webview (androidScheme);
+# http://localhost:5173 — vite dev server.
 variable "cors_origins" {
-  type        = list(string)
-  default     = ["https://bible-research-489314.uc.r.appspot.com"]
-  description = "Origins allowed to fetch signed image URLs directly from GCS."
+  type = list(string)
+  default = [
+    "https://bibleresearch.vercel.app",
+    "https://localhost",
+    "http://localhost:5173",
+  ]
+  description = "Origins allowed to fetch signed GCS URLs directly."
 }
 
 # Email receiving Cloud Monitoring alerts (monitoring.tf). Kept empty
