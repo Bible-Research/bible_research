@@ -24,7 +24,11 @@ providers can report non-book entries (``C01``-style ids or
 deuterocanon) that v1 cannot route anyway. Results are cached
 process-wide for ``_CACHE_TTL_SECONDS``; the view additionally
 marks responses ``Vercel-CDN-Cache-Control`` like the other
-anonymous catalog endpoints.
+anonymous catalog endpoints. A degraded body (the SWORD
+canonical-name overlay fetch failed, so English module names
+shipped instead) carries ``'degraded': True``, is never cached
+or edge-marked — mirroring the ``bible/translations/``
+``no-store`` posture — and recovers as soon as the fetch does.
 """
 import json
 import logging
@@ -89,27 +93,43 @@ _ESV_VERSES_PATH = os.path.join(
 
 
 def get_structure(fileset_id):
-    """Return ``{'books': [...]}`` for the structure endpoint.
+    """Return ``(body, degraded)`` for the structure endpoint.
+
+    ``body`` is ``{'books': [...]}``, plus ``'degraded': True``
+    when the SWORD path could not overlay canonical-language
+    names and shipped the module's own English names instead.
 
     Cached per ``fileset_id`` — identical for every anonymous
-    caller, mirroring ``bible/translations/`` posture.
+    caller, mirroring ``bible/translations/`` posture. Degraded
+    bodies are never cached: they must recover as soon as the
+    upstream fetch does.
     """
     key = (fileset_id or '').strip().upper()
     cache_key = f'{_CACHE_PREFIX}{key}'
     cached = cache.get(cache_key)
     if cached is not None:
-        return cached
-    body = {'books': _resolve_books(key)}
-    cache.set(cache_key, body, _CACHE_TTL_SECONDS)
-    return body
+        return cached, False
+    books, degraded = _resolve_books(key)
+    body = {'books': books}
+    if degraded:
+        body['degraded'] = True
+    else:
+        cache.set(cache_key, body, _CACHE_TTL_SECONDS)
+    return body, degraded
 
 
 def _resolve_books(fileset_id):
-    """Resolve the (filtered, ordered) book rows for a fileset."""
+    """Resolve the (filtered, ordered) book rows for a fileset.
+
+    Returns ``(books, degraded)`` — ``degraded`` is True only on
+    the SWORD path when the canonical-name overlay could not be
+    applied (fetch failed or empty) and the module's own names
+    shipped instead.
+    """
     # ``ENGKJV`` is DBT-backed but DBT reports all-caps names —
     # the bundled table keeps the Genesis-style display names.
     if fileset_id == 'ENGKJV':
-        return _bundled_books()
+        return _bundled_books(), False
 
     # Local import: providers.py must not depend on this module
     # (it would be a circular import — providers is imported by
@@ -125,16 +145,20 @@ def _resolve_books(fileset_id):
         # The provider surface cannot answer (ESV, API.Bible):
         # coverage and names both come from the canonical bible
         # for the fileset's language.
-        return _canonical_books(_language_iso_for(fileset_id))
+        return _canonical_books(
+            _language_iso_for(fileset_id)
+        ), False
     if isinstance(concrete, providers.DbtProvider):
         # The bible's own orthography wins for DBT filesets.
-        return _normalize_books(rows)
+        return _normalize_books(rows), False
     # Non-DBT coverage (SWORD): real module chapters, names from
-    # the canonical bible for the language. On a canonical-fetch
-    # failure the provider's own names stay — a degraded label is
-    # better than turning a local resource into a 502.
+    # the canonical bible for the language. When the overlay
+    # cannot be applied (fetch failure or an empty canonical
+    # map) the provider's own names ship — a degraded label is
+    # better than turning a local resource into a 502 — but the
+    # body is flagged so it is never cached or edge-marked.
     names = _canonical_name_map(_language_iso_for(fileset_id))
-    return _normalize_books(rows, names)
+    return _normalize_books(rows, names), not names
 
 
 def _normalize_books(rows, name_map=None):
@@ -249,7 +273,8 @@ def _canonical_books(language_iso):
 
 def _canonical_name_map(language_iso):
     """``{book_id: (name, name_short)}`` of the canonical bible,
-    or ``{}`` when the fetch fails (caller keeps its names)."""
+    or ``None`` when the fetch fails — the caller keeps its own
+    names and flags the body degraded so it is never cached."""
     try:
         return {
             b['book_id']: (b['name'], b['name_short'])
@@ -261,7 +286,7 @@ def _canonical_name_map(language_iso):
             'keeping provider names.',
             language_iso, exc_info=True,
         )
-        return {}
+        return None
 
 
 def fileset_to_bible_id(fileset_id):

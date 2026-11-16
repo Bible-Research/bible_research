@@ -134,6 +134,36 @@ def test_sword_fileset_gets_canonical_names(
 
 @pytest.mark.django_db
 @patch('bible.services.structure.get_default_dbt_client')
+def test_sword_canonical_failure_is_degraded_and_no_store(
+    mock_get_client, client
+):
+    """A failed canonical-name overlay degrades to the module's
+    English names: the body is flagged and ``no-store`` —
+    never edge-marked and never written to the process cache,
+    so a repeat request retries the fetch."""
+    mock_get_client.return_value.get_books.side_effect = (
+        FakeProviderError(500)
+    )
+
+    response = client.get(STRUCTURE_URL, {'fileset_id': 'LVSGLU8'})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()['degraded'] is True
+    assert response['Cache-Control'] == 'no-store'
+    assert 'Vercel-CDN-Cache-Control' not in response
+    by_id = {b['book_id']: b for b in response.json()['books']}
+    assert by_id['GEN']['name'] == 'Genesis'
+
+    # Not process-cached: the repeat request retries upstream.
+    second = client.get(STRUCTURE_URL, {'fileset_id': 'LVSGLU8'})
+    assert second.json()['degraded'] is True
+    assert (
+        mock_get_client.return_value.get_books.call_count == 2
+    )
+
+
+@pytest.mark.django_db
+@patch('bible.services.structure.get_default_dbt_client')
 def test_provider_without_surface_uses_canonical_fallback(
     mock_get_client, client
 ):
@@ -201,6 +231,51 @@ def test_fileset_bible_resolution_via_listing(
     calls = mock_provider_client.return_value.get_books
     assert calls.call_args_list[0][0][0] == 'LATLVR'
     assert calls.call_args_list[1][0][0] == 'LAVLVR'
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+@patch('bible.services.structure.get_default_dbt_client')
+def test_unknown_dbt_fileset_returns_not_found(
+    mock_structure_client, mock_provider_client, client
+):
+    """A fileset id DBT does not know — and that the listing
+    scan cannot map to a bible — must surface the upstream 404
+    as ``not_found``: the re-raise lives inside the ``except``
+    suite, so it can never degrade into a ``NameError`` → 502."""
+    mock_provider_client.return_value.get_books.side_effect = (
+        FakeProviderError(404)
+    )
+    mock_structure_client.return_value.get_bibles.return_value = {
+        'data': []
+    }
+
+    response = client.get(STRUCTURE_URL, {'fileset_id': 'XXXXXX'})
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()['error_code'] == 'not_found'
+    assert 'Vercel-CDN-Cache-Control' not in response
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+@patch('bible.services.structure.get_default_dbt_client')
+def test_failed_listing_scan_still_returns_not_found(
+    mock_structure_client, mock_provider_client, client
+):
+    """A failing fileset→bible listing scan must not mask the
+    original upstream 404 behind a different error."""
+    mock_provider_client.return_value.get_books.side_effect = (
+        FakeProviderError(404)
+    )
+    mock_structure_client.return_value.get_bibles.side_effect = (
+        FakeProviderError(500)
+    )
+
+    response = client.get(STRUCTURE_URL, {'fileset_id': 'XXXXXX'})
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()['error_code'] == 'not_found'
 
 
 @pytest.mark.django_db

@@ -57,9 +57,13 @@ SWORD reads the local module + canonical-language names,
 providers fall back to the canonical bible for the fileset's
 `language_iso` (`eng`→`ENGESV`, `lvs`→`LAVNLI`,
 `rus`→`RUSSYN`, default `ENGESV`); rows are filtered to the
-66-book USFM canon. Note enrichment batches by
-(fileset, book, chapter) through a serializer-context cache —
-one upstream call per chapter per page, not per note.
+66-book USFM canon. A failed SWORD canonical-name overlay
+degrades instead of failing: the module's English names ship
+with `degraded: true` and `no-store` — never cached anywhere
+(same posture as `bible/translations/` degraded bodies). Note
+enrichment batches by (fileset, book, chapter) through a
+serializer-context cache — one upstream call per chapter per
+page, not per note.
 
 `provider_for` wraps ESV/SWORD/DBT providers in
 `_CachingProvider`: whole-chapter text is served from the

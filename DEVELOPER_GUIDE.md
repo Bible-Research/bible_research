@@ -114,7 +114,9 @@ DRF throttling and these provider-data caches:
   `{books: [...]}` body is cached per `fileset_id` for 24 h
   with `Cache-Control: public, max-age=86400`; the canonical
   per-language name overlay shares one entry per language.
-  Errors are never cached.
+  Errors and `degraded` bodies (a failed SWORD
+  canonical-name overlay keeps the module's English names)
+  are never cached anywhere.
 - `read_timestamps_json` (GCS `_timestamps.json` sidecars) —
   cached per `(fileset, voice, book, chapter, mode)` for 24 h;
   the artifact is nominally immutable (the generator only
@@ -837,9 +839,14 @@ frontend's old assumption that every translation has the same
 
 **Errors**: same `error`/`error_code` contract —
 `missing_parameter`/`invalid_parameter` (400), `rate_limited`
-(429), `not_found` (404), `provider_error` (502). Successful
-responses are cached for 24 h and edge-marked like
-`/bible/translations/`; failures are never cached.
+(429), `not_found` (404 — also for a fileset id whose owning
+bible cannot be resolved upstream), `provider_error` (502).
+Successful responses are cached for 24 h and edge-marked like
+`/bible/translations/`; failures are never cached. A failed
+SWORD canonical-name overlay degrades instead of failing:
+the module's own names ship with `"degraded": true` and
+`Cache-Control: no-store` — never cached anywhere, like the
+translations endpoint's degraded posture.
 
 #### List Languages
 ```

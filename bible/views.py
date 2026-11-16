@@ -820,6 +820,10 @@ class BibleStructureView(VercelEdgeCacheMixin, APIView):
     Anonymous-identical catalog data: cached process-wide for
     ``_STRUCTURE_CACHE_TTL_SECONDS`` and marked
     ``Vercel-CDN-Cache-Control`` like ``bible/translations/``.
+    ``degraded`` bodies (the SWORD canonical-name overlay
+    fetch failed, so English module names shipped) stay
+    ``no-store``, are never marked and are never written to
+    the process cache — they recover as soon as the fetch does.
 
     Example:
         /api/v1/bible/structure/?fileset_id=LVSGLU8
@@ -843,12 +847,17 @@ class BibleStructureView(VercelEdgeCacheMixin, APIView):
             )
 
         try:
-            body = get_structure(fileset_id)
+            body, degraded = get_structure(fileset_id)
             response = Response(body)
-            response['Cache-Control'] = (
-                f"public, max-age="
-                f"{_STRUCTURE_CACHE_TTL_SECONDS}"
-            )
+            # Degraded bodies are never cached downstream —
+            # the mixin's edge-mark also skips ``no-store``.
+            if degraded:
+                response['Cache-Control'] = 'no-store'
+            else:
+                response['Cache-Control'] = (
+                    f"public, max-age="
+                    f"{_STRUCTURE_CACHE_TTL_SECONDS}"
+                )
             return response
         except Exception as e:
             logger.exception(

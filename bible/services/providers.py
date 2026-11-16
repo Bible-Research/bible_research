@@ -1102,14 +1102,22 @@ class DbtProvider(Provider):
         except Exception as e:
             if upstream_status_code(e) != 404:
                 raise
-        # Local import — bible.services.structure imports this
-        # module lazily, so a top-level edge would be circular.
-        from bible.services.structure import fileset_to_bible_id
-        resolved = fileset_to_bible_id(self.fileset_id)
-        if resolved is None or resolved == bible_id:
-            raise e
-        result = client.get_books(resolved, verify_content=True)
-        return (result or {}).get('data') or []
+            # Local import — bible.services.structure imports
+            # this module lazily, so a top-level edge would be
+            # circular. The fallback must stay inside the
+            # ``except`` suite: ``except ... as e`` unbinds
+            # ``e`` when the suite exits, so only a bare
+            # ``raise`` here can re-raise the original 404.
+            from bible.services.structure import (
+                fileset_to_bible_id,
+            )
+            resolved = fileset_to_bible_id(self.fileset_id)
+            if resolved is None or resolved == bible_id:
+                raise
+            result = client.get_books(
+                resolved, verify_content=True
+            )
+            return (result or {}).get('data') or []
 
 
 # ---------------------------------------------------------------------------
