@@ -266,13 +266,16 @@ at the next GAE deploy.
   `staging_rw`-created tables via default privileges, so
   read-only agent investigation works there exactly like on
   `defaultdb`. For a writable remote dev DB, repoint
-  `config.yaml`'s `default` at `stagingdb`/`staging_rw`.
+  `config.yaml`'s `default` at `stagingdb`/`staging_rw`
+  (password from the staging deploy's DOTENV — ask the
+  user).
 - Non-production backend deployments (e.g. a Vercel staging
   env whose config arrives via the `DOTENV` variable) set
   `DATABASE_URL` to `stagingdb` — never `defaultdb`. The
   shared `env-file` secret carries prod's `defaultdb` URL,
   so a staging deploy must supply `DATABASE_URL` explicitly
-  inside its own DOTENV payload. `DB_SSL_CERT` is the same
+  (a real env var wins over the DOTENV-carried value).
+  `DB_SSL_CERT` is the same
   Aiven CA PEM in every environment. See DEVELOPER_GUIDE
   "Environment Variables".
 
