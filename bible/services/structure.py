@@ -57,6 +57,7 @@ from bible.utils.bible_books import (
     _book_title,
     get_book_name_from_id,
 )
+from bible.utils.provider_errors import upstream_status_code
 
 logger = logging.getLogger(__name__)
 
@@ -308,9 +309,11 @@ def fileset_to_bible_id(fileset_id):
     translations listing filtered to the fileset's own
     language — DBT paginates ``/bibles`` at 50 rows regardless
     of ``limit`` (~3300 bibles total), so an unfiltered scan
-    only ever sees page one. Results merge into the cached
-    process-wide map; misses are recorded as ``None`` so an
-    unresolvable id does not rescan on every request.
+    only ever sees page one, while a language's listing is
+    small enough to fit it (largest observed: ~25). Results
+    merge into the cached process-wide map; misses are
+    recorded as ``None`` so an unresolvable id does not
+    rescan on every request.
     """
     base = (fileset_id or '').split('-')[0]
     mapping = cache.get(_FILESET_BIBLE_MAP_KEY)
@@ -338,9 +341,17 @@ def fileset_to_bible_id(fileset_id):
                         mapping.setdefault(
                             fs_id.split('-')[0], abbr
                         )
-    except Exception:
+    except Exception as e:
         # Never cache a failed scan — a transient outage
-        # would stick for the whole TTL.
+        # would stick for the whole TTL. Logged by
+        # type+status only: ``requests`` exceptions
+        # stringify with the ``?key=`` credential.
+        logger.warning(
+            'Fileset->bible listing scan failed for '
+            'fileset_id=%s: %s (status=%s)',
+            fileset_id, type(e).__name__,
+            upstream_status_code(e),
+        )
         return None
     # Record the miss too — the listing is authoritative, so
     # an unresolvable id stays unresolved for the TTL instead

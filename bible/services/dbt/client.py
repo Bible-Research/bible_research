@@ -212,7 +212,21 @@ class DBTClient:
                 logger.error(
                     "Authentication failed. Check your API key."
                 )
-            raise
+            # ``requests`` exceptions stringify with the full
+            # request URL — including the ``?key=`` credential —
+            # and this exception propagates into views' logs and
+            # Sentry. Re-raise a credential-free copy; keeping
+            # ``response`` lets ``upstream_status_code`` still
+            # classify the upstream status (404 -> not_found).
+            status = (
+                e.response.status_code
+                if e.response is not None else 'n/a'
+            )
+            raise requests.exceptions.HTTPError(
+                f"DBT books request failed "
+                f"({type(e).__name__}, status={status})",
+                response=e.response,
+            ) from None
 
     def get_book(
         self,
@@ -234,10 +248,9 @@ class DBTClient:
         # Note: There is no direct endpoint for a specific book
         # Use the books endpoint and filter the results
         books = self.get_books(bible_id, **kwargs)
-        if 'data' in books:
-            for book in books['data']:
-                if book.get('book_id') == book_id:
-                    return {'data': book}
+        for book in books.get('data') or []:
+            if book.get('book_id') == book_id:
+                return {'data': book}
         return {'data': None}
 
     def get_chapters(
@@ -259,13 +272,12 @@ class DBTClient:
         """
         # Note: Need to get the chapters from the book endpoint
         books = self.get_books(bible_id, **kwargs)
-        if 'data' in books:
-            for book in books['data']:
-                if (
-                    book.get('book_id') == book_id
-                    and 'chapters' in book
-                ):
-                    return {'data': book['chapters']}
+        for book in books.get('data') or []:
+            if (
+                book.get('book_id') == book_id
+                and 'chapters' in book
+            ):
+                return {'data': book['chapters']}
         return {'data': []}
 
     def get_verses(

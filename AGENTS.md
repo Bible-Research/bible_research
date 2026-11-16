@@ -51,7 +51,7 @@ answer from registry `license` metadata, API.Bible ids fetch the
 live statement (audio fileset ids read the audio bible's entry),
 other ids proxy DBT. Structure routing (`/bible/structure/`)
 goes through `bible/services/structure.py`: DBT filesets read
-their own bible via `v4_bible_books(verify_content=true)`,
+their own bible via `GET /bibles/{id}/book?verify_content=true`,
 SWORD reads the local module + canonical-language names,
 `ENGKJV` uses the bundled English table, and unanswerable
 providers fall back to the canonical bible for the fileset's

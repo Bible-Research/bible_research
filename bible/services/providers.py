@@ -1091,8 +1091,9 @@ class DbtProvider(Provider):
         The owning bible is normally the id truncated to 6
         chars (``ENGESVN2DA`` → ``ENGESV``); when that 404s the
         fileset uses a different prefix than its bible
-        (``LATLVRN1DA`` → ``LAVLVR``) and is resolved by scanning
-        the cached translations listing."""
+        (``LATLVRN1DA`` → ``LAVLVR``) and is resolved through a
+        language-filtered scan of the DBT bibles listing (cached
+        process-wide — see ``fileset_to_bible_id``)."""
         client = get_default_dbt_client()
         base = (self.fileset_id or '').split('-')[0]
         bible_id = base[:6] if len(base) > 6 else base
