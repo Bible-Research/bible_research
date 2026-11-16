@@ -823,9 +823,10 @@ frontend's old assumption that every translation has the same
 - `chapters` is the ordered list of covered chapter numbers.
 - Sourcing is provider-aware (`bible/services/structure.py`):
   DBT filesets read their own bible via
-  `v4_bible_books(verify_content=true)` (the fileset's owning
-  bible is resolved through the translations listing when the
-  id prefix is not the bible id, e.g. `LATLVRN1DA` →
+  `GET /bibles/{id}/book?verify_content=true` (the fileset's
+  owning bible is resolved through a language-filtered scan of
+  the bibles listing when the id prefix is not the bible id,
+  e.g. `LATLVRN1DA` →
   `LAVLVR`); SWORD filesets read the local module's structure
   and overlay canonical-language names; `ENGKJV` uses the
   bundled English table; providers that cannot answer fall

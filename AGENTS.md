@@ -51,7 +51,7 @@ answer from registry `license` metadata, API.Bible ids fetch the
 live statement (audio fileset ids read the audio bible's entry),
 other ids proxy DBT. Structure routing (`/bible/structure/`)
 goes through `bible/services/structure.py`: DBT filesets read
-their own bible via `v4_bible_books(verify_content=true)`,
+their own bible via `GET /bibles/{id}/book?verify_content=true`,
 SWORD reads the local module + canonical-language names,
 `ENGKJV` uses the bundled English table, and unanswerable
 providers fall back to the canonical bible for the fileset's
@@ -98,6 +98,15 @@ Worklist source is `DBTClient.get_fileset_files` —
 per-chapter coverage with signed `path` + `duration` (unlike
 `/bibles/{bible_id}/book`, which keys on the bible id and unions
 sibling filesets; a `*DA` fileset id 404s there).
+
+`DBTClient` methods that hit `/bibles/{id}/book`
+(`get_books`/`get_book`/`get_chapters`) use raw `session.get`
+like `get_bibles`/`get_fileset_files` — the vendored OpenAPI
+client's `v4_bible_books` deserialization is broken (its
+`V4BibleBooksData` model references phantom types `Id`, `Name`,
+`Chapters`… that were never generated) and it returns model
+objects, not the dicts callers index into. Don't route new
+book-list calls through `bibles_api`.
 
 API.Bible text responses carry a `meta` block with FUMS fields the
 frontend must report (license requirement). The API.Bible client

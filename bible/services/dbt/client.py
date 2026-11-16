@@ -174,18 +174,65 @@ class DBTClient:
         """
         Get books for a specific Bible.
 
+        Uses requests directly — the generated OpenAPI client
+        deserializes ``v4_bible_books`` into a ``V4BibleBooksData``
+        model whose ``openapi_types`` reference phantom classes
+        (``Id``, ``Name``, ``Chapters``…) that were never
+        generated, so every call dies in deserialization with
+        ``AttributeError: module 'openapi_client.models' has no
+        attribute 'Id'``. The raw JSON body is also what callers
+        expect (``result.get('data')``), unlike the model objects
+        ``_make_request`` would return.
+
         Args:
             bible_id: Bible ID
             **kwargs: Additional query parameters
+                (``verify_content``, ``book_id``, …)
 
         Returns:
             Dictionary with book data
         """
-        return self._make_request(
-            self.bibles_api.v4_bible_books,
-            bible_id,
-            **kwargs
-        )
+        params = kwargs.copy()
+        params['v'] = 4
+        params['key'] = self.api_key
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}/bibles/{bible_id}/book",
+                params=params,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.JSONDecodeError:
+            # ``response.json()`` failures carry no URL in
+            # ``str()`` and re-raising ``type(e)(...)`` below
+            # would crash — its ``__init__`` takes json's
+            # (msg, doc, pos) signature, not ``response=``.
+            raise
+        except requests.exceptions.RequestException as e:
+            _log_request_error("DBT books request error", e)
+            if e.response is not None and (
+                e.response.status_code == 401
+            ):
+                logger.error(
+                    "Authentication failed. Check your API key."
+                )
+            # ``requests`` exceptions stringify with the full
+            # request URL — including the ``?key=`` credential —
+            # and this exception propagates into views' logs and
+            # Sentry. Re-raise a credential-free copy; keeping
+            # ``response`` lets ``upstream_status_code`` still
+            # classify the upstream status (404 -> not_found).
+            status = (
+                e.response.status_code
+                if e.response is not None else 'n/a'
+            )
+            raise type(e)(
+                f"DBT books request failed "
+                f"({type(e).__name__}, status={status})",
+                response=e.response,
+            ) from None
 
     def get_book(
         self,
@@ -205,16 +252,14 @@ class DBTClient:
             Dictionary with book details
         """
         # Note: There is no direct endpoint for a specific book
-        # Use v4_bible_books and filter the results
-        books = self._make_request(
-            self.bibles_api.v4_bible_books,
-            bible_id,
-            **kwargs
-        )
-        if 'data' in books:
-            for book in books['data']:
-                if book.get('id') == book_id:
-                    return {'data': book}
+        # Use the books endpoint and filter the results
+        books = self.get_books(bible_id, **kwargs)
+        for book in books.get('data') or []:
+            if (
+                isinstance(book, dict)
+                and book.get('book_id') == book_id
+            ):
+                return {'data': book}
         return {'data': None}
 
     def get_chapters(
@@ -235,15 +280,14 @@ class DBTClient:
             Dictionary with chapter data
         """
         # Note: Need to get the chapters from the book endpoint
-        books = self._make_request(
-            self.bibles_api.v4_bible_books,
-            bible_id,
-            **kwargs
-        )
-        if 'data' in books:
-            for book in books['data']:
-                if book.get('id') == book_id and 'chapters' in book:
-                    return {'data': book['chapters']}
+        books = self.get_books(bible_id, **kwargs)
+        for book in books.get('data') or []:
+            if (
+                isinstance(book, dict)
+                and book.get('book_id') == book_id
+                and 'chapters' in book
+            ):
+                return {'data': book['chapters']}
         return {'data': []}
 
     def get_verses(

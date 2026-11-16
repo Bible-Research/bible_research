@@ -373,3 +373,59 @@ def test_empty_fallback_body_is_not_cached_per_fileset(
     assert [b['book_id'] for b in books] == ['GEN']
     assert books[0]['name'] == 'Genesis'
     assert get_books.call_count == 2
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+@patch('bible.services.structure.get_default_dbt_client')
+def test_fileset_bible_scan_filters_by_language(
+    mock_structure_client, mock_provider_client, client
+):
+    """The fileset→bible scan is language-filtered: DBT
+    paginates ``/bibles`` at 50 rows, so only the fileset's
+    own language listing can resolve it."""
+    mock_provider_client.return_value.get_books.side_effect = [
+        FakeProviderError(404),
+        {'data': [_dbt_book('PSA', 'Psalmi', 150, 'OT')]},
+    ]
+    mock_structure_client.return_value.get_bibles.return_value = {
+        'data': [{
+            'abbr': 'LAVLVR',
+            'filesets': {'dbp-prod': [{'id': 'LATLVRN1DA'}]},
+        }]
+    }
+
+    response = client.get(
+        STRUCTURE_URL, {'fileset_id': 'LATLVRN1DA'}
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    get_bibles = mock_structure_client.return_value.get_bibles
+    get_bibles.assert_called_once()
+    _, kwargs = get_bibles.call_args
+    assert kwargs.get('language') == 'LVS'
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+@patch('bible.services.structure.get_default_dbt_client')
+def test_unresolvable_fileset_scan_is_not_repeated(
+    mock_structure_client, mock_provider_client, client
+):
+    """A fileset the listing cannot map records its miss — a
+    repeat request must not rescan the bibles listing."""
+    mock_provider_client.return_value.get_books.side_effect = (
+        FakeProviderError(404)
+    )
+    mock_structure_client.return_value.get_bibles.return_value = {
+        'data': []
+    }
+
+    for _ in range(2):
+        response = client.get(
+            STRUCTURE_URL, {'fileset_id': 'XXXXXX'}
+        )
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    get_bibles = mock_structure_client.return_value.get_bibles
+    assert get_bibles.call_count == 1
