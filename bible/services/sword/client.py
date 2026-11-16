@@ -70,6 +70,16 @@ class SwordClient:
                 bible._decompressed_text = functools.lru_cache(
                     maxsize=8
                 )(decompress)
+            else:
+                # pysword renamed/dropped the hook — scans still
+                # work but lose the ~12x block-cache speedup;
+                # surface that instead of silently degrading.
+                logger.warning(
+                    "SWORD module %s has no _decompressed_text "
+                    "hook; chapter-block caching is off "
+                    "(pysword internals changed?).",
+                    meta["module_name"],
+                )
             self._cache[fileset_id] = (modules, bible)
             logger.info(
                 "Loaded SWORD module %s (%s) for fileset_id=%s",

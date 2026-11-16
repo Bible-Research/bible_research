@@ -19,3 +19,13 @@ class FeatureFlagAdmin(admin.ModelAdmin):
     def delete_model(self, request, obj):
         super().delete_model(request, obj)
         invalidate_feature_flag(obj.key)
+
+    def delete_queryset(self, request, queryset):
+        # The bulk "Delete selected" action bypasses
+        # ``delete_model`` — bust each flag's cached value
+        # here too or a bulk-deleted flag stays cached for
+        # up to the TTL.
+        keys = list(queryset.values_list('key', flat=True))
+        super().delete_queryset(request, queryset)
+        for key in keys:
+            invalidate_feature_flag(key)

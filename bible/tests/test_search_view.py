@@ -1706,8 +1706,10 @@ def test_undecodable_cursor_rejected(
         'query': 'love',
         'fileset_id': 'LVSGLU8',
         'group_by': 'book',
-        # 'hello' — decodes cleanly but carries no 'v1:' prefix.
-        'cursor': 'aGVsbG8',
+        # 'hello' — decodes cleanly but is not a
+        # 'v2:<ctx>:<index>' token. (Unpadded 'aGVsbG8' would
+        # fail base64 padding before ever reaching this check.)
+        'cursor': 'aGVsbG8=',
     })
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert response.json()['error_code'] == 'invalid_parameter'
@@ -1728,7 +1730,33 @@ def test_out_of_range_cursor_rejected(
         'query': 'love',
         'fileset_id': 'LVSGLU8',
         'group_by': 'book',
-        'cursor': encode_scan_cursor(9),
+        'cursor': encode_scan_cursor(9, 'LVSGLU8', None, 'love'),
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()['error_code'] == 'invalid_parameter'
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=True)
+@patch('bible.services.providers.get_default_sword_client')
+def test_cursor_for_different_scan_rejected(
+    mock_get_sword, mock_is_sword, client
+):
+    """A well-formed, in-range cursor minted under a different
+    (fileset, books, query) context must not resume — its index
+    addresses a different worklist window → 400."""
+    mock_get_sword.return_value.list_chapters.return_value = [
+        ('GEN', 1), ('GEN', 2), ('MAT', 1),
+    ]
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'LVSGLU8',
+        'group_by': 'book',
+        'books': 'MAT',
+        # Minted for books=GEN on the same fileset+query.
+        'cursor': encode_scan_cursor(
+            1, 'LVSGLU8', 'GEN', 'love'
+        ),
     })
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert response.json()['error_code'] == 'invalid_parameter'

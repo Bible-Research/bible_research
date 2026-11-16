@@ -805,16 +805,24 @@ class SwordProvider(Provider):
     def search_grouped(
         self, query, books=None, sort_by=None, cursor=None
     ):
-        # Grouped mode returns every match — cap it at the same
-        # MAX_RESULTS bound the other providers honor instead of
-        # scanning a whole-Bible result set into memory.
+        # Grouped mode returns every match — cap each window at
+        # the same MAX_RESULTS bound the other providers honor
+        # instead of scanning a whole-Bible result set into
+        # memory per request.
         client = get_default_sword_client()
-        chapters_total = len(
-            sword_chapter_worklist(client, self.fileset_id, books)
+        chapters = sword_chapter_worklist(
+            client, self.fileset_id, books
         )
+        chapters_total = len(chapters)
         start_index = 0
         if cursor is not None:
-            start_index = decode_scan_cursor(cursor)
+            # The token is bound to this scan context
+            # (canonical fileset, books, query): a cursor
+            # minted for a different scan would resume into a
+            # misaligned window, so a mismatch 400s.
+            start_index = decode_scan_cursor(
+                cursor, self._canon, books, query
+            )
             # A cursor only ever points at a chapter this
             # worklist still holds — anything past the end is a
             # fabricated/stale token, not a resume.
@@ -828,6 +836,7 @@ class SwordProvider(Provider):
             max_matches=MAX_RESULTS,
             deadline_s=SEARCH_SCAN_BUDGET_SECONDS,
             start_index=start_index,
+            chapters=chapters,
         )
         meta = {
             'total': len(matches),
@@ -843,11 +852,17 @@ class SwordProvider(Provider):
                 'chapters_total': chapters_total,
             },
         }
-        # Only a deadline stop is resumable — a ``max_matches``
-        # stop is terminal truncation, and a cursor past it
-        # would let clients page beyond the result cap.
+        # MAX_RESULTS bounds the matches a single window
+        # returns (per-request work) — not the cumulative total
+        # a client accumulates by following cursors, which is
+        # the point of a resumable scan. Only a deadline stop
+        # mints a cursor: a ``max_matches`` stop already
+        # returned a full page of matches, so it reports
+        # terminal truncation with no resume token.
         if next_index is not None and len(matches) < MAX_RESULTS:
-            meta['next_cursor'] = encode_scan_cursor(next_index)
+            meta['next_cursor'] = encode_scan_cursor(
+                next_index, self._canon, books, query
+            )
         return {
             'groups': group_verses_by_book(matches),
             'meta': meta,

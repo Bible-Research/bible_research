@@ -7,6 +7,7 @@ then bucket them into per-book groups in canonical order.
 
 import base64
 import binascii
+import hashlib
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -34,25 +35,59 @@ ESV_PAGE_WORKERS = 4
 # worker timeout so a slow scan can never get its worker killed.
 SEARCH_SCAN_BUDGET_SECONDS = 6
 
-# ``next_cursor`` wire format: ``base64url("v1:<index>")`` where
-# index is a position in the fileset's chapter worklist. Opaque
+# ``next_cursor`` wire format:
+# ``base64url("v2:<ctx>:<index>")`` where index is a position in
+# the fileset's chapter worklist and ``<ctx>`` is a short hash
+# binding the token to the scan context — (fileset_id, books,
+# query). A bare positional cursor minted under ``books=GEN``
+# replayed with ``books=MAT`` would validate and silently scan a
+# misaligned window, so decode rejects a context mismatch. Opaque
 # to clients, stateless, and deterministic because the worklist
 # is stable per (fileset_id, books).
-_SCAN_CURSOR_PREFIX = 'v1:'
+_SCAN_CURSOR_PREFIX = 'v2'
 
 
-def encode_scan_cursor(index):
-    """Serialize a chapter-worklist position as an opaque token."""
-    raw = f'{_SCAN_CURSOR_PREFIX}{index}'.encode('ascii')
+def _scan_context_key(fileset_id, books, query):
+    """Short hash identifying the scan a cursor belongs to.
+
+    Normalized the way the scan itself sees the inputs so
+    cosmetically different but equivalent requests still match:
+    the fileset id uppercases (callers pass the canonical id),
+    ``books`` tokens strip/uppercase/dedupe/sort (the worklist
+    filter is membership-based), and the query lowercases like
+    the scan needle.
+    """
+    books_key = ','.join(sorted({
+        token.strip().upper()
+        for token in (books or '').split(',')
+        if token.strip()
+    }))
+    raw = '|'.join((
+        (fileset_id or '').strip().upper(),
+        books_key,
+        (query or '').strip().lower(),
+    ))
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:10]
+
+
+def encode_scan_cursor(index, fileset_id, books, query):
+    """Serialize a chapter-worklist position as an opaque token
+    bound to the (fileset_id, books, query) scan context."""
+    raw = (
+        f'{_SCAN_CURSOR_PREFIX}:'
+        f'{_scan_context_key(fileset_id, books, query)}:'
+        f'{index}'
+    ).encode('ascii')
     return base64.urlsafe_b64encode(raw).decode('ascii')
 
 
-def decode_scan_cursor(cursor):
+def decode_scan_cursor(cursor, fileset_id, books, query):
     """Inverse of ``encode_scan_cursor``.
 
     Raises ``InvalidSearchCursorError`` when the value is not a
-    well-formed cursor — the view maps that to a 400
-    ``invalid_parameter`` response.
+    well-formed cursor for this (fileset_id, books, query) scan
+    context — the view maps that to a 400 ``invalid_parameter``
+    response.
     """
     try:
         raw = base64.b64decode(
@@ -64,12 +99,17 @@ def decode_scan_cursor(cursor):
         raise InvalidSearchCursorError(
             'cursor could not be decoded'
         ) from e
-    if not text.startswith(_SCAN_CURSOR_PREFIX):
+    parts = text.split(':')
+    if len(parts) != 3 or parts[0] != _SCAN_CURSOR_PREFIX:
         raise InvalidSearchCursorError(
             'cursor has an unknown format'
         )
+    if parts[1] != _scan_context_key(fileset_id, books, query):
+        raise InvalidSearchCursorError(
+            'cursor belongs to a different scan'
+        )
     try:
-        index = int(text[len(_SCAN_CURSOR_PREFIX):])
+        index = int(parts[2])
     except ValueError as e:
         raise InvalidSearchCursorError(
             'cursor carries no position'
@@ -384,7 +424,7 @@ def sword_chapter_worklist(client, fileset_id, books):
 
 def scan_sword_matches(
     client, fileset_id, query, books, max_matches=None,
-    deadline_s=None, start_index=0,
+    deadline_s=None, start_index=0, chapters=None,
 ):
     """Scan SWORD chapters and return
     ``(matches, truncated, next_index)``.
@@ -403,20 +443,27 @@ def scan_sword_matches(
     ``next_index`` carries the position of the first unscanned
     chapter so a follow-up request can resume there (the grouped
     endpoint emits it as ``meta.next_cursor``). ``start_index``
-    resumes a previous window.
+    resumes a previous window. ``chapters`` lets a caller pass a
+    pre-built worklist so the same list serves cursor bounds
+    checks and the scan; ``None`` builds it here.
 
     ``next_index`` is the position of the first unscanned
     chapter whenever the scan stopped early — deadline expiry
     or the ``max_matches`` cap — and ``None`` only on a full
-    scan. Callers deciding whether to emit a resume cursor must
-    still check the stop reason: a capped result is deliberately
-    terminal (a cursor would let clients page past the cap).
+    scan. ``max_matches`` bounds the matches one window collects
+    (per-request work), not the cumulative total a client can
+    accumulate across resumed windows; callers emitting a resume
+    cursor must still check the stop reason — a capped window is
+    reported as terminal truncation.
 
     ``truncated`` is ``True`` whenever the worklist was not
     fully scanned (cap or deadline) — ``total`` is then a lower
     bound.
     """
-    chapters = sword_chapter_worklist(client, fileset_id, books)
+    if chapters is None:
+        chapters = sword_chapter_worklist(
+            client, fileset_id, books
+        )
 
     needle = query.lower()
     matches = []

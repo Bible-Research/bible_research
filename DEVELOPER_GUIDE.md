@@ -997,7 +997,7 @@ matches found so far plus two extra `meta` fields:
   "meta": {
     "total": 120,
     "truncated": true,
-    "next_cursor": "djE6NTAw",
+    "next_cursor": "djI6MDY0NThkZmMwOTo1MDA=",
     "progress": {
       "chapters_scanned": 500,
       "chapters_total": 1189
@@ -1010,11 +1010,12 @@ Resend the same request with `cursor=<next_cursor>` to resume
 where the scan stopped — each window returns only matches not
 yet reported, and `progress` is cumulative so clients can show
 a determinate indicator. `next_cursor` is absent when the scan
-completes; a `cursor` that fails to decode or points past the
-end of the worklist returns `400` with
-`error_code: invalid_parameter`. The `search` throttle
-(`30/min`) applies to every window request — iterative clients
-fit comfortably.
+completes. The token is bound to its scan context — a `cursor`
+that fails to decode, points past the end of the worklist, or
+was minted for a different (fileset, books, query) search
+returns `400` with `error_code: invalid_parameter`. The
+`search` throttle (`30/min`) applies to every window request —
+iterative clients fit comfortably.
 
 **SWORD search feature flag**: SWORD-fileset searches (both
 paginated and grouped) are gated by the `sword_search`

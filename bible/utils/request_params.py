@@ -28,7 +28,8 @@ BOOK_NAME_RE = re.compile(r"^[A-Za-z0-9 .'\-]{1,60}$")
 USFM_BOOK_ID_RE = re.compile(r"^[A-Za-z0-9]{3}$")
 
 # Search resume cursors are opaque base64url tokens
-# (``[A-Za-z0-9_-]`` plus ``=`` padding), well under 64 chars.
+# (``[A-Za-z0-9_-]`` plus ``=`` padding) — a ``v2`` token wraps
+# ~20 chars of ``v2:<ctx>:<index>`` text, well under 64 chars.
 SEARCH_CURSOR_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}={0,2}$")
 
 

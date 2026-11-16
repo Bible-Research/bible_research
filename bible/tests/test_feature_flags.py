@@ -83,6 +83,23 @@ def test_admin_save_model_busts_flag_cache():
 
 
 @pytest.mark.django_db
+def test_admin_bulk_delete_busts_flag_cache():
+    """The admin "Delete selected" action calls
+    ``delete_queryset``, not ``delete_model`` — a bulk-deleted
+    flag must still drop its cached value so the missing-row
+    default (enabled) takes effect immediately."""
+    flag, _ = FeatureFlag.objects.update_or_create(
+        key=FLAG_KEY, defaults={'enabled': False},
+    )
+    assert is_sword_search_enabled() is False
+
+    FeatureFlagAdmin(FeatureFlag, AdminSite()).delete_queryset(
+        MagicMock(), FeatureFlag.objects.filter(pk=flag.pk),
+    )
+    assert is_sword_search_enabled() is True
+
+
+@pytest.mark.django_db
 @patch('bible.services.providers.get_default_sword_client')
 def test_disabled_flag_blocks_sword_grouped_search(
     mock_get_sword, client

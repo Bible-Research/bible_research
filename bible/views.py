@@ -695,7 +695,9 @@ class BibleSearchView(APIView):
     request with ``cursor=<value>`` to resume) and ``progress``
     (``{chapters_scanned, chapters_total}``). The field is
     absent once the scan completes; a malformed or out-of-range
-    cursor returns 400 ``invalid_parameter``. SWORD search is
+    cursor — or one minted for a different
+    (fileset, books, query) scan — returns 400
+    ``invalid_parameter``. SWORD search is
     also gated by the ``sword_search`` feature flag — when
     disabled the endpoint returns 403 ``search_disabled``
     (other providers are unaffected).
