@@ -267,17 +267,25 @@ at the next GAE deploy.
   read-only agent investigation works there exactly like on
   `defaultdb`. For a writable remote dev DB, repoint
   `config.yaml`'s `default` at `stagingdb`/`staging_rw`
-  (password from the staging deploy's DOTENV — ask the
-  user).
+  (password from the staging deploy's `DATABASE_URL` — ask
+  the user).
 - Non-production backend deployments (e.g. a Vercel staging
   env whose config arrives via the `DOTENV` variable) set
   `DATABASE_URL` to `stagingdb` — never `defaultdb`. The
   shared `env-file` secret carries prod's `defaultdb` URL,
   so a staging deploy must supply `DATABASE_URL` explicitly
-  (a real env var wins over the DOTENV-carried value).
-  `DB_SSL_CERT` is the same
-  Aiven CA PEM in every environment. See DEVELOPER_GUIDE
-  "Environment Variables".
+  — inside its own DOTENV payload or as a real env var
+  (env vars win over DOTENV-carried values). `DB_SSL_CERT`
+  is the same Aiven CA PEM in every environment. See
+  DEVELOPER_GUIDE "Environment Variables".
+- `stagingdb` was seeded from `defaultdb` (2026-11-16): prod
+  schema via `pg_dump --schema-only`, all `bible_verse`
+  rows, `django_migrations`/content types/auth permissions,
+  and the `Tester5`/`Daniels` accounts with their tokens,
+  tags, notes, comments and reading positions — prod ids
+  and password hashes preserved, so the same logins work
+  on staging. Other prod users were NOT copied; reseed by
+  re-running the same pg_dump/COPY procedure.
 
 ## Models / IDs
 
@@ -441,7 +449,8 @@ Universal rules — follow exactly:
   `python scripts/create_test_user.py` if a local DB lacks
   them (pytest's in-memory DB makes its own). The shared UI
   test account is `Tester5` / `password123` (workspace
-  AGENTS.md).
+  AGENTS.md); `Tester5` and `Daniels` also exist on
+  `stagingdb` with their prod data (see "Databases").
 - **OpenSpec lives at the workspace root** — never run
   `openspec init` in this repo; cross-repo contracts are
   spec'd there (workspace AGENTS.md, "OpenSpec").
