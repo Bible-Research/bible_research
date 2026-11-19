@@ -573,7 +573,12 @@ Universal rules — follow exactly:
   import);
   `scripts/vercel_build.sh` additionally applies migrations
   (refuses non-`stagingdb` `DATABASE_STAGING_URL`s) so
-  `stagingdb`'s schema tracks `staging`. Runtime config
+  `stagingdb`'s schema tracks `staging`.
+  `vercel.json`'s `outputDirectory` is `staticfiles`
+  (`STATIC_ROOT`'s parent) — required because a custom
+  Build Command leaves Vercel expecting the `public`
+  static-output dir; serving `staticfiles/` puts collected
+  assets on `/static/` via the CDN. Runtime config
   arrives via the project's `DOTENV` env var (Preview scope —
   required, or settings raise `FileNotFoundError`) with
   `DATABASE_STAGING_URL` → `stagingdb`, never `defaultdb`
