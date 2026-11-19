@@ -913,9 +913,13 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
 - `page`: Result page number (default 1)
 - `sort_by`: Sort field (DBT only — forwarded on every paged
   and grouped upstream call)
-- `books`: Comma-separated USFM book IDs (e.g. `JHN,ROM`);
-  honored for DBT and SWORD only — the ESV API has no book
-  filter
+- `books`: Comma-separated USFM book IDs (e.g. `JHN,ROM`),
+  intersected with the 66-book canon — ids outside it are
+  dropped, and a filter with no canonical survivors returns
+  the provider-shaped empty result (paginated or grouped)
+  with no upstream call and no error. Honored for DBT and
+  SWORD only — the ESV and API.Bible search APIs have no
+  book filter
 - `group_by`: Set to `book` to return every match grouped by
   book instead of a paginated list
 
@@ -950,6 +954,18 @@ filesets the local scan stops once enough matches fill the
 requested page; `meta.truncated: true` then marks
 `total`/`total_pages` as lower bounds — keep paging while it
 is set.
+
+Only the 66-book Protestant canon is ever emitted: DBT search
+sends `books=` upstream on every call — the request filter
+intersected with the canon, or the full sorted 66-id list — so
+provider-reported totals count canonical matches only, and
+normalized rows are post-filtered on the DBT and API.Bible
+paths (rows for deuterocanonical books like `TOB` are
+removed, never returned; ESV/SWORD emit canon only by
+construction). API.Bible has no upstream book filter, so on a
+hypothetical deuterocanon bible its `total` could overcount
+the rows actually returned — registered bibles are NIV-only
+today.
 
 **Grouped mode** (`group_by=book`) fetches all matches and
 returns them bucketed per book in canonical order. Verses
@@ -1872,11 +1888,15 @@ read failure degrades like a miss, never a 502).
 
 **Worklist**: `GET /bibles/filesets/{fileset_id}` — the
 fileset's real chapter coverage (one row per chapter file,
-carrying the signed `path` MP3 URL and `duration`) — minus
-`timestamps_generated/` artifacts already present. A chapter
-where DBT suddenly serves timestamps is skipped (never spend
-STT budget where coverage exists); a *failed* DBT check means
-"proceed to generate".
+carrying the signed `path` MP3 URL and `duration`), restricted
+to the 66-book canon — minus `timestamps_generated/`
+artifacts already present. A chapter where DBT suddenly serves
+timestamps is skipped (never spend STT budget where coverage
+exists); a *failed* DBT check means "proceed to generate".
+Non-canonical rows (`book_id` outside `CANONICAL_BOOK_IDS`)
+are skipped too — a `--book TOB` filter yields an empty
+pending list rather than a run of guaranteed alignment
+failures.
 
 **Per chapter**: download the DBT MP3 → stage to `stt_staging/`
 → `long_running_recognize` (MP3 encoding inferred, no
@@ -2474,6 +2494,27 @@ export SECRET_KEY='your-secret-key'
 export DEBUG=False
 export DBT_KEY='your-dbt-api-key'
 export DATABASE_URL='postgresql://user:pass@host:5432/dbname'
+```
+
+**Staging database**: non-production deployments (e.g. a
+Vercel staging backend whose config arrives via the `DOTENV`
+variable) set `DATABASE_URL` to the `stagingdb` database on
+the same Aiven PostgreSQL instance — never `defaultdb`. The
+shared `env-file` secret carries prod's `defaultdb` URL, so
+a staging deploy must supply `DATABASE_URL` explicitly —
+inside its own DOTENV payload or as a real env var (env
+vars win over DOTENV-carried values). Connect as
+`staging_rw` (database owner, read/write); `ai_agent` has
+read-only access, matching local dev's posture.
+`DB_SSL_CERT` is the same Aiven CA PEM in every
+environment. `stagingdb` is seeded from production (prod
+schema, all `bible_verse` rows, and the `Tester5`/`Daniels`
+accounts with their notes/tags/comments/tokens — same ids
+and password hashes, so the same logins work). A staging
+`DATABASE_URL` looks like:
+
+```bash
+DATABASE_URL=postgres://staging_rw:<pw>@<host>:10104/stagingdb?sslmode=require
 ```
 
 ### Static Files

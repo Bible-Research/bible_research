@@ -69,6 +69,7 @@ from bible.services.search_grouping import (
     fetch_apibible_matches,
     fetch_dbt_matches,
     fetch_esv_matches,
+    filter_canonical_verses,
     group_verses_by_book,
     normalize_apibible_verse,
     normalize_dbt_verse,
@@ -82,6 +83,10 @@ from bible.services.sword.registry import (
     canonical_sword_fileset_id,
     get_sword_meta,
     is_sword_fileset,
+)
+from bible.utils.bible_books import (
+    CANONICAL_BOOK_IDS,
+    CANONICAL_BOOKS_PARAM,
 )
 from bible.utils.provider_errors import (
     PassageNotFoundError,
@@ -660,10 +665,14 @@ class ApiBibleProvider(Provider):
             offset=offset, limit=limit,
         )
         data = result.get('data') or {}
-        verses = [
+        # API.Bible has no upstream book filter — the canon
+        # restriction is post-fetch only, so on a
+        # (hypothetical) deuterocanonical bible the reported
+        # ``total`` could still count dropped apocrypha rows.
+        verses = filter_canonical_verses(
             normalize_apibible_verse(v)
             for v in data.get('verses') or []
-        ]
+        )
         total = data.get('total') or 0
         total_pages = (
             (total + limit - 1) // limit if limit else 1
@@ -1095,17 +1104,24 @@ class DbtProvider(Provider):
         return filesets
 
     def search(self, query, limit, page, sort_by=None, books=None):
+        # ``books=`` always goes upstream — the view's
+        # canon-intersected filter or the full 66-id list — so
+        # provider-reported totals count canonical matches only
+        # and deuterocanonical filesets produce no phantom
+        # pages. The post-filter drops any strays upstream let
+        # through anyway.
         result = get_default_dbt_client().search(
             self.fileset_id, query,
             limit=limit, page=page,
-            sort_by=sort_by, books=books,
+            sort_by=sort_by,
+            books=books or CANONICAL_BOOKS_PARAM,
         )
         raw_verses = result.get('verses') or {}
         verse_items = raw_verses.get('data') or []
-        normalized = [
+        normalized = filter_canonical_verses(
             normalize_dbt_verse(v)
             for v in verse_items
-        ]
+        )
         # Pagination lives in result['meta'] (documented schema)
         # or result['verses']['meta'] (observed b4.dbt.io
         # behaviour). Normalise to a clean { pagination: { ... } }
@@ -1268,6 +1284,16 @@ def get_passage_body(data):
     book_name = data.get('book_name', '')
     chapter = int(data.get('chapter'))
     fileset_id = data.get('fileset_id')
+    # A book outside the 66-book canon is a coverage miss even
+    # when the upstream fileset carries it (deuterocanonical
+    # DBT bibles). Unreachable via the public ``passage=``
+    # param — book names resolve through ``get_dbt_book_id`` —
+    # so this guards direct callers only; a missing ``book``
+    # lands here too (``''`` is non-canonical).
+    if (book_id or '').upper() not in CANONICAL_BOOK_IDS:
+        return _book_not_in_fileset_body(
+            book_id, book_name, chapter, fileset_id
+        )
     # Optional verse selection (e.g. 'John 3:16-18'). Providers
     # that support narrowing get min/max as a hint to limit how
     # much they fetch upstream.

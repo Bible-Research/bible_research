@@ -2,7 +2,11 @@
 
 import pytest
 
-from bible.utils.bible_books import get_dbt_book_id
+from bible.utils.bible_books import (
+    CANONICAL_BOOK_IDS,
+    CANONICAL_BOOKS_PARAM,
+    get_dbt_book_id,
+)
 
 
 @pytest.mark.parametrize('name, expected', [
@@ -122,3 +126,26 @@ def test_osis_abbreviations(name, expected):
 ])
 def test_unresolvable_names_return_none(name):
     assert get_dbt_book_id(name) is None
+
+
+def test_canonical_book_ids_is_the_66_book_canon():
+    """``CANONICAL_BOOK_IDS`` is the 66-book USFM canon —
+    the single set every enforcement point reads."""
+    assert isinstance(CANONICAL_BOOK_IDS, frozenset)
+    assert len(CANONICAL_BOOK_IDS) == 66
+    assert 'GEN' in CANONICAL_BOOK_IDS
+    assert 'JHN' in CANONICAL_BOOK_IDS
+    assert '1JN' in CANONICAL_BOOK_IDS
+    # Deuterocanonical USFM ids stay outside the canon even
+    # though upstream filesets may carry them.
+    for apocryphal in ('TOB', 'WIS', 'SIR', '1MA', '2MA'):
+        assert apocryphal not in CANONICAL_BOOK_IDS
+
+
+def test_canonical_books_param_serializes_the_canon():
+    """``CANONICAL_BOOKS_PARAM`` is the sorted comma-separated
+    form DBT search calls send upstream."""
+    ids = CANONICAL_BOOKS_PARAM.split(',')
+    assert len(ids) == 66
+    assert set(ids) == CANONICAL_BOOK_IDS
+    assert ids == sorted(ids)

@@ -289,6 +289,52 @@ def test_max_chapters_caps_the_worklist():
     assert "generated=1" in text
 
 
+def test_noncanonical_book_rows_leave_the_worklist():
+    """A fileset whose upstream coverage includes
+    deuterocanonical chapters (TOB) skips them entirely —
+    apocryphal chapters would burn STT spend and always fail
+    alignment (the SWORD reference has no such books)."""
+    rows = _ROWS + [
+        {
+            "book_id": "TOB",
+            "chapter_start": 1,
+            "path": "https://x/tob1.mp3",
+            "duration": 100,
+            "filesize_in_bytes": 800000,
+        },
+    ]
+    text, m = _run(
+        ["--fileset-ids", "LATLVRN1DA", "--dry-run"],
+        dbt=_fake_dbt(rows=rows),
+    )
+    # Three upstream rows, but only the two canonical JHN
+    # chapters make the worklist.
+    assert "total=2" in text
+    assert "pending=2" in text
+
+
+def test_book_filter_on_noncanonical_book_yields_empty_list():
+    """``--book TOB`` now yields an empty pending list — the
+    book is outside the served canon."""
+    rows = _ROWS + [
+        {
+            "book_id": "TOB",
+            "chapter_start": 1,
+            "path": "https://x/tob1.mp3",
+            "duration": 100,
+            "filesize_in_bytes": 800000,
+        },
+    ]
+    text, m = _run(
+        [
+            "--fileset-ids", "LATLVRN1DA",
+            "--book", "TOB", "--dry-run",
+        ],
+        dbt=_fake_dbt(rows=rows),
+    )
+    assert "pending=0" in text
+
+
 def test_book_filter_selects_one_book():
     rows = _ROWS + [
         {

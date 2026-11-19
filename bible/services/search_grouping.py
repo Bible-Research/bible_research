@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from bible.utils.bible_books import (
     BOOK_ORDER_MAP,
+    CANONICAL_BOOK_IDS,
+    CANONICAL_BOOKS_PARAM,
     get_book_name_from_id,
     get_dbt_book_id,
 )
@@ -65,6 +67,21 @@ def parse_esv_results(results):
             )
             continue
     return verses
+
+
+def filter_canonical_verses(verses):
+    """Drop normalized search rows outside the 66-book canon.
+
+    Belt-and-braces behind the upstream ``books=`` filter —
+    it covers providers that ignore ``books`` and providers
+    with no book filter at all (API.Bible). Rows are removed
+    outright, never nulled: the paginated path emits the list
+    verbatim, and a ``None`` row would surface as a hole.
+    """
+    return [
+        v for v in verses
+        if v.get('book_id') in CANONICAL_BOOK_IDS
+    ]
 
 
 def _int_or_none(value):
@@ -194,6 +211,11 @@ def fetch_dbt_matches(
 
     Returns ``(verses, total, truncated)``.
     """
+    # The canon restriction is pushed upstream — ``books=`` is
+    # always sent (the caller's filter intersected with the
+    # canon, or the full 66-id list) so provider-reported
+    # ``total`` counts canonical matches only.
+    books = books or CANONICAL_BOOKS_PARAM
     result = client.search(
         fileset_id, query,
         limit=MAX_RESULTS, sort_by=sort_by, books=books,
@@ -232,8 +254,14 @@ def fetch_dbt_matches(
     if len(items) > MAX_RESULTS:
         items = items[:MAX_RESULTS]
 
+    # Post-filter as a safety net: if upstream ignored
+    # ``books=``, apocryphal rows are dropped here (the
+    # provider ``total`` may then overcount — inflated totals
+    # are the accepted worst case, never leaked content).
     return (
-        [normalize_dbt_verse(v) for v in items],
+        filter_canonical_verses(
+            normalize_dbt_verse(v) for v in items
+        ),
         total,
         total > len(items),
     )
@@ -267,8 +295,15 @@ def fetch_apibible_matches(client, bible_id, query):
         offset += len(batch)
     if len(items) > MAX_RESULTS:
         items = items[:MAX_RESULTS]
+    # API.Bible has no upstream book filter, so canon
+    # enforcement is post-fetch only — a hypothetical
+    # deuterocanonical bible would drop rows here while
+    # ``total`` still counts them (registered bibles are
+    # NIV-only today, so this stays hypothetical).
     return (
-        [normalize_apibible_verse(v) for v in items],
+        filter_canonical_verses(
+            normalize_apibible_verse(v) for v in items
+        ),
         total,
         total > len(items),
     )

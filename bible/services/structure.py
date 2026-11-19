@@ -146,7 +146,7 @@ def _resolve_books(fileset_id):
     from bible.services import providers
 
     provider = providers.provider_for(fileset_id)
-    concrete = getattr(provider, 'inner', provider)
+    concrete = providers._concrete_provider(provider)
     try:
         rows = provider.get_structure()
     except NotImplementedError:

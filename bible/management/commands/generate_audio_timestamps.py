@@ -41,6 +41,7 @@ from bible.services.google_stt.client import (
 )
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
+from bible.utils.bible_books import CANONICAL_BOOK_IDS
 from bible.utils.provider_errors import (
     capture_internal_exception,
     capture_provider_exception,
@@ -196,6 +197,15 @@ class Command(BaseCommand):
             book_id = row.get("book_id")
             chapter = row.get("chapter_start")
             if not book_id or chapter is None:
+                continue
+            # A fileset may carry deuterocanonical chapters
+            # upstream — the served canon is 66 books, and the
+            # SWORD reference text has no such books, so every
+            # apocryphal chapter would fail alignment while
+            # still burning STT spend. Skip them here; it also
+            # means ``--book TOB`` yields an empty pending
+            # list rather than a run of guaranteed failures.
+            if str(book_id).upper() not in CANONICAL_BOOK_IDS:
                 continue
             try:
                 chapter = int(chapter)
