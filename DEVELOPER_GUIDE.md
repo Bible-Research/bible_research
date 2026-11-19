@@ -2373,9 +2373,11 @@ REST transport is plain HTTPS through `requests`, which
 honours `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`. Chapter-mode
 entries (`audio_chapter/` suspects) additionally hit the
 lazy v1beta1 client for SSML marks — seed
-`tts_mod._default._beta_client` the same way
-(`texttospeech_v1beta1.TextToSpeechClient` with its own
-REST transport) before `call_command`.
+`tts_mod._default._beta_client` the same way, importing
+`transports` from
+`google.cloud.texttospeech_v1beta1.services.text_to_speech`
+and wrapping it in
+`texttospeech_v1beta1.TextToSpeechClient`.
 
 Engine scope: only the Google TTS modes (`audio/`,
 `audio_chapter/`) regenerate today; `audio_gemini/` and
