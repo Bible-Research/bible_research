@@ -565,8 +565,11 @@ Universal rules — follow exactly:
   `vercel.json`'s `git.deploymentEnabled` allows `staging`
   only, so `main` and feature-branch pushes never build (prod
   stays GAE-only). Vercel's Django preset auto-detects
-  `manage.py` → `WSGI_APPLICATION`, installs
-  `requirements.txt`, and runs collectstatic itself;
+  `manage.py` → `WSGI_APPLICATION` and runs collectstatic
+  itself; `scripts/vercel_install.sh` is the Install
+  Command, pinning `uv pip install` to Python 3.12 (the
+  preset's installer ignores `.python-version` and resolves
+  cp314 wheels the 3.12 runtime cannot import);
   `scripts/vercel_build.sh` additionally applies migrations
   (refuses non-`stagingdb` `DATABASE_URL`s) so `stagingdb`'s
   schema tracks `staging`. Runtime config arrives via the
