@@ -6,6 +6,7 @@ from rest_framework.test import APIClient
 
 from bible.services.apibible.registry import get_apibible_meta
 from bible.services.search_grouping import (
+    encode_scan_cursor,
     group_verses_by_book,
     scan_sword_matches,
 )
@@ -859,6 +860,10 @@ def test_sword_grouped_search(
     assert groups[1]['count'] == 1
     assert response.json()['data']['meta'] == {
         'total': 2, 'truncated': False,
+        'progress': {
+            'chapters_scanned': 2,
+            'chapters_total': 2,
+        },
     }
 
 
@@ -1279,7 +1284,16 @@ def test_sword_grouped_search_honors_max_results(
 
     assert response.status_code == status.HTTP_200_OK
     data = response.json()['data']
-    assert data['meta'] == {'total': 3, 'truncated': True}
+    assert data['meta'] == {
+        'total': 3, 'truncated': True,
+        'progress': {
+            'chapters_scanned': 3,
+            'chapters_total': 5,
+        },
+    }
+    # A max_matches stop is terminal truncation — not a
+    # resumable window, or clients could page past the cap.
+    assert 'next_cursor' not in data['meta']
     assert mock_sword.get_chapter_verses.call_count == 3
     total_in_groups = sum(g['count'] for g in data['groups'])
     assert total_in_groups == 3
@@ -1299,13 +1313,14 @@ def test_scan_sword_matches_skips_coverage_misses():
         [{'verse_start': 1, 'verse_text': 'love'}],
     ]
 
-    matches, truncated = scan_sword_matches(
+    matches, truncated, next_index = scan_sword_matches(
         client, 'LVSGLU8', 'love', None
     )
 
     assert len(matches) == 1
     assert matches[0]['chapter'] == 3
     assert truncated is False
+    assert next_index is None
 
 
 def test_scan_sword_matches_logs_unexpected_errors():
@@ -1326,12 +1341,13 @@ def test_scan_sword_matches_logs_unexpected_errors():
     with patch(
         'bible.services.search_grouping.logger'
     ) as mock_logger:
-        matches, truncated = scan_sword_matches(
+        matches, truncated, next_index = scan_sword_matches(
             client, 'LVSGLU8', 'love', None
         )
 
     assert len(matches) == 1
     assert truncated is False
+    assert next_index is None
     mock_logger.exception.assert_called_once()
 
 
@@ -1553,6 +1569,222 @@ def test_apibible_grouped_search_truncates_at_max(
     assert meta['total'] == 10
     assert meta['truncated'] is True
     assert mock_get_client.return_value.search.call_count == 1
+
+
+# --- resumable SWORD grouped search (cursor + budget) ---------
+
+
+def test_scan_sword_matches_deadline_returns_next_index():
+    """``deadline_s=0`` expires the budget after the first
+    chapter: ``next_index`` points at the first unscanned
+    chapter and only the first chapter's matches come back."""
+    client = MagicMock()
+    client.list_chapters.return_value = [
+        ('GEN', 1), ('GEN', 2), ('GEN', 3)
+    ]
+    client.get_chapter_verses.return_value = [
+        {'verse_start': 1, 'verse_text': 'love'}
+    ]
+
+    matches, truncated, next_index = scan_sword_matches(
+        client, 'LVSGLU8', 'love', None, deadline_s=0,
+    )
+
+    assert next_index == 1
+    assert truncated is True
+    assert [m['chapter'] for m in matches] == [1]
+
+
+def test_scan_sword_matches_start_index_resumes():
+    """``start_index`` skips earlier chapters: window 2 sees
+    only the chapters window 1 never reached."""
+    client = MagicMock()
+    client.list_chapters.return_value = [
+        ('GEN', 1), ('GEN', 2)
+    ]
+    client.get_chapter_verses.return_value = [
+        {'verse_start': 1, 'verse_text': 'love'}
+    ]
+
+    matches, truncated, next_index = scan_sword_matches(
+        client, 'LVSGLU8', 'love', None, start_index=1,
+    )
+
+    assert next_index is None
+    assert truncated is False
+    assert [m['chapter'] for m in matches] == [2]
+    assert client.get_chapter_verses.call_count == 1
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=True)
+@patch('bible.services.providers.get_default_sword_client')
+def test_sword_grouped_search_windows_merge_to_full_scan(
+    mock_get_sword, mock_is_sword, client
+):
+    """A grouped SWORD scan under a zero budget paginates
+    through ``meta.next_cursor``: windows are disjoint and
+    their union equals one uninterrupted scan."""
+    mock_sword = mock_get_sword.return_value
+    mock_sword.list_chapters.return_value = [
+        ('GEN', ch) for ch in range(1, 4)
+    ]
+    verses_by_chapter = {
+        1: [{'verse_start': 1, 'verse_text': 'love one'}],
+        2: [{'verse_start': 2, 'verse_text': 'love two'}],
+        3: [{'verse_start': 3, 'verse_text': 'love three'}],
+    }
+    mock_sword.get_chapter_verses.side_effect = (
+        lambda _fid, _book, ch: verses_by_chapter[ch]
+    )
+
+    seen_chapters = []
+    cursor = None
+    calls = 0
+    while True:
+        params = {
+            'query': 'love',
+            'fileset_id': 'LVSGLU8',
+            'group_by': 'book',
+        }
+        if cursor:
+            params['cursor'] = cursor
+        with patch(
+            'bible.services.providers.'
+            'SEARCH_SCAN_BUDGET_SECONDS', 0,
+        ):
+            response = client.get(SEARCH_URL, params)
+        calls += 1
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()['data']
+        for group in data['groups']:
+            seen_chapters.extend(
+                v['chapter'] for v in group['verses']
+            )
+        meta = data['meta']
+        assert meta['progress']['chapters_total'] == 3
+        cursor = meta.get('next_cursor')
+        if cursor is None:
+            assert 'next_cursor' not in meta
+            assert meta['progress']['chapters_scanned'] == 3
+            break
+
+    # One chapter scanned per zero-budget window.
+    assert calls == 3
+    assert seen_chapters == [1, 2, 3]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    'cursor',
+    ['!!!', 'hello world', 'a' * 65],
+    ids=['charset', 'spaces', 'overlong'],
+)
+def test_invalid_cursor_charset_rejected(client, cursor):
+    """A cursor outside the base64url charset fails the view's
+    shape check → 400 invalid_parameter, before any provider
+    call."""
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'LVSGLU8',
+        'group_by': 'book',
+        'cursor': cursor,
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()['error_code'] == 'invalid_parameter'
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=True)
+@patch('bible.services.providers.get_default_sword_client')
+def test_undecodable_cursor_rejected(
+    mock_get_sword, mock_is_sword, client
+):
+    """A base64url-shaped cursor that does not decode into a
+    scan position → 400 invalid_parameter from the provider
+    layer (not a 502)."""
+    mock_get_sword.return_value.list_chapters.return_value = [
+        ('GEN', 1)
+    ]
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'LVSGLU8',
+        'group_by': 'book',
+        # 'hello' — decodes cleanly but is not a
+        # 'v2:<ctx>:<index>' token. (Unpadded 'aGVsbG8' would
+        # fail base64 padding before ever reaching this check.)
+        'cursor': 'aGVsbG8=',
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()['error_code'] == 'invalid_parameter'
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=True)
+@patch('bible.services.providers.get_default_sword_client')
+def test_out_of_range_cursor_rejected(
+    mock_get_sword, mock_is_sword, client
+):
+    """A well-formed cursor pointing past the end of the
+    worklist is fabricated or stale → 400 invalid_parameter."""
+    mock_get_sword.return_value.list_chapters.return_value = [
+        ('GEN', 1)
+    ]
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'LVSGLU8',
+        'group_by': 'book',
+        'cursor': encode_scan_cursor(9, 'LVSGLU8', None, 'love'),
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()['error_code'] == 'invalid_parameter'
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=True)
+@patch('bible.services.providers.get_default_sword_client')
+def test_cursor_for_different_scan_rejected(
+    mock_get_sword, mock_is_sword, client
+):
+    """A well-formed, in-range cursor minted under a different
+    (fileset, books, query) context must not resume — its index
+    addresses a different worklist window → 400."""
+    mock_get_sword.return_value.list_chapters.return_value = [
+        ('GEN', 1), ('GEN', 2), ('MAT', 1),
+    ]
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'LVSGLU8',
+        'group_by': 'book',
+        'books': 'MAT',
+        # Minted for books=GEN on the same fileset+query.
+        'cursor': encode_scan_cursor(
+            1, 'LVSGLU8', 'GEN', 'love'
+        ),
+    })
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()['error_code'] == 'invalid_parameter'
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
+def test_dbt_grouped_search_ignores_cursor(
+    mock_get_client, mock_is_sword, client
+):
+    """Non-SWORD providers accept-and-ignore ``cursor`` — it is
+    meaningless for providers without a resumable scan."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {'data': []},
+        'meta': {'pagination': {'total': 0}},
+    }
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'group_by': 'book',
+        'cursor': 'aGVsbG8',
+    })
+    assert response.status_code == status.HTTP_200_OK
 
 
 # --- 66-book canon enforcement (book-canon) ---------------------------

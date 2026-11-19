@@ -1077,7 +1077,7 @@ class ScanSwordMatchesCaptureTests(TestCase):
 
         client.get_chapter_verses.side_effect = verses
 
-        matches, truncated = scan_sword_matches(
+        matches, truncated, _ = scan_sword_matches(
             client, 'LVSGLU8', 'beginning', 'GEN',
         )
 
@@ -1108,7 +1108,7 @@ class ScanSwordMatchesCaptureTests(TestCase):
             'missing data file'
         )
 
-        matches, truncated = scan_sword_matches(
+        matches, truncated, _ = scan_sword_matches(
             client, 'LVSGLU8', 'beginning', 'GEN',
         )
 
