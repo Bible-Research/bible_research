@@ -53,7 +53,9 @@ venv/bin/python manage.py translate_notes --tag TAGxxxxx  # run
 - `DOTENV` injects `DATABASE_URL` (prod `defaultdb`, writable
   app user), `DB_SSL_CERT`, `NOTE_TARGET_LANGUAGES`,
   `TASKS_INVOKER_SA_EMAIL`. Real env vars win over DOTENV
-  values.
+  values — ensure no `DATABASE_LOCAL_URL`/`DATABASE_READ_URL`
+  is set in your shell, or the local-resolution chain
+  silently redirects the "against prod" run elsewhere.
 - Cloud Translation auth = your user ADC
   (`gcloud auth application-default login` once). The appspot
   SA's `cloudtranslate.user` role is not needed locally — your
@@ -109,7 +111,8 @@ venv/bin/python manage.py check_note_translations
 ## Kill switch and config
 
 All settings resolve via the `_audio_settings_source` chain
-(env > `DOTENV`/`env-file` > `config.yaml`):
+(`DOTENV`/`DOTENV_PATH` payload > local `.env` >
+legacy `config.yaml`):
 
 - `NOTE_TARGET_LANGUAGES` (default `["en","lv"]`) — empty =
   pipeline off. Prod value lives in `env-file` as `en,lv`.

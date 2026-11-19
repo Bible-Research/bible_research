@@ -2,9 +2,11 @@
 # SCHEDULER RESOURCES — CURRENTLY DISABLED
 # ============================================================================
 # ``daily-edge-audio`` below was DISABLED on 2026-10-31 per user
-# request — it was the only scheduled trigger of ``all-jobs`` (Edge
-# read-aloud TTS, lv-LV-EveritaNeural, artifacts under
-# ``audio_edge/``). To re-enable: uncomment the resource and
+# request — it was the only scheduled trigger of ``all-jobs`` at
+# the time (Edge read-aloud TTS, lv-LV-EveritaNeural, artifacts
+# under ``audio_edge/``); ``note-translations-audit`` in
+# note_translations.tf is now the one live scheduler.
+# To re-enable: uncomment the resource and
 # outputs.tf output, then `terraform apply`.
 #
 # It must not be a plain trigger: the JOBS table in
@@ -12,7 +14,7 @@
 # monthly ``dom:3`` ``generate_chapter_audio`` entry (Google Cloud
 # TTS spend, intentionally left unscheduled), so a bare ``jobs:run``
 # call would still fire it on the 3rd of each month. The http_target
-# body therefore passes ``overrides.containerOverrides`` — the job
+# body would pass ``overrides.containerOverrides`` — the job
 # container's command is ``python manage.py run_all_jobs`` and the
 # override supplies ``args`` = ``["--only",
 # "generate_edge_audio"]``, restricting the pass to that single
@@ -46,7 +48,7 @@ resource "google_service_account_iam_member" "cloudscheduler_token_creator" {
   ])
 }
 
-# run.invoker grants run.jobs.run only — the trigger passes
+# run.invoker grants run.jobs.run only — the trigger would pass
 # containerOverrides (--only <job>), which additionally requires
 # run.jobs.runWithOverrides, present in run.developer (verified
 # against the live PERMISSION_DENIED on 2026-10-31).
@@ -107,9 +109,9 @@ resource "google_cloud_run_v2_job_iam_member" "all_jobs_scheduler_invoker" {
 #   ]
 # }
 #
-# # ============================================================================
-# # END-OF-MONTH STT TIMESTAMPS TRIGGER — ENABLED
-# # ============================================================================
+# # ===========================================================================
+# # END-OF-MONTH STT TIMESTAMPS TRIGGER — DISABLED
+# # ===========================================================================
 # # Runs the ``generate_audio_timestamps`` sub-job on the last day of
 # # each month so the STT free tier (60 min/mo, resetting on the 1st)
 # # is spent just before it expires. Cloud Scheduler cron cannot
@@ -120,11 +122,14 @@ resource "google_cloud_run_v2_job_iam_member" "all_jobs_scheduler_invoker" {
 # # No container overrides — deliberately a bare ``jobs:run``, because
 # # ``--only`` bypasses the schedule predicate and would run the job
 # # on the 28th regardless. On days 28-31 nothing else in JOBS can
-# # match (dom:3 is out of range; the Gemini/Edge entries are
-# # ``manual``). CAUTION: a future JOBS entry whose schedule matches
+# # match except ``check_note_translations`` (same
+# # ``last_day_of_month`` predicate — would double-fire on the
+# # real last day alongside its own live trigger in
+# # note_translations.tf); dom:3 is out of range and the
+# # Gemini/Edge entries are ``manual``. CAUTION: a future JOBS
+# # entry whose schedule matches
 # # any of 28-31 (e.g. ``daily``) would also run under this trigger —
 # # review the JOBS table when adding entries.
-# # ============================================================================
 # resource "google_cloud_scheduler_job" "eom_stt_timestamps" {
 #   name             = "eom-stt-timestamps"
 #   description      = "Last-day-of-month STT timestamps sub-job of all-jobs."
