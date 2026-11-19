@@ -258,7 +258,6 @@ def run_translation_task(note_id, source_hash):
         locked = Note.objects.select_for_update().get(pk=note_id)
         if hash_note_text(locked.note_text) != source_hash:
             return OUTCOME_NOOP
-        update_fields = []
         if detected:
             locked.source_language = detected
             locked.save(update_fields=['source_language'])
