@@ -580,15 +580,16 @@ Universal rules — follow exactly:
   the main checkout; remove the worktree + branch once the PR
   merges green. Full workflow: workspace `../AGENTS.md`
   "Repo-specific rules".
-- `terraform/scheduler.tf`: the *monthly* Google TTS Cloud
-  Scheduler stays intentionally commented out — do NOT enable it.
-  The `daily-edge-audio` job IS enabled: it triggers `all-jobs`
-  daily with a `jobs:run` container-args override of `--only
-  generate_edge_audio`, so the monthly `dom:3` entry cannot
-  piggyback on the trigger. The `eom-stt-timestamps` job IS also
-  enabled: it fires a plain `jobs:run` on days 28-31 and the
-  `last_day_of_month` predicate gates it to the real last day —
-  a future `daily` JOBS entry would ALSO run on 28-31 via this
+- `terraform/scheduler.tf`: ALL Cloud Scheduler jobs are
+  currently commented out (per user request, 2026-10-31) — do
+  NOT re-enable without asking. `daily-edge-audio` would
+  trigger `all-jobs` daily with a `jobs:run` container-args
+  override of `--only generate_edge_audio`; that override
+  exists so the monthly `dom:3` entry cannot piggyback on the
+  trigger. `eom-stt-timestamps` would fire a plain
+  `jobs:run` on days 28-31 — the `last_day_of_month`
+  predicate gates it to the real last day, so a future
+  `daily` JOBS entry would ALSO run on 28-31 under that
   trigger (review JOBS when adding entries).
 - `terraform/all_jobs.tf`: the single `all-jobs` Cloud Run Job
   replaced the per-task `audio-generator` job (it reuses that SA and

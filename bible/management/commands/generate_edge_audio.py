@@ -17,7 +17,8 @@ Mirrors ``generate_gemini_audio``'s dual-mode shape:
 
 There is no API key and no formal quota — the run is bounded by
 ``--max-chapters``/``--max-minutes`` so it always finishes inside
-the Cloud Run Job's timeout; the daily scheduler re-triggers it
+the Cloud Run Job's timeout; the daily scheduler (currently
+commented out in ``terraform/scheduler.tf``) re-triggers it
 until the listing shows every chapter done. ``--until-done``
 removes both caps so a single local invocation drains the whole
 pending worklist (standalone boxes only — ignored in GCS mode

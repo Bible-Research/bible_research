@@ -255,24 +255,20 @@ bible_research/
 
 4. **Configure the application**
    ```bash
-   cp config_template.yaml config.yaml
+   cp .env.example .env
    ```
    
-   Edit `config.yaml` with your settings:
-   ```yaml
-   DATABASES:
-     default:
-       ENGINE: django.db.backends.postgresql
-       NAME: bibledb
-       USER: db_user
-       PASSWORD: your_password
-       HOST: localhost
-       PORT: 5432
-   
-   DEBUG: true
-   SECRET_KEY: 'your-secret-key'
-   DBT_KEY: 'your-dbt-api-key'
+   Edit `.env` with your settings:
+   ```bash
+   DATABASE_URL=postgres://db_user:your_password@localhost:5432/bibledb
+   DEBUG=True
+   SECRET_KEY=your-secret-key
+   DBT_KEY=your-dbt-api-key
    ```
+   
+   `DATABASE_URL` defaults to the bundled `db.sqlite3` when
+   unset. The legacy `config.yaml` is still honored when no
+   `.env` exists — see `config_template.yaml`.
 
 5. **Run migrations**
    ```bash
@@ -1966,11 +1962,11 @@ monthly STT timestamps pass, started by the
 `jobs:run` on days 28-31 — cron can't express "last day", so
 the predicate gates it), plus `generate_gemini_audio` and
 `generate_edge_audio` on `manual`
-(the Edge entry is started daily by the `daily-edge-audio`
+(the Edge entry was started daily by the `daily-edge-audio`
 Cloud Scheduler job via a `jobs:run` container-args override
-of `--only generate_edge_audio` — see
-`terraform/scheduler.tf`; `manual` keeps an unfiltered trigger
-from starting either). `all-jobs` replaced the standalone
+of `--only generate_edge_audio` — the job is commented out in
+`terraform/scheduler.tf` since 2026-10-31; `manual` keeps an
+unfiltered trigger from starting either). `all-jobs` replaced the standalone
 `audio-generator` Cloud Run Job; it reuses that job's runtime
 service account (still named `audio-generator`) and its
 `audio-generator` Artifact Registry image repo. The deploy
@@ -2158,10 +2154,12 @@ Differences from the Gemini pipeline:
   multi-minute `NoAudioReceived` throttle bursts (~30% of
   requests failed at 3×2 s retry in the first live run).
 - **Scheduling**: `terraform/scheduler.tf` `daily-edge-audio`
-  fires `all-jobs` daily at 09:00 UTC with container args
-  `--only generate_edge_audio`; the unscheduled monthly
-  `dom:3` Google TTS entry can never piggyback (it needs a
-  plain run on day 3, which no trigger performs).
+  is commented out (disabled since 2026-10-31); when
+  re-enabled it fires `all-jobs` daily at 09:00 UTC with
+  container args `--only generate_edge_audio`; the
+  unscheduled monthly `dom:3` Google TTS entry can never
+  piggyback (it needs a plain run on day 3, which no trigger
+  performs).
 
 #### Standalone full-Bible run (Linux)
 
@@ -2174,14 +2172,16 @@ cloud run stays inside the Job timeout. On a fresh Ubuntu/Debian checkout:
 
 ```bash
 sudo apt install -y python3-venv python3-pip
-git clone https://github.com/Bible-Research/bible_research.git
+# `-b staging` until the flag lands on main.
+git clone -b staging \
+    https://github.com/Bible-Research/bible_research.git
 cd bible_research
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 # Django settings hard-fail without a config file; the
-# placeholders in the template are enough — the edge path
+# placeholders in .env.example are enough — the edge path
 # touches no DB, API key or cloud service.
-cp config_template.yaml config.yaml
+cp .env.example .env
 python manage.py generate_edge_audio --until-done
 ```
 
