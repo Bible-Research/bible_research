@@ -255,24 +255,20 @@ bible_research/
 
 4. **Configure the application**
    ```bash
-   cp config_template.yaml config.yaml
+   cp .env.example .env
    ```
    
-   Edit `config.yaml` with your settings:
-   ```yaml
-   DATABASES:
-     default:
-       ENGINE: django.db.backends.postgresql
-       NAME: bibledb
-       USER: db_user
-       PASSWORD: your_password
-       HOST: localhost
-       PORT: 5432
-   
-   DEBUG: true
-   SECRET_KEY: 'your-secret-key'
-   DBT_KEY: 'your-dbt-api-key'
+   Edit `.env` with your settings:
+   ```bash
+   DATABASE_URL=postgres://db_user:your_password@localhost:5432/bibledb
+   DEBUG=True
+   SECRET_KEY=your-secret-key
+   DBT_KEY=your-dbt-api-key
    ```
+   
+   `DATABASE_URL` defaults to the bundled `db.sqlite3` when
+   unset. The legacy `config.yaml` is still honored when no
+   `.env` exists — see `config_template.yaml`.
 
 5. **Run migrations**
    ```bash
@@ -1864,8 +1860,9 @@ verses = client.get_verses(
 **Base URL**: `https://api.scripture.api.bible/v1`
 
 **Authentication**: `api-key` header (never a query param);
-read from `settings.API_BIBLE_KEY` (`config.yaml` locally,
-Secret Manager / env in prod). `ApiBibleClient` raises
+read from `settings.API_BIBLE_KEY` (`.env` locally — legacy
+`config.yaml` also works — Secret Manager / env in prod).
+`ApiBibleClient` raises
 `ValueError` at construction when the key is unset — the NIV
 filesets degrade to `provider_error` responses until a key is
 configured.
@@ -1961,16 +1958,20 @@ failures. `--only LABEL` runs one entry ignoring its schedule,
 It currently lists `generate_chapter_audio` on `dom:3` (the
 monthly audio pass, which has no scheduler trigger),
 `generate_audio_timestamps` on `last_day_of_month` (the
-monthly STT timestamps pass, started by the
+monthly STT timestamps pass, was started by the
 `eom-stt-timestamps` Cloud Scheduler job firing a plain
-`jobs:run` on days 28-31 — cron can't express "last day", so
-the predicate gates it), plus `generate_gemini_audio` and
-`generate_edge_audio` on `manual`
-(the Edge entry is started daily by the `daily-edge-audio`
+`jobs:run` on days 28-31 — that trigger is commented out
+too; cron can't express "last day", so the predicate gates
+it), plus `generate_gemini_audio`,
+`generate_edge_audio` and `repair_audio_files` on `manual`,
+and `check_note_translations` on `last_day_of_month` (the
+only entry with a live trigger —
+`note-translations-audit` in `terraform/note_translations.tf`)
+(the Edge entry was started daily by the `daily-edge-audio`
 Cloud Scheduler job via a `jobs:run` container-args override
-of `--only generate_edge_audio` — see
-`terraform/scheduler.tf`; `manual` keeps an unfiltered trigger
-from starting either). `all-jobs` replaced the standalone
+of `--only generate_edge_audio` — the job is commented out in
+`terraform/scheduler.tf` since 2026-10-31; `manual` keeps an
+unfiltered trigger from starting either). `all-jobs` replaced the standalone
 `audio-generator` Cloud Run Job; it reuses that job's runtime
 service account (still named `audio-generator`) and its
 `audio-generator` Artifact Registry image repo. The deploy
@@ -2014,10 +2015,10 @@ read failure degrades like a miss, never a 502).
 > score ~0.9+. The unblock is a licensed LVR/NLI text source
 > (check api.scripture.api.bible — `ApiBibleClient` has no
 > list-bibles method yet — or another licensor). Until then
-> the `eom-stt-timestamps` scheduler keeps generating
-> low-confidence artifacts; delete `timestamps_generated/`
-> objects and re-run once a matching reference text is
-> registered in `timestamps_registry.py`.
+> nothing is generated anyway (`eom-stt-timestamps` is
+> commented out); delete `timestamps_generated/` objects and
+> re-run — or re-enable the scheduler — once a matching
+> reference text is registered in `timestamps_registry.py`.
 
 **Worklist**: `GET /bibles/filesets/{fileset_id}` — the
 fileset's real chapter coverage (one row per chapter file,
@@ -2093,7 +2094,8 @@ Cloud TTS. It has two modes:
   reruns exit early (`already_completed`), and an all-failed run
   is left `running` rather than recorded as success.
 
-- **Auth**: `GEMINI_API_KEY` in `config.yaml` (gitignored) or in
+- **Auth**: `GEMINI_API_KEY` in `.env` (gitignored; legacy
+  `config.yaml` also works) or in
   the GCP `env-file` secret (the `all-jobs` container injects it
   via `DOTENV`) — a single string or a list of keys (one per
   free-tier GCP project; a .env value is comma-separated),
@@ -2120,7 +2122,8 @@ Cloud TTS. It has two modes:
   boundary (Gemini TTS has no SSML-mark timepoints). MP3 encoding
   uses `lameenc` (no ffmpeg).
 - **Scheduling**: `manual` only — the Gemini entry is no
-  longer the daily trigger's target (Edge is, see below). It
+  longer the daily trigger's target (Edge would be, see
+  below). It
   can still be run on demand via `gcloud run jobs execute
   all-jobs --overrides` with `--only generate_gemini_audio`.
 
@@ -2158,10 +2161,12 @@ Differences from the Gemini pipeline:
   multi-minute `NoAudioReceived` throttle bursts (~30% of
   requests failed at 3×2 s retry in the first live run).
 - **Scheduling**: `terraform/scheduler.tf` `daily-edge-audio`
-  fires `all-jobs` daily at 09:00 UTC with container args
-  `--only generate_edge_audio`; the unscheduled monthly
-  `dom:3` Google TTS entry can never piggyback (it needs a
-  plain run on day 3, which no trigger performs).
+  is commented out (disabled since 2026-10-31); when
+  re-enabled it fires `all-jobs` daily at 09:00 UTC with
+  container args `--only generate_edge_audio`; the
+  unscheduled monthly `dom:3` Google TTS entry can never
+  piggyback (it needs a plain run on day 3, which no trigger
+  performs).
 
 #### Standalone full-Bible run (Linux)
 
@@ -2174,14 +2179,16 @@ cloud run stays inside the Job timeout. On a fresh Ubuntu/Debian checkout:
 
 ```bash
 sudo apt install -y python3-venv python3-pip
-git clone https://github.com/Bible-Research/bible_research.git
+# `-b staging` until the flag lands on main.
+git clone -b staging \
+    https://github.com/Bible-Research/bible_research.git
 cd bible_research
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 # Django settings hard-fail without a config file; the
-# placeholders in the template are enough — the edge path
+# placeholders in .env.example are enough — the edge path
 # touches no DB, API key or cloud service.
-cp config_template.yaml config.yaml
+cp .env.example .env
 python manage.py generate_edge_audio --until-done
 ```
 
@@ -2312,8 +2319,9 @@ source venv/bin/activate
 # Dev-only decoder for --deep (miniaudio):
 pip install -r requirements-dev.txt
 
-# Django settings — local config.yaml (gitignored) already
-# points at prod; GCS access needs Application Default
+# Django settings — this checkout's .env resolves a remote
+# DB via the DATABASE_*_URL chain (stagingdb, writable);
+# GCS access needs Application Default
 # Credentials, and on this network the Netskope CA bundle:
 gcloud auth application-default login      # once
 export SSL_CERT_FILE=/tmp/combined-ca.pem  # see AGENTS.md
@@ -2470,7 +2478,7 @@ translation).
   ONE Sentry `capture_message` when per-language misses
   exist, logs-only on a clean run.
 
-**Settings** (config.yaml / .env, via
+**Settings** (`.env` / legacy `config.yaml`, via
 `_audio_settings_source`): `NOTE_TARGET_LANGUAGES`,
 `NOTE_TRANSLATION_ENGINE` (`google-nmt` default; future
 `google-llm`/`gemini-*` map to v3 models),
@@ -2616,8 +2624,9 @@ Error monitoring via Sentry is wired but opt-in: when
 `SENTRY_DSN` is empty the SDK stays uninitialized and nothing is
 sent (local dev and CI are silent by default).
 
-- **Local**: set `SENTRY_DSN` in `config.yaml` (see
-  `config_template.yaml`) to the `bible-research-api` project's
+- **Local**: set `SENTRY_DSN` in `.env` (see `.env.example`;
+  legacy `config.yaml`/`config_template.yaml` also works) to
+  the `bible-research-api` project's
   Client Key DSN.
 - **Production (GAE + Cloud Run jobs)**: `SENTRY_DSN` is an
   entry inside the shared `env-file` GCP Secret Manager secret —
@@ -2626,7 +2635,8 @@ sent (local dev and CI are silent by default).
   grep SENTRY_DSN`; the env var of the same name also works.
   Release is `SENTRY_RELEASE` when set, else `GAE_VERSION`
   (Cloud Run jobs set neither → release-less events);
-  environment is `production` on GCP, `development` otherwise.
+  environment is `production` on GCP, `staging` on Vercel
+  previews, `development` otherwise.
 
 **Event streams** — the alert queue is
 `is:unresolved level:error environment:production`:
@@ -2685,8 +2695,9 @@ overrides only the test-required deltas (SQLite in-memory
 database, dummy provider keys, generous throttle rates), so
 tests exercise the production `REST_FRAMEWORK`
 authentication/permission stack and `MIDDLEWARE` chain.
-`config.yaml` is not required: under pytest, `settings.py`
-treats a missing config file as empty instead of raising.
+Neither `.env` nor `config.yaml` is required: under pytest,
+`settings.py` treats a missing config file as empty instead
+of raising.
 
 ```bash
 python -m pytest -q                # full suite
@@ -2736,7 +2747,8 @@ curl http://localhost:8000/api/v1/notes/ \
 
 ### Environment Variables
 
-For production, use environment variables instead of `config.yaml`:
+For any environment, prefer `.env`/environment variables
+over `config.yaml`:
 
 ```bash
 export SECRET_KEY='your-secret-key'
@@ -2761,7 +2773,9 @@ environment uses.
 **Staging database**: `stagingdb` lives on the same Aiven
 PostgreSQL instance as `defaultdb`. Connect as
 `staging_rw` (database owner, read/write); `ai_agent` has
-read-only access, matching local dev's posture.
+read-only access — matching the `.env`'s `DATABASE_READ_URL`
+alternate (local dev currently resolves
+`DATABASE_LOCAL_URL` = `stagingdb`/`avnadmin`, writable).
 `DB_SSL_CERT` is the same Aiven CA PEM in every
 environment. `stagingdb` is seeded from production (prod
 schema, all `bible_verse` rows, and the `Tester5`/`Daniels`
@@ -2827,7 +2841,10 @@ python manage.py collectstatic --noinput
 
 Backups are automated by `db_backups/local_db_backup.sh`, which
 reads the connection details from `config.yaml`
-(`DATABASES.default`) and runs `pg_dump` over TCP. No local
+(`DATABASES.default`) — the LEGACY file, literally, not
+`.env`: keep a `config.yaml` populated if you use this
+script (or port it to `.env`). It runs `pg_dump` over TCP.
+No local
 PostgreSQL server or role is needed — only the client tools.
 
 **Ubuntu/Debian setup** (first time only):
@@ -2848,8 +2865,8 @@ This writes a timestamped custom-format dump to
 `db_backups/backup_<YYYYMMDD_HHMMSS>.dump`.
 
 **Restore**: the dumps are custom format, so use `pg_restore`
-(not `psql`). The configured DB user is read-only, so restores
-target a local PostgreSQL instance:
+(not `psql`). Restores target a local PostgreSQL instance
+regardless of which user `.env`/`config.yaml` carries:
 
 ```bash
 # Install and start a local server (first time only)
@@ -2865,8 +2882,8 @@ pg_restore -d bibledb --clean --if-exists \
   db_backups/backup_20251228_055249.dump
 ```
 
-To run the app against the restored copy, repoint `config.yaml`'s
-`DATABASES.default` at the local database.
+To run the app against the restored copy, repoint `.env`'s
+`DATABASE_LOCAL_URL` at the local database.
 
 ### Production Checklist
 
