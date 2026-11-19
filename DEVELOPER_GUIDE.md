@@ -2755,27 +2755,34 @@ export DBT_KEY='your-dbt-api-key'
 export DATABASE_URL='postgresql://user:pass@host:5432/dbname'
 ```
 
-**Staging database**: non-production deployments (e.g. a
-Vercel staging backend whose config arrives via the `DOTENV`
-variable) set `DATABASE_URL` to the `stagingdb` database on
-the same Aiven PostgreSQL instance — never `defaultdb`. The
-shared `env-file` secret carries prod's `defaultdb` URL, so
-a staging deploy must supply `DATABASE_URL` explicitly —
-inside its own DOTENV payload or as a real env var (env
-vars win over DOTENV-carried values). Connect as
+**Database URL selection**: `settings.py`
+(`_database_url_for_environment`) pins the URL per
+environment — Vercel preview deployments (the staging
+backend) require `DATABASE_STAGING_URL`; GCP and Vercel
+production use `DATABASE_URL`; local dev falls back through
+`DATABASE_LOCAL_URL` → `DATABASE_READ_URL` (read-only user)
+→ `DATABASE_URL`. Deployed envs never fall back to prod —
+a Vercel preview without `DATABASE_STAGING_URL` raises
+`ImproperlyConfigured` rather than touching `defaultdb`.
+All of them may ride in the same shared `.env`/`DOTENV`
+payload; the env vars just name which database each
+environment uses.
+
+**Staging database**: `stagingdb` lives on the same Aiven
+PostgreSQL instance as `defaultdb`. Connect as
 `staging_rw` (database owner, read/write); `ai_agent` has
 read-only access — matching the `.env`'s `DATABASE_READ_URL`
-alternate, though the live `DATABASE_URL` is `avnadmin`
-(writable) today.
+alternate (local dev currently resolves
+`DATABASE_LOCAL_URL` = `stagingdb`/`avnadmin`, writable).
 `DB_SSL_CERT` is the same Aiven CA PEM in every
 environment. `stagingdb` is seeded from production (prod
 schema, all `bible_verse` rows, and the `Tester5`/`Daniels`
 accounts with their notes/tags/comments/tokens — same ids
 and password hashes, so the same logins work). A staging
-`DATABASE_URL` looks like:
+`DATABASE_STAGING_URL` looks like:
 
 ```bash
-DATABASE_URL=postgres://staging_rw:<pw>@<host>:10104/stagingdb?sslmode=require
+DATABASE_STAGING_URL=postgres://staging_rw:<pw>@<host>/stagingdb
 ```
 
 **Vercel staging backend**: the `bible-research-api` Vercel
@@ -2798,7 +2805,8 @@ The project must define a **`DOTENV`** environment variable
 ```bash
 SECRET_KEY=<django-secret>
 DEBUG=False
-DATABASE_URL=postgres://staging_rw:<pw>@<host>:10104/stagingdb?sslmode=require
+DATABASE_URL=postgres://avnadmin:<pw>@<host>/defaultdb
+DATABASE_STAGING_URL=postgres://staging_rw:<pw>@<host>/stagingdb
 DB_SSL_CERT=<Aiven CA PEM, single line with \n escapes>
 DBT_KEY=<…>
 ESV_KEY=<…>
@@ -2807,10 +2815,10 @@ API_BIBLE_KEY=<…>
 
 Optionally add `SENTRY_DSN=<…>` to report staging errors to
 the `bible-research-api` Sentry project — events carry
-`environment:staging` on Vercel previews. To silence the
-note-translation pipeline (it runs inline outside GCP and has
-no Google credentials on Vercel, so every note write stamps
-`failed` rows), set `NOTE_TARGET_LANGUAGES=` empty.
+`environment:staging` on Vercel previews. The note-translation
+pipeline is force-disabled on Vercel (`VERCEL` set →
+`settings.NOTE_TARGET_LANGUAGES = []`) — serverless has no
+Google credentials, so writes would stamp `failed` rows.
 
 Serverless functions have no GCP credentials, so GCS-backed
 features (generated audio, image attachments) cannot work on
@@ -2868,7 +2876,7 @@ pg_restore -d bibledb --clean --if-exists \
 ```
 
 To run the app against the restored copy, repoint `.env`'s
-`DATABASE_URL` at the local database.
+`DATABASE_LOCAL_URL` at the local database.
 
 ### Production Checklist
 

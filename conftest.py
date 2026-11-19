@@ -8,7 +8,7 @@ hand-rolled parallel settings), so tests see the production
 requires are overridden:
 
 - ``DATABASES`` → SQLite in-memory (the configured local DB —
-  `.env` `DATABASE_URL` — is a writable production user and
+  `.env`'s resolved `DATABASE_*_URL` — may be writable and
   must never receive test writes).
 - Provider keys/secrets → dummy test values (tests mock the
   provider clients; the keys only need to exist).

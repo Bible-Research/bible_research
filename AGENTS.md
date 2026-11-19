@@ -10,9 +10,9 @@ Cross-repo contracts are spec'd in the workspace-level `openspec/`
 Django 6.1 + Django REST Framework API serving a Bible reading/study
 app (`reactive-bible` frontend). Deployed on Google App Engine at
 `https://bible-research-489314.ey.r.appspot.com`; PostgreSQL in prod.
-Local dev's `.env` `DATABASE_URL` points at prod (see
-Databases — currently the writable `avnadmin`, not the
-read-only `ai_agent`); tests run on SQLite.
+Local dev's `.env` resolves `DATABASE_LOCAL_URL` first —
+currently writable `stagingdb`/`avnadmin` (see Databases);
+tests run on SQLite.
 
 ## Layout
 
@@ -306,19 +306,18 @@ resolves an issue at the next GAE deploy.
 
 ## Databases
 
-- Local `.env` `DATABASE_URL` connects to the **production**
-  Aiven PostgreSQL (`defaultdb`) — currently as `avnadmin`
-  (**writable**, not the read-only `ai_agent` the `.env`'s
-  `DATABASE_READ_URL` alternate carries), so `manage.py
-  runserver` and `manage.py shell` operate on live production
-  data WITH write access. The `.env` also carries
-  `DATABASE_LOCAL_URL` and `DATABASE_STAGING_URL` (both
-  writable `stagingdb`/`avnadmin`) plus `DATABASE_READ_URL`
-  (read-only prod `ai_agent`) — but those siblings are NOT
-  auto-selected: `_db_config_from_env()` reads only
-  `DATABASE_URL`, so switching means editing that one line.
-- Writes and DDL now SUCCEED — treat every local session as
-  prod-capable; never attempt them deliberately. Read-only
+- Local `.env` resolves per
+  `_database_url_for_environment()`'s local chain:
+  `DATABASE_LOCAL_URL` → `DATABASE_READ_URL` →
+  `DATABASE_URL`. Today `DATABASE_LOCAL_URL` points at
+  **`stagingdb`** as `avnadmin` (**writable**), so
+  `manage.py runserver` and `manage.py shell` operate on
+  live STAGING data with write access. The read-only prod
+  `ai_agent` sits in `DATABASE_READ_URL`; reaching prod
+  `defaultdb` means clearing LOCAL+READ so `DATABASE_URL`
+  applies — a deliberate opt-in.
+- Writes and DDL SUCCEED — treat every local session as
+  writable; never attempt them deliberately. Read-only
   investigation remains the expectation: ORM reads work
   as usual, and raw SQL via:
 
@@ -334,29 +333,28 @@ resolves an issue at the next GAE deploy.
   "Database Backups") needs `pg_dump` matching the server major:
   Aiven runs PG16 but PATH's `pg_dump` is v14 and aborts. Run with
   `export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"` first.
-- For a writable local database, repoint `.env`'s
-  `DATABASE_URL` to `sqlite:///db.sqlite3` (a `db.sqlite3`
-  file already exists in the repo root — or comment the URL
-  out entirely and settings falls back to it).
+- For a fully local database, set `.env`'s
+  `DATABASE_LOCAL_URL` to `sqlite:///db.sqlite3` (a
+  `db.sqlite3` file already exists in the repo root).
 - Staging database `stagingdb` lives on the same Aiven
   instance. `staging_rw` owns it (read/write + `CREATEDB`);
   its password is a deploy secret, never committed.
   `ai_agent` has `CONNECT` plus `SELECT` on
   `staging_rw`-created tables via default privileges, so
   read-only agent investigation works there exactly like on
-  `defaultdb`. For a writable remote dev DB, repoint `.env`'s
-  `DATABASE_URL` at `stagingdb`/`staging_rw`
-  (password from the staging deploy's `DATABASE_URL` — ask
-  the user).
-- Non-production backend deployments (e.g. a Vercel staging
-  env whose config arrives via the `DOTENV` variable) set
-  `DATABASE_URL` to `stagingdb` — never `defaultdb`. The
-  shared `env-file` secret carries prod's `defaultdb` URL,
-  so a staging deploy must supply `DATABASE_URL` explicitly
-  — inside its own DOTENV payload or as a real env var
-  (env vars win over DOTENV-carried values). `DB_SSL_CERT`
-  is the same Aiven CA PEM in every environment. See
-  DEVELOPER_GUIDE "Environment Variables".
+  `defaultdb`. For a writable remote dev DB, point `.env`'s
+  `DATABASE_LOCAL_URL` at `stagingdb`/`staging_rw`
+  (password from the staging deploy's `DATABASE_STAGING_URL`
+  — ask the user).
+- `settings.py` picks the DB URL per environment:
+  Vercel previews (staging backend) require
+  `DATABASE_STAGING_URL` → `stagingdb`, never `defaultdb`;
+  GCP and Vercel production use `DATABASE_URL`; local dev
+  falls back through `DATABASE_LOCAL_URL` →
+  `DATABASE_READ_URL` (read-only user) → `DATABASE_URL`, so
+  reaching prod from a dev shell is a deliberate opt-in.
+  `DB_SSL_CERT` is the same Aiven CA PEM in every
+  environment. See DEVELOPER_GUIDE "Environment Variables".
 - `stagingdb` was seeded from `defaultdb` (2026-11-16): prod
   schema via `pg_dump --schema-only`, all `bible_verse`
   rows, `django_migrations`/content types/auth permissions,
@@ -580,11 +578,12 @@ Universal rules — follow exactly:
   `manage.py` → `WSGI_APPLICATION`, installs
   `requirements.txt`, and runs collectstatic itself;
   `scripts/vercel_build.sh` additionally applies migrations
-  (refuses non-`stagingdb` `DATABASE_URL`s) so `stagingdb`'s
-  schema tracks `staging`. Runtime config arrives via the
-  project's `DOTENV` env var (Preview scope — required, or
-  settings raise `FileNotFoundError`) with `DATABASE_URL` →
-  `stagingdb`, never `defaultdb` (see "Databases"). Serverless
+  (refuses non-`stagingdb` `DATABASE_STAGING_URL`s) so
+  `stagingdb`'s schema tracks `staging`. Runtime config
+  arrives via the project's `DOTENV` env var (Preview scope —
+  required, or settings raise `FileNotFoundError`) with
+  `DATABASE_STAGING_URL` → `stagingdb`, never `defaultdb`
+  (see "Databases"). Serverless
   carries no GCP credentials, so GCS-backed features
   (generated audio, image attachments) are unavailable there.
 - All implementation work happens in a git worktree

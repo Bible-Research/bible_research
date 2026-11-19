@@ -16,6 +16,7 @@ from pathlib import Path
 
 import dj_database_url
 from corsheaders.defaults import default_headers
+from django.core.exceptions import ImproperlyConfigured
 
 from .utils import (
     PROFILES_SAMPLE_RATE,
@@ -219,15 +220,62 @@ def _write_ca_pem(pem_source):
         f.write(pem_content)
 
 
+def _database_url_for_environment():
+    """Pick the database URL for the current environment.
+
+    Deployed environments are pinned: Vercel previews (the
+    staging backend) require ``DATABASE_STAGING_URL``, and GCP
+    or Vercel production use ``DATABASE_URL``. Local dev falls
+    back through ``DATABASE_LOCAL_URL`` (a fully-local or
+    writable dev DB), ``DATABASE_READ_URL`` (a read-only user),
+    and finally ``DATABASE_URL`` — so reaching prod stays a
+    deliberate opt-in, not the default.
+    """
+    vercel_env = os.environ.get('VERCEL_ENV')
+    if vercel_env == 'preview':
+        url = os.environ.get('DATABASE_STAGING_URL')
+        if not url:
+            raise ImproperlyConfigured(
+                'DATABASE_STAGING_URL is required on Vercel '
+                'preview deployments (the staging backend).'
+            )
+        return url
+    if os.environ.get('VERCEL') and vercel_env not in (
+        'production', 'development'
+    ):
+        # Any other VERCEL_ENV on a real deployment must not
+        # fall through to the local chain and land on prod.
+        # `vercel dev` sets VERCEL_ENV=development and counts
+        # as local.
+        raise ImproperlyConfigured(
+            f'Unrecognized VERCEL_ENV={vercel_env!r} on a '
+            'Vercel deployment; refusing to pick a database.'
+        )
+    if vercel_env == 'production' or IS_GCP_ENVIRONMENT:
+        url = os.environ.get('DATABASE_URL')
+        if vercel_env == 'production' and not url:
+            raise ImproperlyConfigured(
+                'DATABASE_URL is required on Vercel production '
+                'deployments.'
+            )
+        return url
+    return (
+        os.environ.get('DATABASE_LOCAL_URL')
+        or os.environ.get('DATABASE_READ_URL')
+        or os.environ.get('DATABASE_URL')
+    )
+
+
 def _db_config_from_env():
     """Build the Django ``default`` database dict from env vars.
 
-    ``DATABASE_URL`` wins; discrete ``DB_*`` parts are the next
-    fallback; local SQLite is the last resort. A CA PEM provided via
-    ``DB_SSL_CERT`` (or its ``capem`` alias) is written to CA_PEM_PATH
-    and wired up as sslmode=require + sslrootcert.
+    The URL comes from ``_database_url_for_environment``;
+    discrete ``DB_*`` parts are the next fallback; local SQLite
+    is the last resort. A CA PEM provided via ``DB_SSL_CERT``
+    (or its ``capem`` alias) is written to CA_PEM_PATH and wired
+    up as sslmode=require + sslrootcert.
     """
-    database_url = os.environ.get('DATABASE_URL')
+    database_url = _database_url_for_environment()
     if database_url:
         db_config = dj_database_url.parse(database_url)
     elif os.environ.get('DB_NAME'):
@@ -324,7 +372,7 @@ else:
         _audio_settings_source = config
 
 # Tests always run on a local throwaway sqlite DB: the configured
-# connection is a user against production that must never create
+# connection may point at a live database that must never create
 # or write to the test database.
 if 'test' in sys.argv:
     DATABASES = {
@@ -485,6 +533,10 @@ if isinstance(NOTE_TARGET_LANGUAGES, str):
         for s in NOTE_TARGET_LANGUAGES.split(',')
         if s.strip()
     ]
+if os.environ.get('VERCEL'):
+    # Vercel serverless has no Google credentials — Cloud
+    # Translation/Tasks calls would 500 on every note write.
+    NOTE_TARGET_LANGUAGES = []
 # Engine provenance stamped on every NoteTranslation row; the
 # v3 general/nmt model is the MVP default ('google-llm' /
 # 'gemini-…' are future config flips, not code changes).
