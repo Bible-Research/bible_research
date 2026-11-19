@@ -219,3 +219,28 @@ class PassageProviderHTTPTests(TestCase):
         client.get_verses.assert_called_once_with(
             'JHN', 3, bible_id='ENGESV'
         )
+
+    @patch('bible.services.providers.provider_for')
+    def test_noncanonical_book_id_404s_before_dispatch(
+        self, mock_provider_for
+    ):
+        """A direct ``get_passage_body`` call with a
+        deuterocanonical book id returns the
+        ``book_not_in_fileset`` body without dispatching to a
+        provider — the public ``passage=`` param cannot
+        produce one (book names resolve through
+        ``get_dbt_book_id``), so this guards direct callers."""
+        from bible.services.providers import get_passage_body
+
+        body = get_passage_body({
+            'book': 'TOB',
+            'book_name': 'Tobit',
+            'chapter': 1,
+            'fileset_id': 'ENGESV',
+        })
+
+        self.assertEqual(
+            body['error_code'], 'book_not_in_fileset'
+        )
+        self.assertEqual(body['book'], 'TOB')
+        mock_provider_for.assert_not_called()

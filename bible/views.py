@@ -10,7 +10,10 @@ from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
-from bible.utils.bible_books import get_dbt_book_id
+from bible.utils.bible_books import (
+    CANONICAL_BOOK_IDS,
+    get_dbt_book_id,
+)
 from bible.utils.edge_cache import (
     EDGE_CACHE_CATALOG_DIRECTIVE,
     EDGE_CACHE_STATIC_DIRECTIVE,
@@ -739,12 +742,33 @@ class BibleSearchView(APIView):
                 "books must be comma-separated 3-letter "
                 "book ids (e.g. JHN,ROM)."
             )
+        if books:
+            # Intersect with the 66-book canon: the validator
+            # only checks charset (``TOB`` is well-formed
+            # USFM), so a non-canonical id reads like a
+            # coverage miss — an empty result set, not a 400.
+            # An empty intersection becomes '' and
+            # short-circuits below without a provider call.
+            books = ','.join(sorted({
+                t for t in (
+                    token.strip().upper()
+                    for token in books.split(',')
+                )
+                if t in CANONICAL_BOOK_IDS
+            }))
+        else:
+            books = None
 
         try:
             # Provider dispatch lives in the facade — grouped
             # mode skips pagination parsing entirely (``page``
             # is meaningless there).
             if group_by == 'book':
+                if books == '':
+                    return Response({'data': {
+                        'groups': [],
+                        'meta': {'total': 0, 'truncated': False},
+                    }})
                 payload = provider_for(
                     fileset_id
                 ).search_grouped(
@@ -775,6 +799,25 @@ class BibleSearchView(APIView):
                 return bad_request(
                     "limit and page must be positive integers."
                 )
+
+            # Empty canon intersection — same coverage-miss
+            # short-circuit as grouped mode, shaped like a
+            # provider's empty page (``truncated`` mirrors the
+            # SWORD paginated shape).
+            if books == '':
+                return Response({'data': {
+                    'verses': [],
+                    'meta': {
+                        'pagination': {
+                            'total': 0,
+                            'count': 0,
+                            'per_page': limit,
+                            'current_page': page,
+                            'total_pages': 0,
+                        },
+                        'truncated': False,
+                    },
+                }})
 
             # Each provider returns the normalized
             # ``{verses, meta}`` payload.
