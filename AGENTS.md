@@ -26,7 +26,9 @@ tests run on SQLite.
 - `bible_research/` — settings, urls, authentication.
 - `terraform/` — GCP infra (the `all-jobs` Cloud Run job, storage;
   see note below).
-- `config.yaml` — local secrets (gitignored). Tests do NOT need it.
+- `.env` — local secrets (gitignored; the legacy
+  `config.yaml` is still honored when no `.env` exists).
+  Tests need neither.
 
 All API routes live under `/api/v1/` (see `bible_research/urls.py`).
 
@@ -303,7 +305,7 @@ resolves an issue at the next GAE deploy.
 
 ## Databases
 
-- Local `config.yaml` `DATABASES.default` connects to the
+- Local `.env` `DATABASE_URL` connects to the
   **production** Aiven PostgreSQL (`defaultdb`) as `ai_agent`, a
   **read-only** user — `manage.py runserver` and `manage.py shell`
   operate on live production data.
@@ -581,8 +583,8 @@ Universal rules — follow exactly:
   merges green. Full workflow: workspace `../AGENTS.md`
   "Repo-specific rules".
 - `terraform/scheduler.tf`: ALL Cloud Scheduler jobs are
-  currently commented out (per user request, 2026-10-31) — do
-  NOT re-enable without asking. `daily-edge-audio` would
+  currently commented out (`daily-edge-audio` per user
+  request, 2026-10-31) — do NOT re-enable without asking. `daily-edge-audio` would
   trigger `all-jobs` daily with a `jobs:run` container-args
   override of `--only generate_edge_audio`; that override
   exists so the monthly `dom:3` entry cannot piggyback on the
@@ -597,8 +599,9 @@ Universal rules — follow exactly:
   listed in the `JOBS` table of
   `bible/management/commands/run_all_jobs.py` —
   `generate_chapter_audio` (`dom:3`, unscheduled),
-  `generate_audio_timestamps` (`last_day_of_month`, started by
-  the `eom-stt-timestamps` scheduler — spends the month's STT
+  `generate_audio_timestamps` (`last_day_of_month`, would be
+  started by the commented-out `eom-stt-timestamps` scheduler —
+  spends the month's STT
   free minutes before they reset on the 1st; NOTE: output is
   currently LOW quality — GLU8 is only a proxy reference text
   since DBT has no LVR/NLI text, so artifacts land at
@@ -606,8 +609,9 @@ Universal rules — follow exactly:
   a matching Latvian text is licensable — see
   DEVELOPER_GUIDE "Generated Timestamps"),
   `generate_gemini_audio` (`manual`), `generate_edge_audio`
-  (`manual`; started only by the daily scheduler's `--only`
-  override — the Everita voice) and `repair_audio_files`
+  (`manual`; would be started only by the commented-out
+  daily scheduler's `--only` override — the Everita voice)
+  and `repair_audio_files`
   (`manual`; manifest-driven artifact repair — see below).
   Generated artifacts land under
   `audio_gemini/` and `audio_edge/` in the audio bucket (GCS

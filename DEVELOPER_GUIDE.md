@@ -1860,8 +1860,9 @@ verses = client.get_verses(
 **Base URL**: `https://api.scripture.api.bible/v1`
 
 **Authentication**: `api-key` header (never a query param);
-read from `settings.API_BIBLE_KEY` (`config.yaml` locally,
-Secret Manager / env in prod). `ApiBibleClient` raises
+read from `settings.API_BIBLE_KEY` (`.env` locally — legacy
+`config.yaml` also works — Secret Manager / env in prod).
+`ApiBibleClient` raises
 `ValueError` at construction when the key is unset — the NIV
 filesets degrade to `provider_error` responses until a key is
 configured.
@@ -1957,10 +1958,11 @@ failures. `--only LABEL` runs one entry ignoring its schedule,
 It currently lists `generate_chapter_audio` on `dom:3` (the
 monthly audio pass, which has no scheduler trigger),
 `generate_audio_timestamps` on `last_day_of_month` (the
-monthly STT timestamps pass, started by the
+monthly STT timestamps pass, was started by the
 `eom-stt-timestamps` Cloud Scheduler job firing a plain
-`jobs:run` on days 28-31 — cron can't express "last day", so
-the predicate gates it), plus `generate_gemini_audio` and
+`jobs:run` on days 28-31 — that trigger is commented out
+too; cron can't express "last day", so the predicate gates
+it), plus `generate_gemini_audio` and
 `generate_edge_audio` on `manual`
 (the Edge entry was started daily by the `daily-edge-audio`
 Cloud Scheduler job via a `jobs:run` container-args override
@@ -2010,10 +2012,10 @@ read failure degrades like a miss, never a 502).
 > score ~0.9+. The unblock is a licensed LVR/NLI text source
 > (check api.scripture.api.bible — `ApiBibleClient` has no
 > list-bibles method yet — or another licensor). Until then
-> the `eom-stt-timestamps` scheduler keeps generating
-> low-confidence artifacts; delete `timestamps_generated/`
-> objects and re-run once a matching reference text is
-> registered in `timestamps_registry.py`.
+> nothing is generated anyway (`eom-stt-timestamps` is
+> commented out); delete `timestamps_generated/` objects and
+> re-run — or re-enable the scheduler — once a matching
+> reference text is registered in `timestamps_registry.py`.
 
 **Worklist**: `GET /bibles/filesets/{fileset_id}` — the
 fileset's real chapter coverage (one row per chapter file,
@@ -2089,7 +2091,8 @@ Cloud TTS. It has two modes:
   reruns exit early (`already_completed`), and an all-failed run
   is left `running` rather than recorded as success.
 
-- **Auth**: `GEMINI_API_KEY` in `config.yaml` (gitignored) or in
+- **Auth**: `GEMINI_API_KEY` in `.env` (gitignored; legacy
+  `config.yaml` also works) or in
   the GCP `env-file` secret (the `all-jobs` container injects it
   via `DOTENV`) — a single string or a list of keys (one per
   free-tier GCP project; a .env value is comma-separated),
@@ -2616,8 +2619,9 @@ Error monitoring via Sentry is wired but opt-in: when
 `SENTRY_DSN` is empty the SDK stays uninitialized and nothing is
 sent (local dev and CI are silent by default).
 
-- **Local**: set `SENTRY_DSN` in `config.yaml` (see
-  `config_template.yaml`) to the `bible-research-api` project's
+- **Local**: set `SENTRY_DSN` in `.env` (see `.env.example`;
+  legacy `config.yaml`/`config_template.yaml` also works) to
+  the `bible-research-api` project's
   Client Key DSN.
 - **Production (GAE + Cloud Run jobs)**: `SENTRY_DSN` is an
   entry inside the shared `env-file` GCP Secret Manager secret —
