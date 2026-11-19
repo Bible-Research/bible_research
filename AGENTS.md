@@ -336,8 +336,8 @@ resolves an issue at the next GAE deploy.
   read-only agent investigation works there exactly like on
   `defaultdb`. For a writable remote dev DB, repoint
   `config.yaml`'s `default` at `stagingdb`/`staging_rw`
-  (password from the staging deploy's `DATABASE_URL` — ask
-  the user).
+  (password from the staging deploy's `DATABASE_STAGING_URL`
+  — ask the user).
 - `settings.py` picks the DB URL per environment:
   Vercel previews (staging backend) require
   `DATABASE_STAGING_URL` → `stagingdb`, never `defaultdb`;

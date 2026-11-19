@@ -2726,7 +2726,7 @@ and password hashes, so the same logins work). A staging
 `DATABASE_STAGING_URL` looks like:
 
 ```bash
-DATABASE_STAGING_URL=postgres://staging_rw:<pw>@<host>:10104/stagingdb?sslmode=require
+DATABASE_STAGING_URL=postgres://staging_rw:<pw>@<host>/stagingdb
 ```
 
 **Vercel staging backend**: the `bible-research-api` Vercel
@@ -2749,8 +2749,8 @@ The project must define a **`DOTENV`** environment variable
 ```bash
 SECRET_KEY=<django-secret>
 DEBUG=False
-DATABASE_URL=postgres://avnadmin:<pw>@<host>:10104/defaultdb?sslmode=verify-full
-DATABASE_STAGING_URL=postgres://staging_rw:<pw>@<host>:10104/stagingdb?sslmode=require
+DATABASE_URL=postgres://avnadmin:<pw>@<host>/defaultdb
+DATABASE_STAGING_URL=postgres://staging_rw:<pw>@<host>/stagingdb
 DB_SSL_CERT=<Aiven CA PEM, single line with \n escapes>
 DBT_KEY=<…>
 ESV_KEY=<…>

@@ -22,16 +22,22 @@ fi
 # an empty real env var would otherwise shadow a valid
 # DOTENV-carried URL (load_dotenv uses setdefault).
 export DATABASE_STAGING_URL
-case "$DATABASE_STAGING_URL" in
-  */stagingdb | */stagingdb\?*)
-    python3 manage.py migrate --noinput
-    ;;
-  *)
-    echo "Refusing to migrate: DATABASE_STAGING_URL must" \
-      "name stagingdb on a preview deployment." >&2
-    exit 1
-    ;;
-esac
+if ! python3 -c '
+import os, sys
+import dj_database_url
+try:
+    name = dj_database_url.parse(
+        os.environ["DATABASE_STAGING_URL"]
+    )["NAME"]
+except Exception:
+    name = ""
+sys.exit(0 if name == "stagingdb" else 1)
+'; then
+  echo "Refusing to migrate: DATABASE_STAGING_URL must name" \
+    "stagingdb on a preview deployment." >&2
+  exit 1
+fi
+python3 manage.py migrate --noinput
 
 # The preset runs collectstatic automatically; running it here
 # too keeps static output populated even if a custom

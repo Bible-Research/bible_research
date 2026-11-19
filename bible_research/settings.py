@@ -240,8 +240,25 @@ def _database_url_for_environment():
                 'preview deployments (the staging backend).'
             )
         return url
+    if os.environ.get('VERCEL') and vercel_env not in (
+        'production', 'development'
+    ):
+        # Any other VERCEL_ENV on a real deployment must not
+        # fall through to the local chain and land on prod.
+        # `vercel dev` sets VERCEL_ENV=development and counts
+        # as local.
+        raise ImproperlyConfigured(
+            f'Unrecognized VERCEL_ENV={vercel_env!r} on a '
+            'Vercel deployment; refusing to pick a database.'
+        )
     if vercel_env == 'production' or IS_GCP_ENVIRONMENT:
-        return os.environ.get('DATABASE_URL')
+        url = os.environ.get('DATABASE_URL')
+        if vercel_env == 'production' and not url:
+            raise ImproperlyConfigured(
+                'DATABASE_URL is required on Vercel production '
+                'deployments.'
+            )
+        return url
     return (
         os.environ.get('DATABASE_LOCAL_URL')
         or os.environ.get('DATABASE_READ_URL')
