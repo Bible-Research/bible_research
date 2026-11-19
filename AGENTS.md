@@ -643,13 +643,19 @@ Universal rules — follow exactly:
   wiring.
 - `bible/management/commands/generate_gemini_audio.py` and
   `generate_edge_audio.py`: local mode (default) writes
-  `tts-out/` + `gemini-tts-state.json`; `--upload-gcs`
-  (auto-on when `CLOUD_RUN_JOB` is set) switches state +
-  artifacts to GCS. Gemini needs `GEMINI_API_KEY` in
-  `config.yaml` locally or the `env-file` secret on GCP —
-  normalized to `settings.GEMINI_API_KEYS`. The Edge command
-  is keyless (unofficial Microsoft endpoint, default voice
-  `lv-LV-EveritaNeural`, exact per-verse timestamps).
+  `tts-out/` + an engine-specific state file
+  (`gemini-tts-state.json` / `edge-tts-state.json`);
+  `--upload-gcs` (auto-on when `CLOUD_RUN_JOB` is set)
+  switches state + artifacts to GCS. Gemini needs
+  `GEMINI_API_KEY` in `config.yaml` locally or the
+  `env-file` secret on GCP — normalized to
+  `settings.GEMINI_API_KEYS`. The Edge command is keyless
+  (unofficial Microsoft endpoint, default voice
+  `lv-LV-EveritaNeural`, exact per-verse timestamps) and has
+  an unbounded local mode — `--until-done` ignores the
+  `--max-chapters`/`--max-minutes` caps so one invocation
+  drains the whole worklist on a standalone box (see
+  DEVELOPER_GUIDE "Standalone full-Bible run").
 - GCP secrets: never create a new Secret Manager secret — new
   credentials go in as appended KEY=VALUE lines on the shared
   `env-file` secret (each extra secret adds cost).
