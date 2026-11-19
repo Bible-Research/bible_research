@@ -25,6 +25,7 @@ from bible.utils.error_responses import (
     not_found,
 )
 from bible.utils.provider_errors import (
+    InvalidSearchCursorError,
     PassageNotFoundError,
     TimestampsNotGeneratedError,
     capture_internal_exception,
@@ -37,12 +38,17 @@ from bible.utils.request_params import (
     is_valid_book_name,
     is_valid_fileset_id,
     is_valid_language_iso,
+    is_valid_search_cursor,
+)
+from bible.services.feature_flags import (
+    is_sword_search_enabled,
 )
 from bible.services.providers import (
     get_passage_body,
     provider_for,
 )
 from bible.services.structure import get_structure
+from bible.services.sword.registry import is_sword_fileset
 from .serializers import BiblePassageSerializer
 from .services.translation_service import TranslationService
 from .services.dbt.client import get_default_dbt_client
@@ -655,6 +661,19 @@ class CopyrightView(VercelEdgeCacheMixin, APIView):
             ),
             required=False,
         ),
+        OpenApiParameter(
+            name='cursor',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Resume token for grouped SWORD searches. '
+                'When a scan cannot finish inside its time '
+                'budget the response carries '
+                'meta.next_cursor — resend the same request '
+                'with this value to continue scanning.'
+            ),
+            required=False,
+        ),
     ],
 )
 class BibleSearchView(APIView):
@@ -673,6 +692,19 @@ class BibleSearchView(APIView):
     ``book_id``/``count``/``verses`` groups in canonical book
     order) plus ``data.meta`` = ``{total, truncated}``.
 
+    SWORD grouped searches scan the local module under a
+    wall-clock budget: when a window cannot finish, ``meta``
+    additionally carries ``next_cursor`` (resend the same
+    request with ``cursor=<value>`` to resume) and ``progress``
+    (``{chapters_scanned, chapters_total}``). The field is
+    absent once the scan completes; a malformed or out-of-range
+    cursor — or one minted for a different
+    (fileset, books, query) scan — returns 400
+    ``invalid_parameter``. SWORD search is
+    also gated by the ``sword_search`` feature flag — when
+    disabled the endpoint returns 403 ``search_disabled``
+    (other providers are unaffected).
+
     Query Parameters:
         - query: Word/phrase to search (required)
         - fileset_id: DBT or SWORD fileset ID (required)
@@ -682,6 +714,7 @@ class BibleSearchView(APIView):
         - sort_by: Sort field (DBT only)
         - books: Comma-separated USFM book IDs
         - group_by: 'book' returns all matches grouped by book
+        - cursor: Resume token for grouped SWORD scans
 
     Examples:
         - ESV API search: ?query=love&fileset_id=ENGESV_API
@@ -759,6 +792,34 @@ class BibleSearchView(APIView):
         else:
             books = None
 
+        # ``cursor`` resumes a partial SWORD grouped scan — an
+        # opaque base64url token. Charset/shape is gated here;
+        # decode/range validation happens at the provider.
+        cursor = request.query_params.get('cursor')
+        if cursor and not is_valid_search_cursor(cursor):
+            return bad_request(
+                "cursor contains invalid characters."
+            )
+
+        # SWORD search is kill-switched by the ``sword_search``
+        # feature flag (runtime-toggleable via Django admin;
+        # a missing flag row means enabled). Gate before any
+        # provider dispatch — a disabled scan must not run.
+        if (
+            is_sword_fileset(fileset_id)
+            and not is_sword_search_enabled()
+        ):
+            return Response(
+                {
+                    'error': (
+                        'Search is disabled for this '
+                        'translation.'
+                    ),
+                    'error_code': 'search_disabled',
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         try:
             # Provider dispatch lives in the facade — grouped
             # mode skips pagination parsing entirely (``page``
@@ -772,7 +833,8 @@ class BibleSearchView(APIView):
                 payload = provider_for(
                     fileset_id
                 ).search_grouped(
-                    query, books, sort_by=sort_by
+                    query, books,
+                    sort_by=sort_by, cursor=cursor,
                 )
                 return Response({'data': payload})
 
@@ -826,6 +888,13 @@ class BibleSearchView(APIView):
                 sort_by=sort_by, books=books,
             )
             return Response({'data': payload})
+        except InvalidSearchCursorError:
+            # A malformed/out-of-range resume cursor is client
+            # input, not a provider failure — keep it out of
+            # the 502 mapping below.
+            return bad_request(
+                "cursor is not a valid resume token."
+            )
         except Exception as e:
             logger.exception(
                 "Error in BibleSearchView: %s", e

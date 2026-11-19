@@ -75,6 +75,26 @@ class SwordClientTests(TestCase):
         self.assertIn('JHN', by_book)
         self.assertEqual(len(by_book['JHN']), 21)
 
+    def test_decompressed_text_is_block_cached(self):
+        """zText blocks are cached per loaded bible: pysword
+        re-decompresses the same compressed block once per verse
+        (~35k decompressions on a whole-module scan), so
+        ``_load`` wraps it in an lru_cache. A single chapter
+        read must already show cache hits."""
+        from bible.services.sword.client import SwordClient
+
+        client = SwordClient()
+        _modules, bible = client._load('LVSGLU8')
+        cached = bible._decompressed_text
+        self.assertTrue(hasattr(cached, 'cache_info'))
+        cached.cache_clear()
+
+        client.get_chapter_verses('LVSGLU8', 'JHN', 3)
+
+        info = cached.cache_info()
+        # 36 verses share one compressed block: ~1 miss + hits.
+        self.assertGreater(info.hits, 0)
+
 
 class SwordAPITests(TestCase):
     def setUp(self):

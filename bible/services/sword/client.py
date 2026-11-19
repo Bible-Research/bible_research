@@ -1,5 +1,6 @@
 """Thin pysword wrapper exposing the slice of the DBT client API used
 by `BiblePassageSerializer`."""
+import functools
 import logging
 import threading
 from typing import Any, Dict, List, Tuple
@@ -58,6 +59,27 @@ class SwordClient:
             modules = SwordModules(str(zip_path))
             modules.parse_modules()
             bible = modules.get_bible_from_module(meta["module_name"])
+            # zText modules re-seek and re-decompress the same
+            # compressed chapter block once per verse — a whole-
+            # module scan pays ~35k decompressions for ~1,189
+            # blocks. Cache the last few blocks per loaded bible
+            # (a sequential scan only needs the current chapter's
+            # block); measured ~12x faster on a full scan.
+            decompress = getattr(bible, "_decompressed_text", None)
+            if decompress is not None:
+                bible._decompressed_text = functools.lru_cache(
+                    maxsize=8
+                )(decompress)
+            else:
+                # pysword renamed/dropped the hook — scans still
+                # work but lose the ~12x block-cache speedup;
+                # surface that instead of silently degrading.
+                logger.warning(
+                    "SWORD module %s has no _decompressed_text "
+                    "hook; chapter-block caching is off "
+                    "(pysword internals changed?).",
+                    meta["module_name"],
+                )
             self._cache[fileset_id] = (modules, bible)
             logger.info(
                 "Loaded SWORD module %s (%s) for fileset_id=%s",

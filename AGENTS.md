@@ -193,7 +193,11 @@ Provider failures surface as `error` + `error_code` fields built by
 `not_found` (missing passage, upstream 404, or
 `PassageNotFoundError`) → HTTP 404, `book_not_in_fileset`
 (every provider's "fileset lacks this book/chapter" coverage
-miss on the passage endpoint) → HTTP 404, anything else →
+miss on the passage endpoint) → HTTP 404, `search_disabled`
+(SWORD search rejected because the `sword_search` FeatureFlag
+row is disabled — a runtime kill switch toggled via Django
+admin, read-through-cached, missing row = enabled) → HTTP 403,
+anything else →
 `provider_error` → HTTP 502 (see `bible/views.py`). Note
 serialization degrades the same way — verse refs kept, `text`
 empty. Client-input 400/404s in `bible/views.py` are built by

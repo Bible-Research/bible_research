@@ -66,6 +66,9 @@ from bible.services.esv.registry import (
 from bible.services.google_tts.registry import get_tts_config
 from bible.services.search_grouping import (
     MAX_RESULTS,
+    SEARCH_SCAN_BUDGET_SECONDS,
+    decode_scan_cursor,
+    encode_scan_cursor,
     fetch_apibible_matches,
     fetch_dbt_matches,
     fetch_esv_matches,
@@ -75,6 +78,7 @@ from bible.services.search_grouping import (
     normalize_dbt_verse,
     parse_esv_results,
     scan_sword_matches,
+    sword_chapter_worklist,
 )
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
@@ -89,6 +93,7 @@ from bible.utils.bible_books import (
     CANONICAL_BOOKS_PARAM,
 )
 from bible.utils.provider_errors import (
+    InvalidSearchCursorError,
     PassageNotFoundError,
     TimestampsNotGeneratedError,
     capture_provider_exception,
@@ -193,12 +198,16 @@ class Provider:
         page of search results."""
         raise NotImplementedError
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         """Return ``{'groups': [...], 'meta': {...}}`` — every
         match grouped per book (``group_by=book`` mode).
 
         ``sort_by`` is provider-specific (DBT only); providers
-        without an upstream sort parameter ignore it."""
+        without an upstream sort parameter ignore it. ``cursor``
+        resumes a partial SWORD scan; providers without a
+        resumable scan accept and ignore it."""
         raise NotImplementedError
 
     def translation_listing(self, language_iso=None):
@@ -394,9 +403,11 @@ class _CachingProvider(Provider):
             query, limit, page, sort_by=sort_by, books=books
         )
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         return self._inner.search_grouped(
-            query, books=books, sort_by=sort_by
+            query, books=books, sort_by=sort_by, cursor=cursor
         )
 
     def translation_listing(self, language_iso=None):
@@ -479,7 +490,9 @@ class ESVProvider(Provider):
             'meta': {'pagination': pagination},
         }
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         verses, total, truncated = fetch_esv_matches(
             get_default_esv_client(), query
         )
@@ -624,7 +637,9 @@ class ApiBibleProvider(Provider):
             },
         }
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         verses, total, truncated = fetch_apibible_matches(
             get_default_apibible_client(),
             self._meta['bible_id'], query,
@@ -770,10 +785,11 @@ class SwordProvider(Provider):
         # the module to answer page 1 (S7/search #5). When the
         # cap stops the scan early, ``truncated`` marks ``total``
         # as a lower bound so callers keep paging.
-        matches, truncated = scan_sword_matches(
+        matches, truncated, _next_index = scan_sword_matches(
             get_default_sword_client(),
             self.fileset_id, query, books,
             max_matches=page * limit,
+            deadline_s=SEARCH_SCAN_BUDGET_SECONDS,
         )
         total = len(matches)
         start = (page - 1) * limit
@@ -795,21 +811,70 @@ class SwordProvider(Provider):
             },
         }
 
-    def search_grouped(self, query, books=None, sort_by=None):
-        # Grouped mode returns every match — cap it at the same
-        # MAX_RESULTS bound the other providers honor instead of
-        # scanning a whole-Bible result set into memory.
-        verses, truncated = scan_sword_matches(
-            get_default_sword_client(),
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
+        # Grouped mode returns every match — cap each window at
+        # the same MAX_RESULTS bound the other providers honor
+        # instead of scanning a whole-Bible result set into
+        # memory per request.
+        client = get_default_sword_client()
+        chapters = sword_chapter_worklist(
+            client, self.fileset_id, books
+        )
+        chapters_total = len(chapters)
+        start_index = 0
+        if cursor is not None:
+            # The token is bound to this scan context
+            # (canonical fileset, books, query): a cursor
+            # minted for a different scan would resume into a
+            # misaligned window, so a mismatch 400s.
+            start_index = decode_scan_cursor(
+                cursor, self._canon, books, query
+            )
+            # A cursor only ever points at a chapter this
+            # worklist still holds — anything past the end is a
+            # fabricated/stale token, not a resume.
+            if start_index >= chapters_total:
+                raise InvalidSearchCursorError(
+                    'cursor is past the end of the scan'
+                )
+        matches, truncated, next_index = scan_sword_matches(
+            client,
             self.fileset_id, query, books,
             max_matches=MAX_RESULTS,
+            deadline_s=SEARCH_SCAN_BUDGET_SECONDS,
+            start_index=start_index,
+            chapters=chapters,
         )
-        return {
-            'groups': group_verses_by_book(verses),
-            'meta': {
-                'total': len(verses),
-                'truncated': truncated,
+        meta = {
+            'total': len(matches),
+            'truncated': truncated,
+            'progress': {
+                # Cumulative position in the worklist — a
+                # determinate progress indicator across windows.
+                'chapters_scanned': (
+                    next_index
+                    if next_index is not None
+                    else chapters_total
+                ),
+                'chapters_total': chapters_total,
             },
+        }
+        # MAX_RESULTS bounds the matches a single window
+        # returns (per-request work) — not the cumulative total
+        # a client accumulates by following cursors, which is
+        # the point of a resumable scan. Only a deadline stop
+        # mints a cursor: a ``max_matches`` stop already
+        # returned a full page of matches, so it reports
+        # terminal truncation with no resume token.
+        if next_index is not None and len(matches) < MAX_RESULTS:
+            meta['next_cursor'] = encode_scan_cursor(
+                next_index, self._canon, books, query
+            )
+        return {
+            'groups': group_verses_by_book(matches),
+            'meta': meta,
         }
 
     def translation_listing(self, language_iso=None):
@@ -1072,7 +1137,9 @@ class DbtProvider(Provider):
         }
         return {'verses': normalized, 'meta': meta}
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         verses, total, truncated = fetch_dbt_matches(
             get_default_dbt_client(),
             self.fileset_id, query, books,
