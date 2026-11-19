@@ -70,7 +70,12 @@ resource "google_cloud_tasks_queue" "note_translations" {
     max_backoff  = "300s"
   }
 
-  depends_on = [google_project_service.enabled]
+  # github_deployer_tasks_admin must exist first — queue create
+  # runs as github-deployer in CI and races the grant otherwise.
+  depends_on = [
+    google_project_service.enabled,
+    google_project_iam_member.github_deployer_tasks_admin,
+  ]
 }
 
 # The App Engine runtime SA enqueues tasks and calls Cloud

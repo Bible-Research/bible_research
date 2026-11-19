@@ -512,6 +512,15 @@ Universal rules — follow exactly:
   other mutating `gcloud` calls; `terraform apply`. Deploys
   are CI's job — see the workspace AGENTS.md "Deployments"
   section for the manual-deploy contract.
+- **Local terraform hangs without the Netskope CA bundle** —
+  `terraform plan`/`apply` stalls with zero output (dead IPv6
+  TCP) unless `SSL_CERT_FILE`,
+  `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, `CURL_CA_BUNDLE` and
+  `REQUESTS_CA_BUNDLE` point at the combined bundle
+  (`~/.config/devin/combined-ca.pem`). Also set
+  `TF_VAR_alert_email_address` (same value as the
+  `ALERT_EMAIL_ADDRESS` repo variable) or plan proposes
+  destroying the monitoring channel/alert policies.
 - **Commits/PRs target `Bible-Research/bible_research`**
   (`origin`) — the only remote.
 - **Test logins**: `testuser`, `guest` — create via
