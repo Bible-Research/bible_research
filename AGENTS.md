@@ -77,6 +77,28 @@ the chapter entry); `ApiBibleProvider` is returned unwrapped
 (FUMS `meta` tokens must be reported per display). Returned
 payloads are shared — never mutate them.
 
+Every provider surface is gated to the 66-book canon
+(`CANONICAL_BOOK_IDS` in `bible/utils/bible_books.py`, derived
+from `_BIBLE_BOOKS`): `bible/search/` intersects the `books`
+param with the canon — an empty intersection returns a
+provider-shaped empty payload (paginated or grouped) with no
+upstream call and no error, i.e. a coverage miss like
+`book_not_in_fileset`, not a 400. `DbtProvider.search` and
+`fetch_dbt_matches` always send `books=` upstream — the
+request filter or the full sorted 66-id string
+(`CANONICAL_BOOKS_PARAM`) — so DBT-reported totals count
+canonical matches only; normalized rows are additionally
+post-filtered through `filter_canonical_verses` on the DBT
+and API.Bible paths (ESV/SWORD are canon-by-construction —
+`get_dbt_book_id` refs and `_BIBLE_BOOKS`-mapped module
+books). API.Bible has no upstream book filter, so on a
+hypothetical deuterocanon bible its `total` could overcount
+the rows actually returned — registered bibles are NIV-only
+today. `get_passage_body` answers a non-canonical `book` id
+as `book_not_in_fileset` before provider dispatch (the public
+`passage=` path can't produce one — names resolve through
+`get_dbt_book_id`).
+
 Known fileset ids: `ENGKJV` (KJV), `ENGESV_API` (ESV), `LVSGLU8`
 (Latvian Glück text), `LVSGLU8C1DA` (Latvian Glück generated audio,
 verse-synthesis mode), `LVSGLU8C2DA` (same audio, chapter-synthesis
@@ -97,7 +119,10 @@ Worklist source is `DBTClient.get_fileset_files` —
 `GET /bibles/filesets/{fileset_id}` returns the fileset's real
 per-chapter coverage with signed `path` + `duration` (unlike
 `/bibles/{bible_id}/book`, which keys on the bible id and unions
-sibling filesets; a `*DA` fileset id 404s there).
+sibling filesets; a `*DA` fileset id 404s there). The worklist
+skips rows outside the 66-book canon — a deuterocanonical
+fileset can't burn STT spend on chapters the SWORD reference
+lacks, and `--book TOB` now yields an empty pending list.
 
 `DBTClient` methods that hit `/bibles/{id}/book`
 (`get_books`/`get_book`/`get_chapters`) use raw `session.get`
@@ -257,12 +282,44 @@ at the next GAE deploy.
   ```
 
 - Writes and DDL fail with `InsufficientPrivilege` — never attempt
-  them. `manage.py dbshell` needs a local `psql` client (not
-  installed); prefer `manage.py shell` or a `psycopg2` script built
-  on `settings.DATABASES`.
+  them. `manage.py dbshell` needs a `psql` client — installed at
+  `/opt/homebrew/opt/postgresql@16/bin/psql` but off agent PATH;
+  prefer `manage.py shell` or a `psycopg2` script built on
+  `settings.DATABASES`.
+- `db_backups/local_db_backup.sh` (prod dump — DEVELOPER_GUIDE
+  "Database Backups") needs `pg_dump` matching the server major:
+  Aiven runs PG16 but PATH's `pg_dump` is v14 and aborts. Run with
+  `export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"` first.
 - For a writable local database, repoint `config.yaml`'s `default`
   to SQLite (`ENGINE: django.db.backends.sqlite3`,
   `NAME: db.sqlite3` — a file already exists in the repo root).
+- Staging database `stagingdb` lives on the same Aiven
+  instance. `staging_rw` owns it (read/write + `CREATEDB`);
+  its password is a deploy secret, never committed.
+  `ai_agent` has `CONNECT` plus `SELECT` on
+  `staging_rw`-created tables via default privileges, so
+  read-only agent investigation works there exactly like on
+  `defaultdb`. For a writable remote dev DB, repoint
+  `config.yaml`'s `default` at `stagingdb`/`staging_rw`
+  (password from the staging deploy's `DATABASE_URL` — ask
+  the user).
+- Non-production backend deployments (e.g. a Vercel staging
+  env whose config arrives via the `DOTENV` variable) set
+  `DATABASE_URL` to `stagingdb` — never `defaultdb`. The
+  shared `env-file` secret carries prod's `defaultdb` URL,
+  so a staging deploy must supply `DATABASE_URL` explicitly
+  — inside its own DOTENV payload or as a real env var
+  (env vars win over DOTENV-carried values). `DB_SSL_CERT`
+  is the same Aiven CA PEM in every environment. See
+  DEVELOPER_GUIDE "Environment Variables".
+- `stagingdb` was seeded from `defaultdb` (2026-11-16): prod
+  schema via `pg_dump --schema-only`, all `bible_verse`
+  rows, `django_migrations`/content types/auth permissions,
+  and the `Tester5`/`Daniels` accounts with their tokens,
+  tags, notes, comments and reading positions — prod ids
+  and password hashes preserved, so the same logins work
+  on staging. Other prod users were NOT copied; reseed by
+  re-running the same pg_dump/COPY procedure.
 
 ## Models / IDs
 
@@ -426,7 +483,8 @@ Universal rules — follow exactly:
   `python scripts/create_test_user.py` if a local DB lacks
   them (pytest's in-memory DB makes its own). The shared UI
   test account is `Tester5` / `password123` (workspace
-  AGENTS.md).
+  AGENTS.md); `Tester5` and `Daniels` also exist on
+  `stagingdb` with their prod data (see "Databases").
 - **OpenSpec lives at the workspace root** — never run
   `openspec init` in this repo; cross-repo contracts are
   spec'd there (workspace AGENTS.md, "OpenSpec").

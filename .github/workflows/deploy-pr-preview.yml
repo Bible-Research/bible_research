@@ -43,8 +43,7 @@ concurrency:
 env:
   GCP_PROJECT_ID: bible-research-489314
   GCP_REGION: europe-west3
-  WIF_PROVIDER: >-
-    projects/670506724494/locations/global/workloadIdentityPools/github-actions/providers/github
+  WIF_PROVIDER: projects/670506724494/locations/global/workloadIdentityPools/github-actions/providers/github
   DEPLOY_SA: github-deployer@bible-research-489314.iam.gserviceaccount.com
   # Runtime SA: reuses the App Engine default SA, which already has
   # secretAccessor + the GCS bucket access audio/image features need.

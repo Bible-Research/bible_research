@@ -57,6 +57,21 @@ NEW_TESTAMENT_BOOKS = {
     code for _, code, t in _BIBLE_BOOKS if t == 'NT'
 }
 
+# The 66-book Protestant canon — the only book ids the app
+# exposes, regardless of what an upstream fileset actually
+# contains (e.g. a deuterocanonical DBT bible). Every canon
+# enforcement point reads this set; membership checks are the
+# only cost, so nothing is recomputed per request.
+CANONICAL_BOOK_IDS = frozenset(
+    code for _, code, _ in _BIBLE_BOOKS
+)
+
+# ``books=`` query-param serialization of the canon: DBT
+# search calls send it upstream when the request carries no
+# narrower book filter, so provider-reported totals count
+# canonical matches only (no phantom pages of apocrypha).
+CANONICAL_BOOKS_PARAM = ','.join(sorted(CANONICAL_BOOK_IDS))
+
 
 _LOWERCASE_WORDS = frozenset({'of', 'and', 'the', 'a', 'an'})
 

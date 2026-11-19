@@ -10,6 +10,10 @@ from bible.services.search_grouping import (
     group_verses_by_book,
     scan_sword_matches,
 )
+from bible.utils.bible_books import (
+    CANONICAL_BOOK_IDS,
+    CANONICAL_BOOKS_PARAM,
+)
 
 
 SEARCH_URL = reverse('bible-search')
@@ -669,7 +673,7 @@ def test_dbt_grouped_search_groups_by_book(
 
     mock_get_client.return_value.search.assert_called_once_with(
         'ENGESV', 'son',
-        limit=5000, sort_by=None, books=None,
+        limit=5000, sort_by=None, books=CANONICAL_BOOKS_PARAM,
     )
 
 
@@ -1039,7 +1043,7 @@ def test_dbt_grouped_search_uses_reported_page_size(
     # Follow-up page requested at the effective page size.
     mock_get_client.return_value.search.assert_any_call(
         'ENGESV', 'love',
-        limit=2, page=2, sort_by=None, books=None,
+        limit=2, page=2, sort_by=None, books=CANONICAL_BOOKS_PARAM,
     )
 
 
@@ -1781,3 +1785,275 @@ def test_dbt_grouped_search_ignores_cursor(
         'cursor': 'aGVsbG8',
     })
     assert response.status_code == status.HTTP_200_OK
+
+
+# --- 66-book canon enforcement (book-canon) ---------------------------
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
+def test_books_param_intersects_with_canon(
+    mock_get_client, mock_is_sword, client
+):
+    """``books`` tokens are upper-cased, stripped and
+    intersected with the canon — ``books= TOB, jhn `` forwards
+    exactly ``JHN``."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {'data': []},
+        'meta': {'pagination': {'total': 0}},
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'books': ' TOB, jhn ',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    mock_get_client.return_value.search.assert_called_once_with(
+        'ENGESV', 'love',
+        limit=15, page=1,
+        sort_by=None, books='JHN',
+    )
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
+def test_noncanonical_books_param_empty_paginated(
+    mock_get_client, mock_is_sword, client
+):
+    """``books=TOB`` → a provider-shaped empty page and NO
+    upstream call: TOB is well-formed USFM but outside the
+    canon — a coverage miss, not a 400."""
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'books': 'TOB',
+        'limit': '7',
+        'page': '2',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()['data'] == {
+        'verses': [],
+        'meta': {
+            'pagination': {
+                'total': 0,
+                'count': 0,
+                'per_page': 7,
+                'current_page': 2,
+                'total_pages': 0,
+            },
+            'truncated': False,
+        },
+    }
+    mock_get_client.return_value.search.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
+def test_noncanonical_books_param_empty_grouped(
+    mock_get_client, mock_is_sword, client
+):
+    """Grouped ``books=TOB`` → ``{groups: [], meta: {total: 0,
+    truncated: false}}`` immediately, no provider call."""
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'books': 'TOB',
+        'group_by': 'book',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()['data'] == {
+        'groups': [],
+        'meta': {'total': 0, 'truncated': False},
+    }
+    mock_get_client.return_value.search.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
+def test_empty_canon_intersection_still_validates_page(
+    mock_get_client, mock_is_sword, client
+):
+    """``books=TOB&page=abc`` → 400: the paginated
+    short-circuit runs after limit/page validation."""
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+        'books': 'TOB',
+        'page': 'abc',
+    })
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()['error'] == (
+        'page must be an integer.'
+    )
+    mock_get_client.return_value.search.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
+def test_dbt_search_sends_full_canon_without_books(
+    mock_get_client, mock_is_sword, client
+):
+    """No ``books`` param → the DBT call still carries
+    ``books=`` with the sorted 66-id list, so upstream totals
+    count canonical matches only."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {'data': []},
+        'meta': {'pagination': {'total': 0}},
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGESV',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    _, kwargs = mock_get_client.return_value.search.call_args
+    assert kwargs['books'] == CANONICAL_BOOKS_PARAM
+    sent_ids = set(kwargs['books'].split(','))
+    assert sent_ids == CANONICAL_BOOK_IDS
+    assert 'TOB' not in sent_ids
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
+def test_dbt_search_drops_noncanonical_rows(
+    mock_get_client, mock_is_sword, client
+):
+    """A deuterocanonical row that survives upstream (``TOB``)
+    is REMOVED from the emitted verses — never nulled — while
+    canonical rows pass through verbatim."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {
+            'data': [
+                {
+                    'book_id': 'TOB',
+                    'chapter': 1,
+                    'verse_start': 1,
+                    'verse_text': 'apocryphal hit',
+                },
+                {
+                    'book_id': 'JHN',
+                    'chapter': 3,
+                    'verse_start': 16,
+                    'verse_text': 'loved the world',
+                },
+            ]
+        },
+        'meta': {'pagination': {'total': 2}},
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': 'loved',
+        'fileset_id': 'ENGESV',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    verses = response.json()['data']['verses']
+    assert [v['book_id'] for v in verses] == ['JHN']
+    assert None not in verses
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.is_sword_fileset', return_value=False)
+@patch('bible.services.providers.get_default_dbt_client')
+def test_dbt_grouped_search_drops_noncanonical_groups(
+    mock_get_client, mock_is_sword, client
+):
+    """Grouped mode emits no ``TOB`` group — deuterocanonical
+    rows are dropped during normalization."""
+    mock_get_client.return_value.search.return_value = {
+        'verses': {
+            'data': [
+                {
+                    'book_id': 'TOB',
+                    'chapter': 1,
+                    'verse_start': 1,
+                    'verse_text': 'apocryphal hit',
+                },
+                {
+                    'book_id': 'JHN',
+                    'chapter': 3,
+                    'verse_start': 16,
+                    'verse_text': 'loved the world',
+                },
+            ]
+        },
+        'meta': {'pagination': {'total': 2}},
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': 'loved',
+        'fileset_id': 'ENGESV',
+        'group_by': 'book',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    groups = response.json()['data']['groups']
+    assert [g['book_id'] for g in groups] == ['JHN']
+    assert groups[0]['count'] == 1
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_apibible_client')
+def test_apibible_search_drops_noncanonical_rows(
+    mock_get_client, client
+):
+    """API.Bible has no upstream book filter — a ``TOB`` row is
+    dropped post-normalization (``total`` may overcount; that
+    limitation is documented and accepted)."""
+    mock_get_client.return_value.search.return_value = {
+        'data': {
+            'verses': [
+                {'id': 'TOB.1.1', 'text': 'apocryphal hit'},
+                {'id': 'JHN.3.16', 'text': 'loved the world'},
+            ],
+            'total': 2,
+        }
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGNIV_API',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    verses = response.json()['data']['verses']
+    assert [v['book_id'] for v in verses] == ['JHN']
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_apibible_client')
+def test_apibible_grouped_search_drops_noncanonical(
+    mock_get_client, client
+):
+    """Grouped API.Bible search drops ``TOB`` rows too."""
+    mock_get_client.return_value.search.return_value = {
+        'data': {
+            'verses': [
+                {'id': 'TOB.1.1', 'text': 'apocryphal hit'},
+                {'id': 'JHN.3.16', 'text': 'loved the world'},
+            ],
+            'total': 2,
+        }
+    }
+
+    response = client.get(SEARCH_URL, {
+        'query': 'love',
+        'fileset_id': 'ENGNIV_API',
+        'group_by': 'book',
+    })
+
+    assert response.status_code == status.HTTP_200_OK
+    groups = response.json()['data']['groups']
+    assert [g['book_id'] for g in groups] == ['JHN']
