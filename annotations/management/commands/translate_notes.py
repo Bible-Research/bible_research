@@ -7,6 +7,7 @@ the note corpus and for manual repairs.
 Usage:
     python manage.py translate_notes            # all notes
     python manage.py translate_notes --user alice
+    python manage.py translate_notes --tag TAGxxxxxxxxxxxxx
     python manage.py translate_notes --note-id NOTxxxxxxxx --dry-run
 """
 import logging
@@ -15,7 +16,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 
-from annotations.models import Note
+from annotations.models import Note, Tag
 from annotations.services import tasks as note_tasks
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ class Command(BaseCommand):
         parser.add_argument(
             '--user', metavar='USERNAME',
             help='Limit to notes owned by this user.',
+        )
+        parser.add_argument(
+            '--tag', metavar='TAG_ID',
+            help='Limit to notes under this tag id.',
         )
         parser.add_argument(
             '--note-id', metavar='ID',
@@ -49,6 +54,14 @@ class Command(BaseCommand):
                     f"no user named {options['user']!r}"
                 )
             qs = qs.filter(user=user)
+        if options['tag']:
+            try:
+                tag = Tag.objects.get(pk=options['tag'])
+            except Tag.DoesNotExist:
+                raise CommandError(
+                    f"no tag {options['tag']!r}"
+                )
+            qs = qs.filter(tag=tag)
         if options['note_id']:
             qs = qs.filter(pk=options['note_id'])
             if not qs.exists():
