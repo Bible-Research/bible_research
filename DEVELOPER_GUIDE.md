@@ -2122,7 +2122,8 @@ Cloud TTS. It has two modes:
   boundary (Gemini TTS has no SSML-mark timepoints). MP3 encoding
   uses `lameenc` (no ffmpeg).
 - **Scheduling**: `manual` only — the Gemini entry is no
-  longer the daily trigger's target (Edge is, see below). It
+  longer the daily trigger's target (Edge would be, see
+  below). It
   can still be run on demand via `gcloud run jobs execute
   all-jobs --overrides` with `--only generate_gemini_audio`.
 
@@ -2318,8 +2319,8 @@ source venv/bin/activate
 # Dev-only decoder for --deep (miniaudio):
 pip install -r requirements-dev.txt
 
-# Django settings — local .env (gitignored) already
-# points at prod; GCS access needs Application Default
+# Django settings — this checkout's .env (gitignored) points
+# at prod; GCS access needs Application Default
 # Credentials, and on this network the Netskope CA bundle:
 gcloud auth application-default login      # once
 export SSL_CERT_FILE=/tmp/combined-ca.pem  # see AGENTS.md
@@ -2476,7 +2477,7 @@ translation).
   ONE Sentry `capture_message` when per-language misses
   exist, logs-only on a clean run.
 
-**Settings** (.env / config.yaml, via
+**Settings** (`.env` / legacy `config.yaml`, via
 `_audio_settings_source`): `NOTE_TARGET_LANGUAGES`,
 `NOTE_TRANSLATION_ENGINE` (`google-nmt` default; future
 `google-llm`/`gemini-*` map to v3 models),

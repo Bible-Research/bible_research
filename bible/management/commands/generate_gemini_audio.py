@@ -247,8 +247,8 @@ class Command(BaseCommand):
         if not api_keys:
             raise CommandError(
                 "No Gemini API keys configured. Add "
-                "GEMINI_API_KEY (a string or a list) to "
-                ".env or the env-file secret."
+                "GEMINI_API_KEY to .env (comma-separated) or "
+                "config.yaml (a list), or the env-file secret."
             )
 
         lock_day = None

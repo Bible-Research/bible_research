@@ -2,9 +2,11 @@
 # SCHEDULER RESOURCES — CURRENTLY DISABLED
 # ============================================================================
 # ``daily-edge-audio`` below was DISABLED on 2026-10-31 per user
-# request — it was the only scheduled trigger of ``all-jobs`` (Edge
-# read-aloud TTS, lv-LV-EveritaNeural, artifacts under
-# ``audio_edge/``). To re-enable: uncomment the resource and
+# request — it was the only scheduled trigger of ``all-jobs`` at
+# the time (Edge read-aloud TTS, lv-LV-EveritaNeural, artifacts
+# under ``audio_edge/``); ``note-translations-audit`` in
+# note_translations.tf is now the one live scheduler.
+# To re-enable: uncomment the resource and
 # outputs.tf output, then `terraform apply`.
 #
 # It must not be a plain trigger: the JOBS table in
@@ -12,7 +14,7 @@
 # monthly ``dom:3`` ``generate_chapter_audio`` entry (Google Cloud
 # TTS spend, intentionally left unscheduled), so a bare ``jobs:run``
 # call would still fire it on the 3rd of each month. The http_target
-# body therefore passes ``overrides.containerOverrides`` — the job
+# body would pass ``overrides.containerOverrides`` — the job
 # container's command is ``python manage.py run_all_jobs`` and the
 # override supplies ``args`` = ``["--only",
 # "generate_edge_audio"]``, restricting the pass to that single
@@ -46,7 +48,7 @@ resource "google_service_account_iam_member" "cloudscheduler_token_creator" {
   ])
 }
 
-# run.invoker grants run.jobs.run only — the trigger passes
+# run.invoker grants run.jobs.run only — the trigger would pass
 # containerOverrides (--only <job>), which additionally requires
 # run.jobs.runWithOverrides, present in run.developer (verified
 # against the live PERMISSION_DENIED on 2026-10-31).

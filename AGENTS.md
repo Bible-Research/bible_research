@@ -312,11 +312,11 @@ resolves an issue at the next GAE deploy.
   `DATABASE_READ_URL` alternate carries), so `manage.py
   runserver` and `manage.py shell` operate on live production
   data WITH write access. The `.env` also carries
-  `DATABASE_LOCAL_URL` (writable `stagingdb`/`avnadmin`) and
-  `DATABASE_READ_URL` (read-only prod `ai_agent`) — but those
-  siblings are NOT auto-selected: `_db_config_from_env()`
-  reads only `DATABASE_URL`, so switching means editing that
-  one line.
+  `DATABASE_LOCAL_URL` and `DATABASE_STAGING_URL` (both
+  writable `stagingdb`/`avnadmin`) plus `DATABASE_READ_URL`
+  (read-only prod `ai_agent`) — but those siblings are NOT
+  auto-selected: `_db_config_from_env()` reads only
+  `DATABASE_URL`, so switching means editing that one line.
 - Writes and DDL now SUCCEED — treat every local session as
   prod-capable; never attempt them deliberately. Read-only
   investigation remains the expectation: ORM reads work
@@ -592,9 +592,10 @@ Universal rules — follow exactly:
   the main checkout; remove the worktree + branch once the PR
   merges green. Full workflow: workspace `../AGENTS.md`
   "Repo-specific rules".
-- `terraform/scheduler.tf`: every Cloud Scheduler job in
-  this file is commented out (`daily-edge-audio` per user
-  request, 2026-10-31) — do NOT re-enable without asking.
+- `terraform/scheduler.tf`: all three Cloud Scheduler jobs
+  in this file are commented out (most recently
+  `daily-edge-audio`, per user request 2026-10-31) — do
+  NOT re-enable without asking.
   The one LIVE scheduler lives elsewhere:
   `note-translations-audit` in
   `terraform/note_translations.tf` (enabled) fires a plain
