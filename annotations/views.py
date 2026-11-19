@@ -13,11 +13,15 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import models, transaction, IntegrityError
 from django.db.utils import OperationalError
-from django.db.models import Count, Q, F, Min, Prefetch
+from django.db.models import (
+    Count, Exists, Q, F, Min, OuterRef, Prefetch,
+)
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -34,7 +38,11 @@ from bible_research.permissions import GuestReadOnly
 from .models import (
     Tag,
     Note,
+    NoteVerse,
     NoteTranslation,
+    NoteShare,
+    TagShare,
+    SavedNote,
     Comment,
     Image,
     ReadingPosition,
@@ -55,6 +63,11 @@ from .serializers import (
     subtree_tag_ids,
 )
 from .services.image_storage import upload_original, delete_original
+from .services.note_text import note_text_to_plain
+from .services.sharing import (
+    PublishGateDenied,
+    assert_can_publish,
+)
 from .services.tasks import (
     enqueue,
     note_translation_languages,
@@ -65,8 +78,17 @@ from .services.translation_service import hash_note_text
 
 logger = logging.getLogger(__name__)
 
+User = get_user_model()
 
 NOTE_IDS_CAP = 200
+
+# Share grants per note/tag are capped — a runaway share UI
+# can't blow up the visibility funnel's Exists work.
+SHARE_RECIPIENT_CAP = 100
+
+# Whole-tag copies refuse to truncate silently above this many
+# accessible notes in the source tag.
+TAG_COPY_NOTE_CAP = 100
 
 # `tag_id` sentinel meaning "notes with no tag". Real tag ids
 # are `TAG…` strings, so this can never collide with one.
@@ -78,15 +100,74 @@ UNTAGGED_TAG_ID = 'untagged'
 MOVE_GAP_EPSILON = 1e-9
 
 
+class QueryParamError(Exception):
+    """Request-shape failure that must surface as the
+    annotations 400 contract — mapped to _validation_error by
+    the viewsets' handle_exception."""
+
+
+class ShareRateThrottle(UserRateThrottle):
+    """Scope for share mutations — username-probing calls get
+    silent-200 bodies, so the bound lives on rate alone."""
+    scope = 'share'
+
+
+class NotesSearchRateThrottle(UserRateThrottle):
+    """Scope for ``notes/?q=`` icontains scans — an unbounded
+    scan is a cheap DoS for authenticated users."""
+    scope = 'notes-search'
+
+
+def _shared_tag_ids(user):
+    """Tag ids covered by TagShare grants to *user* — the
+    granted tag itself always; descendants only when the grant
+    opted in, resolved live through subtree_tag_ids so notes
+    added later are covered and moved-out notes drop out."""
+    tag_ids = set()
+    shares = TagShare.objects.filter(
+        shared_with=user,
+    ).select_related('tag', 'owner')
+    for share in shares:
+        if share.include_descendants:
+            tag_ids |= subtree_tag_ids(
+                share.tag, user=share.owner
+            )
+        else:
+            tag_ids.add(share.tag_id)
+    return tag_ids
+
+
+def _accessible_visibility_q(user):
+    """Q matching every note *user* can read via ownership or
+    a share grant — callers OR it with Q(public=True).
+
+    Direct note shares go through an EXISTS subquery (no join
+    duplication); tag shares resolve to a tag-id set because
+    include_descendants needs the iterative subtree walk.
+    """
+    return (
+        Q(user=user)
+        | Q(tag_id__in=_shared_tag_ids(user))
+        | Q(Exists(NoteShare.objects.filter(
+            note=OuterRef('pk'), shared_with=user,
+        )))
+    )
+
+
 def get_accessible_notes_qs(user):
     """
     Return a Note queryset scoped to what *user* may see:
-    - Authenticated → own notes ∪ public notes
+    - Authenticated → own notes ∪ public notes ∪ notes granted
+      via NoteShare/TagShare (subtree-expanded, resolved live)
     - Anonymous     → public notes only
+
+    Shared by NoteViewSet list/retrieve, CommentViewSet,
+    order-index, counts and every other read surface so
+    access always matches.
     """
     if user.is_authenticated:
         return Note.objects.filter(
-            Q(user=user) | Q(public=True)
+            Q(public=True) | _accessible_visibility_q(user)
         )
     return Note.objects.filter(public=True)
 
@@ -248,6 +329,99 @@ def _is_tag_position_conflict(exc):
     )
 
 
+def _resolve_share_username(request):
+    """Extract and validate the 'username' body field.
+
+    Missing/blank values are real request errors (400) — they
+    are not the existence probe the silent-200 path guards.
+    """
+    data = request.data if isinstance(request.data, dict) else {}
+    username = data.get('username')
+    if not isinstance(username, str) or not username.strip():
+        raise QueryParamError(
+            "'username' must be a non-empty string."
+        )
+    return username.strip()
+
+
+def _resolve_share_recipient(username):
+    """Look up a share recipient by case-insensitive username.
+
+    Callers answer a miss identically to a hit (silent-200) so
+    the endpoint never reveals whether a username exists.
+    """
+    return User.objects.filter(
+        username__iexact=username,
+    ).first()
+
+
+def _copy_target_tag(request, required):
+    """Resolve the caller-owned destination tag for a copy.
+
+    *required* False (note copy): 'untagged', missing or null
+    all mean no tag; anything else must be a caller-owned tag
+    or 400. *required* True (tag copy): only a caller-owned
+    tag is a valid destination.
+    """
+    data = request.data if isinstance(request.data, dict) else {}
+    tag_id = data.get('tag_id')
+    if not required and tag_id in (None, '', UNTAGGED_TAG_ID):
+        return None
+    if not isinstance(tag_id, str) or not tag_id:
+        raise QueryParamError(
+            "'tag_id' must name one of your tags"
+            + ('' if required else ' or "untagged"')
+            + '.'
+        )
+    tag = Tag.objects.filter(user=request.user, pk=tag_id).first()
+    if tag is None:
+        raise QueryParamError(
+            'tag_id must be one of your own tags.'
+        )
+    return tag
+
+
+def _next_tag_position(tag):
+    """The appended position for a copy landing in *tag*."""
+    top = Note.objects.filter(tag=tag).aggregate(
+        top=models.Max('tag_position')
+    )['top']
+    return (top if top is not None else 0) + 1.0
+
+
+def _copy_note(source, user, tag, tag_position):
+    """Create *user*'s copy of *source* — private, unpublished,
+    provenance kept on copied_from, verse links duplicated,
+    images deliberately not copied (rows could orphan shared
+    GCS blobs)."""
+    new_note = Note.objects.create(
+        user=user,
+        tag=tag,
+        note_text=source.note_text,
+        note_text_plain=(
+            source.note_text_plain
+            or note_text_to_plain(source.note_text)
+        ),
+        public=False,
+        published=False,
+        copied_from=source,
+        tag_position=tag_position,
+    )
+    NoteVerse.objects.bulk_create([
+        NoteVerse(note=new_note, verse=verse)
+        for verse in source.verses.all()
+    ])
+    return new_note
+
+
+def _exception_to_400(exc):
+    """Map our request-shape exceptions to the annotations
+    400 body — or None so the default DRF handling runs."""
+    if isinstance(exc, (PublishGateDenied, QueryParamError)):
+        return _validation_error(str(exc))
+    return None
+
+
 class TagViewSet(viewsets.ModelViewSet):
     """
     API endpoint that allows tags to be created, viewed, updated, or deleted.
@@ -266,11 +440,29 @@ class TagViewSet(viewsets.ModelViewSet):
     """
     serializer_class = TagSerializer
 
+    def handle_exception(self, exc):
+        """Map publish-gate and request-shape failures to the
+        annotations 400 contract (never 403 — a non-publisher
+        must not be able to submit the flag at all)."""
+        response = _exception_to_400(exc)
+        if response is not None:
+            return response
+        return super().handle_exception(exc)
+
+    def get_throttles(self):
+        """Share mutations carry the dedicated 'share' scope."""
+        throttles = super().get_throttles()
+        if self.action in ('share', 'unshare'):
+            throttles.append(ShareRateThrottle())
+        return throttles
+
     def get_permissions(self):
         # Reads are open: get_queryset scopes anonymous
         # requests to tags carrying at least one public note.
         # Writes always require authentication and are denied
-        # for the legacy read-only 'guest' account.
+        # for the legacy read-only 'guest' account. Share
+        # listings (GET …/shares/) are owner-scoped reads and
+        # land on the authenticated branch.
         if self.action in ('list', 'retrieve'):
             return [AllowAny()]
         return [IsAuthenticated(), GuestReadOnly()]
@@ -279,7 +471,9 @@ class TagViewSet(viewsets.ModelViewSet):
         """
         Returns the queryset of tags that the current user
         has access to.
-        Authenticated users see their own tags.
+        Authenticated users see their own tags; on retrieve a
+        tag granted to them via TagShare also resolves (the
+        shared-with-me UI renders it read-only).
         Anonymous users may retrieve only tags that have at
         least one public note; every other anonymous action
         sees an empty queryset.
@@ -292,6 +486,16 @@ class TagViewSet(viewsets.ModelViewSet):
 
         # For authenticated users, return their own tags
         if user.is_authenticated:
+            if self.action == 'retrieve':
+                # Own tags plus tags with a direct TagShare
+                # grant. The grant covers every note under the
+                # tag, so the sharee's note_count is the full
+                # direct count — no partial-count leak.
+                return Tag.objects.filter(
+                    Q(user=user) | Q(shares__shared_with=user)
+                ).annotate(
+                    note_count=Count('notes', distinct=True)
+                ).distinct().order_by('name')
             return Tag.objects.filter(
                 user=user
             ).annotate(
@@ -578,11 +782,23 @@ class TagViewSet(viewsets.ModelViewSet):
                 "'public' must be a boolean."
             )
         with transaction.atomic():
+            # Downward invariant: clearing public clears
+            # published — at tag level and on every note in
+            # the cascade.
             tag.public = make_public
-            tag.save(update_fields=['public', 'updated_at'])
-            notes_updated = Note.objects.filter(
-                tag=tag, user=request.user
-            ).update(public=make_public)
+            update_fields = ['public', 'updated_at']
+            if not make_public and tag.published:
+                tag.published = False
+                update_fields.append('published')
+            tag.save(update_fields=update_fields)
+            if make_public:
+                notes_updated = Note.objects.filter(
+                    tag=tag, user=request.user
+                ).update(public=True)
+            else:
+                notes_updated = Note.objects.filter(
+                    tag=tag, user=request.user
+                ).update(public=False, published=False)
         logger.info(
             f"User {request.user.username} set tag "
             f"'{tag.name}' (ID: {tag.id}) public={make_public}; "
@@ -594,6 +810,208 @@ class TagViewSet(viewsets.ModelViewSet):
             ).data,
             'notes_updated': notes_updated,
         })
+
+    @extend_schema(
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'published': {'type': 'boolean'},
+                },
+                'required': ['published'],
+            },
+        },
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'tag': {'type': 'object'},
+                    'notes_updated': {'type': 'integer'},
+                },
+            },
+        },
+    )
+    @action(detail=True, methods=['post'], url_path='set-published')
+    def set_published(self, request, pk=None):
+        """
+        POST /api/v1/tags/<pk>/set-published/  {"published": true}
+
+        Flip the tag's `published` flag AND cascade it to every
+        note DIRECTLY under the tag, atomically. Publishing
+        requires the annotations.publish_note permission — a
+        non-publisher gets 400, never 403. The upward
+        direction also forces public=true (published ⇒ public);
+        the downward direction clears `published` only, leaving
+        each note's `public` untouched. Idempotent.
+        """
+        tag = self.get_object()
+        if not isinstance(request.data, dict):
+            return _validation_error(
+                'Request body must be a JSON object.'
+            )
+        make_published = request.data.get('published', None)
+        if not isinstance(make_published, bool):
+            return _validation_error(
+                "'published' must be a boolean."
+            )
+        if make_published:
+            assert_can_publish(request, True)
+        with transaction.atomic():
+            tag.published = make_published
+            update_fields = ['published', 'updated_at']
+            if make_published and not tag.public:
+                tag.public = True
+                update_fields.append('public')
+            tag.save(update_fields=update_fields)
+            if make_published:
+                notes_updated = Note.objects.filter(
+                    tag=tag, user=request.user
+                ).update(published=True, public=True)
+            else:
+                notes_updated = Note.objects.filter(
+                    tag=tag, user=request.user
+                ).update(published=False)
+        logger.info(
+            f"User {request.user.username} set tag "
+            f"'{tag.name}' (ID: {tag.id}) "
+            f"published={make_published}; "
+            f"{notes_updated} note(s) updated"
+        )
+        return Response({
+            'tag': TagSerializer(
+                tag, context={'request': request}
+            ).data,
+            'notes_updated': notes_updated,
+        })
+
+    def _own_tag(self, pk):
+        """Owner-scoped tag lookup — a non-owner share attempt
+        hits the same 404 as a missing tag."""
+        return get_object_or_404(
+            Tag.objects.filter(user=self.request.user), pk=pk
+        )
+
+    @action(detail=True, methods=['post'], url_path='share')
+    def share(self, request, pk=None):
+        """
+        POST /api/v1/tags/<pk>/share/  {"username": "…"[,
+            "include_descendants": true]}
+
+        Grant a per-recipient read on the tag's notes. Username
+        resolution is iexact; unknown and known usernames get
+        the identical success body so the endpoint can't be
+        probed for account existence. Self-share is a no-op.
+        Re-sharing upserts include_descendants. Grants are
+        capped at 100 recipients per tag.
+        """
+        tag = self._own_tag(pk)
+        username = _resolve_share_username(request)
+        data = request.data
+        include_descendants = data.get('include_descendants', False)
+        if not isinstance(include_descendants, bool):
+            raise QueryParamError(
+                "'include_descendants' must be a boolean."
+            )
+        recipient = _resolve_share_recipient(username)
+        if recipient is None or recipient.pk == request.user.pk:
+            # Unknown username / self-share — same body as a
+            # real grant, so existence is never revealed.
+            return Response({'shared': True})
+        share = TagShare.objects.filter(
+            tag=tag, shared_with=recipient,
+        ).first()
+        if share is None:
+            if tag.shares.count() >= SHARE_RECIPIENT_CAP:
+                return _validation_error(
+                    'Share recipient limit reached '
+                    f'({SHARE_RECIPIENT_CAP}).'
+                )
+            share = TagShare.objects.create(
+                tag=tag,
+                owner=request.user,
+                shared_with=recipient,
+                include_descendants=include_descendants,
+            )
+        elif share.include_descendants != include_descendants:
+            share.include_descendants = include_descendants
+            share.save(update_fields=['include_descendants'])
+        return Response({'shared': True})
+
+    @action(
+        detail=True,
+        methods=['delete'],
+        url_path=r'share/(?P<username>[^/.]+)',
+    )
+    def unshare(self, request, pk=None, username=None):
+        """DELETE /api/v1/tags/<pk>/share/<username>/ — revoke a
+        grant. Idempotent: a missing row returns 204 too."""
+        tag = self._own_tag(pk)
+        TagShare.objects.filter(
+            tag=tag, shared_with__username__iexact=username,
+        ).delete()
+        return Response(status=drf_status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['get'], url_path='shares')
+    def shares(self, request, pk=None):
+        """GET /api/v1/tags/<pk>/shares/ — owner-only grant
+        listing: [{shared_with, include_descendants,
+        created_at}]."""
+        tag = self._own_tag(pk)
+        data = [
+            {
+                'shared_with': share.shared_with.username,
+                'include_descendants': share.include_descendants,
+                'created_at': share.created_at,
+            }
+            for share in tag.shares.select_related('shared_with')
+        ]
+        return Response(data)
+
+    @action(detail=True, methods=['post'], url_path='copy')
+    def copy(self, request, pk=None):
+        """
+        POST /api/v1/tags/<pk>/copy/  {"tag_id": <one of mine>}
+
+        Bulk-copy every note in the source tag that the caller
+        can read into the caller-owned destination tag —
+        atomically (all or nothing), fresh appended
+        tag_positions, copied_from set, images not copied. A
+        source with more than 100 accessible notes fails 400
+        rather than truncating silently.
+        """
+        source = get_object_or_404(Tag.objects.all(), pk=pk)
+        target = _copy_target_tag(request, required=True)
+        sources = list(
+            get_accessible_notes_qs(request.user)
+            .filter(tag=source)
+            .select_related('tag')
+            .prefetch_related('verses')
+            .order_by('tag_position')
+        )
+        if len(sources) > TAG_COPY_NOTE_CAP:
+            return _validation_error(
+                f'Tag has more than {TAG_COPY_NOTE_CAP} '
+                'accessible notes; copy refused.'
+            )
+        with transaction.atomic():
+            base = _next_tag_position(target)
+            created = [
+                _copy_note(
+                    source_note, request.user, target, base + idx
+                )
+                for idx, source_note in enumerate(sources)
+            ]
+        context = self.get_serializer_context()
+        context['include_verse_text'] = False
+        return Response(
+            {
+                'copied': len(created),
+                'notes': NoteSerializer(
+                    created, many=True, context=context
+                ).data,
+            },
+            status=drf_status.HTTP_201_CREATED,
+        )
 
 
 @extend_schema_view(
@@ -639,6 +1057,38 @@ class NoteViewSet(viewsets.ModelViewSet):
     serializer_class = NoteSerializer
     pagination_class = NotesPagination
 
+    def handle_exception(self, exc):
+        """Map publish-gate and request-shape failures to the
+        annotations 400 contract (never 403 — a non-publisher
+        must not be able to submit the flag at all)."""
+        response = _exception_to_400(exc)
+        if response is not None:
+            return response
+        return super().handle_exception(exc)
+
+    def get_throttles(self):
+        """Scoped throttles: 'share' on share mutations,
+        'notes-search' on ?q= directory searches."""
+        throttles = super().get_throttles()
+        if self.action in ('share', 'unshare'):
+            throttles.append(ShareRateThrottle())
+        if (
+            self.action == 'list'
+            and 'q' in self.request.query_params
+        ):
+            throttles.append(NotesSearchRateThrottle())
+        return throttles
+
+    def _is_directory_request(self):
+        """True when list serves the public directory —
+        ?published=true or a ?q= search. Directory listings
+        skip verse enrichment (include_verse_text=False)."""
+        params = self.request.query_params
+        return (
+            params.get('published', '').lower() == 'true'
+            or 'q' in params
+        )
+
     def get_permissions(self):
         # Reads are open: get_queryset scopes anonymous
         # requests to public notes only. Writes and the
@@ -659,6 +1109,11 @@ class NoteViewSet(viewsets.ModelViewSet):
         lang = self.request.query_params.get('lang')
         if lang:
             context['note_lang'] = lang
+        if self._is_directory_request():
+            # Directory feed/search listings must not trigger
+            # upstream verse fetches — serialized rows keep
+            # refs but carry no verse text.
+            context['include_verse_text'] = False
         return context
 
     def perform_create(self, serializer):
@@ -895,7 +1350,30 @@ class NoteViewSet(viewsets.ModelViewSet):
             f"| include_descendants: {include_descendants}"
         )
 
-        if note_pk or tag_id:
+        # Public-directory scope: ?published=true lists the
+        # published feed; ?q= forces the published scope plus a
+        # note_text_plain icontains match. Both are open to
+        # anonymous callers (the directory is public by design).
+        # ?q= combined with tag_id or a detail pk is a 400 —
+        # a scoped private search would leak through metadata.
+        q_param = self.request.query_params.get('q', None)
+        directory_scope = (
+            self.request.query_params.get('published', '')
+            .lower() == 'true'
+            or q_param is not None
+        )
+        if q_param is not None and (tag_id or note_pk):
+            raise QueryParamError(
+                "'q' cannot be combined with tag_id or note_pk."
+            )
+
+        if directory_scope:
+            queryset = Note.objects.filter(published=True)
+            if q_param:
+                queryset = queryset.filter(
+                    note_text_plain__icontains=q_param
+                )
+        elif note_pk or tag_id:
             # If specific note or tag is requested,
             # search it in public notes
             queryset = get_accessible_notes_qs(user)
@@ -972,15 +1450,21 @@ class NoteViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(id=note_pk)
             logger.debug(f"Filtering by note_pk: {note_pk}")
 
-        # Apply ordering based on parameter
+        # Apply ordering based on parameter. Directory scope
+        # (published feed / ?q= search) defaults to -created_at
+        # like a merged subtree listing — tag_position is
+        # meaningless across owners' notes.
         final_queryset = self._apply_ordering(
-            queryset, ordering_param, include_descendants
+            queryset,
+            ordering_param,
+            include_descendants or directory_scope,
         )
-        # NoteSerializer expands ``tag`` and iterates ``verses``
-        # per note — eager-load both relations so a page of
-        # notes costs two queries, not N+1.
+        # NoteSerializer expands ``tag`` + ``user`` (author) and
+        # iterates ``verses`` per note — eager-load all three
+        # relations so a page of notes costs a few queries, not
+        # N+1.
         final_queryset = final_queryset.select_related(
-            'tag'
+            'tag', 'user'
         ).prefetch_related('verses', 'translations')
         logger.info(
             f"Returning notes with ordering: {ordering_param}"
@@ -1083,6 +1567,241 @@ class NoteViewSet(viewsets.ModelViewSet):
         requeued = retranslate_failed(note)
         return Response({'requeued': requeued})
 
+    def _own_note(self, pk):
+        """Owner-scoped note lookup — a non-owner share attempt
+        hits the same 404 as a missing note."""
+        return get_object_or_404(
+            Note.objects.filter(user=self.request.user), pk=pk
+        )
+
+    @action(detail=True, methods=['post'], url_path='share')
+    def share(self, request, pk=None):
+        """
+        POST /api/v1/notes/<id>/share/  {"username": "…"}
+
+        Grant a per-recipient read on the note. Username
+        resolution is iexact; unknown and known usernames get
+        the identical success body so the endpoint can't be
+        probed for account existence. Self-share is a no-op.
+        Grants are capped at 100 recipients per note.
+        """
+        note = self._own_note(pk)
+        username = _resolve_share_username(request)
+        recipient = _resolve_share_recipient(username)
+        if recipient is None or recipient.pk == request.user.pk:
+            # Unknown username / self-share — same body as a
+            # real grant, so existence is never revealed.
+            return Response({'shared': True})
+        if note.shares.filter(shared_with=recipient).exists():
+            return Response({'shared': True})
+        if note.shares.count() >= SHARE_RECIPIENT_CAP:
+            return _validation_error(
+                'Share recipient limit reached '
+                f'({SHARE_RECIPIENT_CAP}).'
+            )
+        NoteShare.objects.create(
+            note=note,
+            owner=request.user,
+            shared_with=recipient,
+        )
+        return Response({'shared': True})
+
+    @action(
+        detail=True,
+        methods=['delete'],
+        url_path=r'share/(?P<username>[^/.]+)',
+    )
+    def unshare(self, request, pk=None, username=None):
+        """DELETE /api/v1/notes/<id>/share/<username>/ — revoke a
+        grant. Idempotent: a missing row returns 204 too."""
+        note = self._own_note(pk)
+        NoteShare.objects.filter(
+            note=note, shared_with__username__iexact=username,
+        ).delete()
+        return Response(status=drf_status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['get'], url_path='shares')
+    def shares(self, request, pk=None):
+        """GET /api/v1/notes/<id>/shares/ — owner-only grant
+        listing: [{shared_with, created_at}]."""
+        note = self._own_note(pk)
+        data = [
+            {
+                'shared_with': share.shared_with.username,
+                'created_at': share.created_at,
+            }
+            for share in note.shares.select_related('shared_with')
+        ]
+        return Response(data)
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='shared-with-me',
+    )
+    def shared_with_me(self, request):
+        """
+        GET /api/v1/notes/shared-with-me/
+
+        Notes readable to the caller through grant objects:
+        direct NoteShare grants plus notes under granted tags
+        (subtree-expanded), and the TagShare grants themselves
+        so the UI can render read-only tag nodes.
+        """
+        note_ids = NoteShare.objects.filter(
+            shared_with=request.user,
+        ).values_list('note_id', flat=True)
+        tag_ids = _shared_tag_ids(request.user)
+        notes = (
+            Note.objects.filter(
+                Q(id__in=note_ids) | Q(tag_id__in=tag_ids)
+            )
+            .select_related('tag', 'user')
+            .prefetch_related('verses', 'translations')
+            .order_by('-created_at')
+        )
+        context = self.get_serializer_context()
+        context['include_verse_text'] = False
+        tag_shares = [
+            {
+                'id': share.tag.id,
+                'name': share.tag.name,
+                'include_descendants': share.include_descendants,
+                'created_at': share.created_at,
+            }
+            for share in TagShare.objects.filter(
+                shared_with=request.user,
+            ).select_related('tag')
+        ]
+        return Response({
+            'notes': NoteSerializer(
+                notes, many=True, context=context
+            ).data,
+            'tag_shares': tag_shares,
+        })
+
+    @action(
+        detail=True,
+        methods=['post', 'delete'],
+        url_path='bookmark',
+    )
+    def bookmark(self, request, pk=None):
+        """
+        POST   /api/v1/notes/<id>/bookmark/ — save the note.
+        DELETE /api/v1/notes/<id>/bookmark/ — drop the save.
+
+        Saves target notes the caller can read but does not
+        own: inaccessible notes 404, own notes 400. POST is
+        idempotent (one row ever). DELETE removes the bookmark
+        row itself so it also works after access was lost —
+        otherwise an 'unavailable' bookmark could never be
+        cleaned up.
+        """
+        if request.method == 'DELETE':
+            SavedNote.objects.filter(
+                user=request.user, note_id=pk,
+            ).delete()
+            return Response(status=drf_status.HTTP_204_NO_CONTENT)
+        note = get_object_or_404(
+            get_accessible_notes_qs(request.user), pk=pk,
+        )
+        if note.user_id == request.user.id:
+            return _validation_error(
+                'You cannot bookmark your own note.'
+            )
+        _, created = SavedNote.objects.get_or_create(
+            user=request.user, note=note,
+        )
+        return Response(
+            {'bookmarked': True},
+            status=(
+                drf_status.HTTP_201_CREATED
+                if created
+                else drf_status.HTTP_200_OK
+            ),
+        )
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='bookmarks',
+    )
+    def bookmarks(self, request):
+        """
+        GET /api/v1/notes/bookmarks/
+
+        The caller's saved notes newest-first. Available rows
+        embed the full note payload; a bookmark whose target
+        lost accessibility returns {note_id, available: false}
+        until the user removes it.
+        """
+        accessible = get_accessible_notes_qs(request.user)
+        saved = (
+            SavedNote.objects.filter(user=request.user)
+            .select_related('note', 'note__tag', 'note__user')
+            .prefetch_related(
+                'note__verses', 'note__translations'
+            )
+            .annotate(
+                available=Exists(
+                    accessible.filter(pk=OuterRef('note_id'))
+                )
+            )
+            .order_by('-created_at')
+        )
+        context = self.get_serializer_context()
+        context['include_verse_text'] = False
+        entries = []
+        for row in saved:
+            if row.available:
+                entries.append({
+                    'note_id': row.note_id,
+                    'available': True,
+                    'created_at': row.created_at,
+                    'note': NoteSerializer(
+                        row.note, context=context
+                    ).data,
+                })
+            else:
+                entries.append({
+                    'note_id': row.note_id,
+                    'available': False,
+                    'created_at': row.created_at,
+                })
+        return Response(entries)
+
+    @action(detail=True, methods=['post'], url_path='copy')
+    def copy(self, request, pk=None):
+        """
+        POST /api/v1/notes/<id>/copy/  {"tag_id":
+            <one of mine>|"untagged"|null}
+
+        Copy an accessible note into the caller's account:
+        private, unpublished, fresh appended tag_position,
+        verse links duplicated, images not copied, provenance
+        on copied_from (serialized owner-only). Own notes and
+        inaccessible notes fail 400/404 respectively.
+        """
+        note = get_object_or_404(
+            get_accessible_notes_qs(request.user), pk=pk,
+        )
+        if note.user_id == request.user.id:
+            return _validation_error(
+                'You cannot copy your own note.'
+            )
+        target = _copy_target_tag(request, required=False)
+        with transaction.atomic():
+            new_note = _copy_note(
+                note, request.user, target,
+                _next_tag_position(target),
+            )
+        _schedule_note_translations(new_note)
+        context = self.get_serializer_context()
+        return Response(
+            NoteSerializer(new_note, context=context).data,
+            status=drf_status.HTTP_201_CREATED,
+        )
+
     @extend_schema(
         request=LinkedNotesRequestSerializer,
         parameters=[
@@ -1153,7 +1872,7 @@ class NoteViewSet(viewsets.ModelViewSet):
             Note.objects
             .filter(user=user)
             .filter(query)
-            .select_related('tag')
+            .select_related('tag', 'user')
             .prefetch_related('verses', 'translations')
             .distinct()
             .order_by('-created_at')

@@ -62,6 +62,15 @@ class Tag(models.Model):
             "public=True and the tag's notes are shareable."
         ),
     )
+    published = models.BooleanField(
+        default=False,
+        help_text=(
+            "If True, new notes under this tag default to "
+            "published=True (listed in the public directory). "
+            "Requires the annotations.publish_note permission; "
+            "published implies public on the notes."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -141,6 +150,39 @@ class Note(models.Model):
         help_text="If True, this note is accessible to unauthenticated users."
     )
 
+    published = models.BooleanField(
+        default=False,
+        help_text=(
+            "If True, this note is listed in the public "
+            "directory feed and search. Writing it requires "
+            "the annotations.publish_note permission. "
+            "Invariant: published implies public."
+        ),
+    )
+
+    copied_from = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='copies',
+        help_text=(
+            "Source note this row was copied from via "
+            "POST /notes/<id>/copy/. Serialized to the copy's "
+            "owner only. SET_NULL keeps copies when the "
+            "source is deleted."
+        ),
+    )
+
+    note_text_plain = models.TextField(
+        blank=True,
+        help_text=(
+            "Plain-text form of note_text (TipTap JSON "
+            "stripped) maintained on every write path; backs "
+            "the published-directory ?q= search."
+        ),
+    )
+
     tag_position = models.FloatField(
         default=get_unix_timestamp,
         help_text=(
@@ -187,6 +229,12 @@ class Note(models.Model):
                 name='unique_tag_position_per_tag',
                 condition=Q(tag__isnull=False),
             )
+        ]
+        permissions = [
+            (
+                'publish_note',
+                'Can publish notes to the public directory',
+            ),
         ]
 
     def __str__(self):
@@ -567,6 +615,168 @@ class NoteVerse(models.Model):
             note_id_display = self.note.id.hex[:8]
         return (
             f"Link: Note {note_id_display} to Verse {self.verse.id}"
+        )
+
+
+def generate_note_share_id():
+    return f"SHR{str(uuid.uuid4()).upper().replace('-', '')[:15]}"
+
+
+class NoteShare(models.Model):
+    """A targeted per-recipient read grant on one note.
+
+    Resolved live inside ``get_accessible_notes_qs`` — revoking
+    the row is revoking access. ``owner`` is denormalized for
+    audit; the grant's scope always follows the note's current
+    owner.
+    """
+
+    id = models.CharField(
+        max_length=18,
+        default=generate_note_share_id,
+        primary_key=True,
+        editable=False,
+        help_text="Unique identifier for the note share.",
+    )
+    note = models.ForeignKey(
+        Note,
+        on_delete=models.CASCADE,
+        related_name='shares',
+        help_text="The note being shared.",
+    )
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='note_shares_granted',
+        help_text="The user who created the grant.",
+    )
+    shared_with = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='note_shares_received',
+        help_text="The user who may read the note.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Note Share"
+        verbose_name_plural = "Note Shares"
+        unique_together = ('note', 'shared_with')
+        ordering = ['created_at']
+
+    def __str__(self):
+        return (
+            f"Share of note {self.note_id[:8]} "
+            f"with {self.shared_with_id}"
+        )
+
+
+def generate_tag_share_id():
+    return f"TSH{str(uuid.uuid4()).upper().replace('-', '')[:15]}"
+
+
+class TagShare(models.Model):
+    """A targeted per-recipient grant on a tag's notes.
+
+    ``include_descendants`` is evaluated at read time through
+    ``subtree_tag_ids`` — notes added to the shared tag (or its
+    subtree) are covered immediately and notes moved out stop
+    being shared; no materialized row set goes stale.
+    """
+
+    id = models.CharField(
+        max_length=18,
+        default=generate_tag_share_id,
+        primary_key=True,
+        editable=False,
+        help_text="Unique identifier for the tag share.",
+    )
+    tag = models.ForeignKey(
+        Tag,
+        on_delete=models.CASCADE,
+        related_name='shares',
+        help_text="The tag whose notes are shared.",
+    )
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='tag_shares_granted',
+        help_text="The user who created the grant.",
+    )
+    shared_with = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='tag_shares_received',
+        help_text="The user who may read the tag's notes.",
+    )
+    include_descendants = models.BooleanField(
+        default=False,
+        help_text=(
+            "When True the grant covers the tag's whole "
+            "descendant subtree, resolved live at read time."
+        ),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Tag Share"
+        verbose_name_plural = "Tag Shares"
+        unique_together = ('tag', 'shared_with')
+        ordering = ['created_at']
+
+    def __str__(self):
+        scope = 'subtree' if self.include_descendants else 'tag'
+        return (
+            f"Share of tag {self.tag_id[:8]} ({scope}) "
+            f"with {self.shared_with_id}"
+        )
+
+
+def generate_saved_note_id():
+    return f"SVD{str(uuid.uuid4()).upper().replace('-', '')[:15]}"
+
+
+class SavedNote(models.Model):
+    """A bookmark pointer from a user to an accessible note
+    they do not own.
+
+    A bookmark whose target loses accessibility is reported
+    'unavailable' by the listing (the row survives); a deleted
+    note cascades the bookmark away — deliberate asymmetry,
+    see the note-sharing design.
+    """
+
+    id = models.CharField(
+        max_length=18,
+        default=generate_saved_note_id,
+        primary_key=True,
+        editable=False,
+        help_text="Unique identifier for the saved note.",
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='saved_notes',
+        help_text="The user who bookmarked the note.",
+    )
+    note = models.ForeignKey(
+        Note,
+        on_delete=models.CASCADE,
+        related_name='saved_by',
+        help_text="The bookmarked note.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Saved Note"
+        verbose_name_plural = "Saved Notes"
+        unique_together = ('user', 'note')
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return (
+            f"Saved note {self.note_id[:8]} "
+            f"by {self.user_id}"
         )
 
 

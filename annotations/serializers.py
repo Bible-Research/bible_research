@@ -25,6 +25,8 @@ from .models import (
     Image,
     ReadingPosition
 )
+from .services.note_text import note_text_to_plain
+from .services.sharing import assert_can_publish
 from .services.translation_service import hash_note_text
 User = get_user_model()
 
@@ -154,7 +156,7 @@ class TagSerializer(serializers.ModelSerializer):
         model = Tag
         fields = [
             'id', 'user', 'name', 'parent_tag', 'public',
-            'note_count', 'created_at', 'updated_at',
+            'published', 'note_count', 'created_at', 'updated_at',
         ]
         # 'read_only_fields' makes sure 'id', 'created_at', 'updated_at' are
         # automatically handled by Django and not expected in user input.
@@ -206,14 +208,33 @@ class TagSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        """Reject duplicate top-level tag names per user.
+        """Reject duplicate top-level tag names per user,
+        enforce the publish flag invariant and gate.
 
-        ``unique_together (user, name, parent_tag)`` cannot cover
-        NULL parents (UNIQUE treats NULLs as distinct), so the
-        application enforces the top-level (user, name) rule ahead
-        of the model's conditional ``UniqueConstraint``
-        (``unique_top_level_tag_name_per_user``).
+        ``published`` ⇒ ``public`` holds at tag level too
+        (published ⇒ public upward, clearing public clears
+        published). A tag ending up ``published=True``
+        requires ``annotations.publish_note`` — new notes
+        default to published under it.
         """
+        if attrs.get('published'):
+            attrs['public'] = True
+        elif attrs.get('public') is False:
+            attrs['published'] = False
+        effective_published = attrs.get(
+            'published',
+            self.instance.published if self.instance else False,
+        )
+        assert_can_publish(
+            self.context.get('request'), effective_published
+        )
+
+        # ``unique_together (user, name, parent_tag)`` cannot
+        # cover NULL parents (UNIQUE treats NULLs as distinct),
+        # so the application enforces the top-level
+        # (user, name) rule ahead of the model's conditional
+        # ``UniqueConstraint``
+        # (``unique_top_level_tag_name_per_user``).
         instance = getattr(self, 'instance', None)
         name = attrs.get(
             'name', instance.name if instance else None
@@ -241,6 +262,18 @@ class TagSerializer(serializers.ModelSerializer):
                     )
                 })
         return attrs
+
+
+class NoteAuthorSerializer(serializers.ModelSerializer):
+    """Minimal read-only attribution object for a note — the
+    same ``{id, username}`` shape comments expose. The
+    username of a published note's author is public
+    information by definition (see the note-sharing design)."""
+
+    class Meta:
+        model = User
+        fields = ['id', 'username']
+        read_only_fields = ['id', 'username']
 
 
 class NoteVerseReferenceSerializer(serializers.Serializer):
@@ -310,6 +343,15 @@ class NoteSerializer(serializers.ModelSerializer):
     # Declared so an omitted 'public' key is absent from
     # validated_data — create() then inherits the tag's flag.
     public = serializers.BooleanField(required=False)
+    # Same contract as 'public': omitted inherits
+    # tag.published; writing it (directly or via inheritance)
+    # is gated by assert_can_publish in validate().
+    published = serializers.BooleanField(required=False)
+    author = NoteAuthorSerializer(source='user', read_only=True)
+    # Owner-only provenance — to_representation drops the key
+    # for everyone else so a published copy never links back
+    # to its source.
+    copied_from = serializers.SerializerMethodField()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -331,17 +373,20 @@ class NoteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Note
         fields = [
-            'id', 'user', 'note_text', 'public', 'created_at',
-            'updated_at', 'tag', 'tag_position', 'verse_references',
-            'is_owner', 'source_language',
+            'id', 'user', 'note_text', 'public', 'published',
+            'created_at', 'updated_at', 'tag', 'tag_position',
+            'verse_references', 'is_owner', 'source_language',
+            'author', 'copied_from',
         ]
         # tag_position is managed exclusively by reorder/move —
         # a client-supplied value on write can collide with the
         # unique_tag_position_per_tag constraint and 500.
         # source_language is detection output, never writable.
+        # note_text_plain stays out of the payload entirely —
+        # it is a search index, not content.
         read_only_fields = [
             'id', 'created_at', 'updated_at', 'tag_position',
-            'source_language',
+            'source_language', 'author', 'copied_from',
         ]
 
     def validate_verse_references(self, value):
@@ -349,6 +394,39 @@ class NoteSerializer(serializers.ModelSerializer):
         note to the same verse twice is meaningless and would
         violate the NoteVerse uniqueness constraint."""
         return dedupe_verse_refs(value)
+
+    def validate(self, attrs):
+        """Enforce the publish gate on every write whose
+        EFFECTIVE result is ``published=True``: an explicit
+        flag, an unchanged published note being edited, or a
+        create inheriting a published tag's default.
+
+        An explicit ``public=False`` in the same write forces
+        published off (downward invariant), so it is NOT
+        gated — unless ``published=True`` was submitted too,
+        where the upward coercion wins.
+        """
+        tag = attrs.get(
+            'tag',
+            self.instance.tag if self.instance else None,
+        )
+        if 'published' in attrs:
+            effective_published = attrs['published']
+        elif attrs.get('public') is False:
+            effective_published = False
+        elif self.instance is not None:
+            effective_published = self.instance.published
+        else:
+            effective_published = bool(tag and tag.published)
+        assert_can_publish(
+            self.context.get('request'), effective_published
+        )
+        return attrs
+
+    def get_copied_from(self, obj):
+        """The source note id — owner only; to_representation
+        removes the key for every other reader."""
+        return obj.copied_from_id
 
     def get_is_owner(self, obj):
         """True only when the request user owns this note."""
@@ -408,13 +486,32 @@ class NoteSerializer(serializers.ModelSerializer):
         # Resolve all references before any write so a missing
         # verse fails without leaving an orphan Note row behind.
         verse_map = resolve_verse_refs(verse_references_data)
-        # An omitted 'public' flag inherits the tag's publicity —
-        # an explicit false is honored (per-note opt-out). The
-        # default applies at creation only; update() never
-        # re-derives it.
+        # An omitted 'public'/'published' flag inherits the
+        # tag's flags — an explicit false is honored (per-note
+        # opt-out). The defaults apply at creation only;
+        # update() never re-derives them.
+        tag = validated_data.get('tag')
+        published_explicit = 'published' in validated_data
         if 'public' not in validated_data:
-            tag = validated_data.get('tag')
             validated_data['public'] = bool(tag and tag.public)
+        if 'published' not in validated_data:
+            validated_data['published'] = bool(
+                tag and tag.published
+            )
+        # Flag invariant both directions: an explicitly set
+        # published coerces public=true; otherwise public=false
+        # clears published — including an inherited published
+        # (mirrors update(), the bulk path and the gate's
+        # effective-result computation).
+        if published_explicit and validated_data['published']:
+            validated_data['public'] = True
+        elif not validated_data['public']:
+            validated_data['published'] = False
+        # Search index copy of the text — populated on every
+        # create path so copies surface in ?q= results.
+        validated_data['note_text_plain'] = note_text_to_plain(
+            validated_data.get('note_text', '')
+        )
         # Create the Note row and its NoteVerse links in one
         # transaction so a failed write rolls the Note back.
         with transaction.atomic():
@@ -454,6 +551,18 @@ class NoteSerializer(serializers.ModelSerializer):
         verse_map = None
         if verse_references_data is not None:
             verse_map = resolve_verse_refs(verse_references_data)
+
+        # Flag invariant both directions: setting published
+        # coerces public=true; clearing public clears
+        # published (mirrors the set-public tag cascade).
+        if validated_data.get('published'):
+            validated_data['public'] = True
+        elif validated_data.get('public') is False:
+            validated_data['published'] = False
+        if 'note_text' in validated_data:
+            validated_data['note_text_plain'] = (
+                note_text_to_plain(validated_data['note_text'])
+            )
 
         note = super().update(instance, validated_data)
 
@@ -511,6 +620,16 @@ class NoteSerializer(serializers.ModelSerializer):
         (empty 'text') and 'headings' is empty.
         """
         representation = super().to_representation(instance)
+        # copied_from is owner-only — exposing it on a
+        # published copy would leak the source note's
+        # existence/owner to anonymous readers.
+        request = self.context.get('request')
+        if not (
+            request
+            and request.user.is_authenticated
+            and instance.user_id == request.user.id
+        ):
+            representation.pop('copied_from', None)
         # ?lang= serving (D8): swap note_text to the requested
         # ready translation; 'served_language' records what the
         # payload actually carries so readers can label it.
@@ -658,6 +777,12 @@ class BulkNoteItemSerializer(serializers.Serializer):
     public = serializers.BooleanField(
         required=False,
     )
+    # Same contract — omitted inherits tag.published and is
+    # gated by the publish permission (checked in
+    # BulkNoteCreateSerializer.validate).
+    published = serializers.BooleanField(
+        required=False,
+    )
     verse_references = NoteVerseReferenceSerializer(
         many=True,
         required=False,
@@ -710,6 +835,23 @@ class BulkNoteCreateSerializer(serializers.Serializer):
             )
         return value
 
+    def validate(self, attrs):
+        """Publish gate on bulk items: an explicit
+        ``published`` or an inherited ``tag.published`` both
+        count as an effective published write; an explicit
+        ``public=False`` unpublishes instead."""
+        tag = attrs['tag_id']
+        request = self.context.get('request')
+        for note_data in attrs['notes']:
+            if 'published' in note_data:
+                effective = note_data['published']
+            elif note_data.get('public') is False:
+                effective = False
+            else:
+                effective = tag.published
+            assert_can_publish(request, effective)
+        return attrs
+
     def create(self, validated_data):
         """
         Bulk-creates all notes and their verse links.
@@ -727,17 +869,30 @@ class BulkNoteCreateSerializer(serializers.Serializer):
             for ref in nd.get('verse_references', [])
         )
 
-        note_instances = [
-            Note(
-                note_text=nd.get('note_text', ''),
-                # Omitted flag inherits the tag's publicity;
-                # an explicit false is honored.
-                public=nd.get('public', tag.public),
-                tag=tag,
-                user=user,
+        note_instances = []
+        for nd in notes_data:
+            # Flag invariant: an explicitly set published
+            # coerces public=true; otherwise public=false
+            # clears published. Omitted flags inherit the
+            # tag's.
+            published = nd.get('published', tag.published)
+            public = nd.get('public', tag.public)
+            if nd.get('published'):
+                public = True
+            elif not public:
+                published = False
+            note_instances.append(
+                Note(
+                    note_text=nd.get('note_text', ''),
+                    note_text_plain=note_text_to_plain(
+                        nd.get('note_text', '')
+                    ),
+                    public=public,
+                    published=published,
+                    tag=tag,
+                    user=user,
+                )
             )
-            for nd in notes_data
-        ]
         Note.objects.bulk_create(note_instances)
 
         nv_instances = []

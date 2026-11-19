@@ -650,6 +650,12 @@ REST_FRAMEWORK = {
         'search': '30/min',
         'token': '5/min',
         'register': '10/min',
+        # Note/tag share mutations — silent-200 stops the
+        # answer, not username-existence probing.
+        'share': '20/min',
+        # `notes/?q=` icontains scans — an unthrottled scan is
+        # a cheap DoS for authenticated users.
+        'notes-search': '30/min',
     },
 }
 

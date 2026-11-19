@@ -1165,6 +1165,71 @@ count again rather than 0:
 Missing or non-boolean `public` returns `400`
 `{"error": "validation_error", "message": "…"}`; foreign or
 nonexistent tags return `404`. The action is idempotent.
+Going private also clears `published` on the tag and on every
+note in the cascade (`published` ⇒ `public`).
+
+#### Set Tag Published (cascade)
+```
+POST /api/v1/tags/{tag_id}/set-published/
+Authorization: Token <your-token>
+Content-Type: application/json
+
+{
+  "published": true
+}
+```
+
+Same shape and cascade as `set-public`, but for the
+`published` flag (directory listing). Publishing requires the
+`annotations.publish_note` permission — a caller without it
+gets `400` (`validation_error`), never 403. The `true`
+direction coerces `public=true` on the tag and its notes;
+the `false` direction clears `published` only, leaving
+`public` untouched. `Tag.published` is also writable on
+create/PATCH like `public` — new notes under a published tag
+default to `published` (the inherited write is still gated).
+
+#### Share a Tag
+```
+POST /api/v1/tags/{tag_id}/share/
+DELETE /api/v1/tags/{tag_id}/share/{username}/
+GET /api/v1/tags/{tag_id}/shares/
+Authorization: Token <your-token>
+Content-Type: application/json
+
+{
+  "username": "someone",
+  "include_descendants": true
+}
+```
+
+Owner-only read-grant management. `username` resolves
+case-insensitively; known and unknown names get the identical
+`{"shared": true}` body so the endpoint can't be probed for
+account existence. Self-share is a no-op; re-sharing upserts
+`include_descendants` (a subtree grant covers notes under
+descendant tags, resolved live — later notes are shared,
+moved-out notes are not); grants cap at 100 recipients.
+DELETE is idempotent; GET lists `[{shared_with,
+include_descendants, created_at}]`. Non-owners get 404.
+Share mutations are rate-limited under the `share` scope.
+
+#### Copy a Tag
+```
+POST /api/v1/tags/{tag_id}/copy/
+Authorization: Token <your-token>
+Content-Type: application/json
+
+{
+  "tag_id": "TAG123456789ABCDE"   // must be one of yours
+}
+```
+
+Bulk-copies every note under the source tag that the caller
+can read into the destination tag — atomically, with fresh
+appended `tag_position`s and `copied_from` set. A source with
+more than 100 accessible notes fails `400` rather than
+truncating. Images are not copied.
 
 #### Delete Tag
 ```
@@ -1256,6 +1321,17 @@ uses it to decide whether a shared note is editable.
   - `-verse`: Bible order descending
 - `page` (optional): Page number (default: 1)
 - `page_size` (optional): Items per page (default: 25, max: 100)
+- `published` (optional): `published=true` lists the public
+  directory — every published note, open to anonymous
+  callers, ordered by recency (`-created_at`) by default.
+- `q` (optional): published-directory search — forces the
+  published scope and matches `note_text_plain` with
+  `icontains`. `q` combined with `tag_id` (or on a note
+  detail route) returns `400`. The directory scope skips
+  verse-text enrichment (`include_verse_text=False` — refs
+  keep coordinates, `text` stays empty) so a feed page
+  triggers no upstream Bible calls. `q` requests are
+  rate-limited under the `notes-search` scope.
 
 **Paginated Response**:
 ```json
@@ -1288,6 +1364,26 @@ Notes with no verse links keep the same response shape:
 `verses` is `[]`, `headings` is `[]`, and `tag` is still the
 expanded tag object when set — clients never have to sniff
 for absent keys or a raw tag PK.
+
+Note payloads also carry:
+
+- `published` — boolean, writable like `public`. Listed in
+  the public directory (`?published=true`, `?q=`). Writing it
+  requires `annotations.publish_note` (a `Meta` permission —
+  grant via admin user/group); violations return `400`
+  `{"error": "validation_error", "message": "…"}` — never
+  403, and the effective result is what's gated (an explicit
+  `public=false` in the same write unpublishes instead).
+  Invariants: `published` ⇒ `public` (setting `published`
+  coerces `public=true`), and clearing `public` clears
+  `published` — including through the tag `set-public`
+  cascade. Omitted on create inherits the tag's flag, like
+  `public`. `GET /api/v1/users/me/` reports `can_publish`.
+- `author` — read-only `{id, username}` attribution object.
+- `copied_from` — provenance id on copies, serialized to the
+  copy's owner only (absent for everyone else).
+- `is_owner` — `true` only for the authenticated owner; the
+  frontend hides edit controls on shared notes.
 
 **Examples**:
 ```
@@ -1470,6 +1566,108 @@ leave the note unchanged.
 DELETE /api/v1/notes/{note_id}/
 Authorization: Token <your-token>
 ```
+
+#### Share a Note
+```
+POST /api/v1/notes/{note_id}/share/
+DELETE /api/v1/notes/{note_id}/share/{username}/
+GET /api/v1/notes/{note_id}/shares/
+Authorization: Token <your-token>
+Content-Type: application/json
+
+{
+  "username": "someone"
+}
+```
+
+Owner-only per-recipient read grants, same contract as tag
+sharing: silent `{"shared": true}` for known AND unknown
+usernames (no account-existence oracle), iexact resolution,
+self-share no-op, 100-recipient cap, owner-scoped `404` for
+non-owners, `204` revoke, `share`-scoped rate limit. Grants
+resolve live in the visibility funnel — revoking the row
+revokes access immediately, and every note-reading surface
+(comments, images, counts, order-index) inherits the same
+scope through `get_accessible_notes_qs`.
+
+#### Shared With Me
+```
+GET /api/v1/notes/shared-with-me/
+Authorization: Token <your-token>
+```
+
+Notes readable to the caller through grant objects — direct
+note shares plus notes under granted tags — and the tag
+grants themselves so the UI can render read-only tag nodes:
+
+```json
+{
+  "notes": [ { "id": "NOT…", "author": {...}, ... } ],
+  "tag_shares": [
+    {
+      "id": "TAG…",
+      "name": "Loved passages",
+      "include_descendants": true,
+      "created_at": "…"
+    }
+  ]
+}
+```
+
+#### Bookmark a Note
+```
+POST /api/v1/notes/{note_id}/bookmark/
+DELETE /api/v1/notes/{note_id}/bookmark/
+GET /api/v1/notes/bookmarks/
+Authorization: Token <your-token>
+```
+
+Bookmarks target notes the caller can read but does not own:
+inaccessible notes `404`, own notes `400`. POST is
+idempotent (`201` first time, `200` on repeats — one row
+ever); DELETE removes the pointer by id and returns `204`
+even after the note became inaccessible (that's how
+`unavailable` rows are cleaned up). The listing is
+newest-first:
+
+```json
+[
+  {
+    "note_id": "NOT…",
+    "available": true,
+    "created_at": "…",
+    "note": { "id": "NOT…", ... }
+  },
+  {
+    "note_id": "NOT…",
+    "available": false,
+    "created_at": "…"
+  }
+]
+```
+
+A bookmark whose target loses accessibility (revoked share,
+unpublished/private flip) stays listed as
+`{"note_id", "available": false}` until removed; a deleted
+note cascades the bookmark away entirely.
+
+#### Copy a Note
+```
+POST /api/v1/notes/{note_id}/copy/
+Authorization: Token <your-token>
+Content-Type: application/json
+
+{
+  "tag_id": "TAG123456789ABCDE"   // or "untagged" / null
+}
+```
+
+Copies an accessible note into the caller's account: private
+and unpublished, fresh appended `tag_position`, verse links
+duplicated, `copied_from` set (owner-only in the payload).
+`tag_id` must be one of the caller's tags or the `untagged`
+sentinel — foreign tag ids `400`. Own notes `400`,
+inaccessible notes `404`. Images are not copied.
 
 #### List Linked Notes
 ```
@@ -1753,6 +1951,8 @@ class Tag(models.Model):
     user = ForeignKey(User, on_delete=CASCADE)
     name = CharField(max_length=100)
     parent_tag = ForeignKey('self', null=True, blank=True)
+    public = BooleanField(default=False)    # notes default to public
+    published = BooleanField(default=False) # notes default to directory-listed
     created_at = DateTimeField(auto_now_add=True)
     updated_at = DateTimeField(auto_now=True)
 ```
@@ -1774,10 +1974,15 @@ class Note(models.Model):
     tag = ForeignKey(Tag, null=True, blank=True)
     note_text = TextField(blank=True)
     public = BooleanField(default=False)
+    published = BooleanField(default=False)  # directory; ⇒ public
+    copied_from = ForeignKey('self', SET_NULL, null=True)  # owner-only
+    note_text_plain = TextField(blank=True)  # ?q= search index
     source_language = CharField(max_length=10, blank=True)
     verses = ManyToManyField(Verse, through='NoteVerse')
     created_at = DateTimeField(auto_now_add=True)
     updated_at = DateTimeField(auto_now=True)
+    class Meta:
+        permissions = [('publish_note', '…')]  # gates `published`
 ```
 
 ### NoteTranslation Model
@@ -1813,6 +2018,42 @@ class NoteVerse(models.Model):
     verse = ForeignKey(Verse, on_delete=PROTECT)
     created_at = DateTimeField(auto_now_add=True)
 ```
+
+### NoteShare / TagShare / SavedNote Models
+```python
+class NoteShare(models.Model):
+    id = CharField(max_length=18, primary_key=True)  # SHR + 15 chars
+    note = ForeignKey(Note, related_name='shares')
+    owner = ForeignKey(User, related_name='note_shares_granted')
+    shared_with = ForeignKey(User, related_name='note_shares_received')
+    created_at = DateTimeField(auto_now_add=True)
+    # unique_together (note, shared_with)
+
+class TagShare(models.Model):
+    id = CharField(max_length=18, primary_key=True)  # TSH + 15 chars
+    tag = ForeignKey(Tag, related_name='shares')
+    owner = ForeignKey(User, related_name='tag_shares_granted')
+    shared_with = ForeignKey(User, related_name='tag_shares_received')
+    include_descendants = BooleanField(default=False)
+    created_at = DateTimeField(auto_now_add=True)
+    # unique_together (tag, shared_with)
+
+class SavedNote(models.Model):
+    id = CharField(max_length=18, primary_key=True)  # SVD + 15 chars
+    user = ForeignKey(User, related_name='saved_notes')
+    note = ForeignKey(Note, related_name='saved_by')
+    created_at = DateTimeField(auto_now_add=True)
+    # unique_together (user, note)
+```
+
+Share rows are evaluated live inside
+`get_accessible_notes_qs` — `include_descendants` expands
+through `subtree_tag_ids` at read time, so subtree edits take
+effect without touching grant rows. `note_text_plain` is
+maintained on every write path
+(`annotations/services/note_text.py::note_text_to_plain`,
+ported from the frontend's `toPlainText`) and was backfilled
+for existing rows by migration `0015`.
 
 **Constraints** (both declared, pending `makemigrations`):
 - `unique_note_verse_link` on NoteVerse: one link per
