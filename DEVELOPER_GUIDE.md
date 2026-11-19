@@ -2343,6 +2343,42 @@ python manage.py repair_audio_files \
   --manifest /tmp/manifest.json --apply
 ```
 
+**Local run behind the Netskope proxy**: `synthesize_speech`
+uses gRPC, which the corporate TLS-intercepting proxy cannot
+carry — every call fails with `ServiceUnavailable: 503 …
+missing selected ALPN property`, even with the combined CA
+bundle env vars (`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` et al.)
+exported; the proxy completes the handshake but drops ALPN,
+which gRPC requires. GCS reads/writes are unaffected (the
+storage client rides HTTP/1.1). Run the apply step through
+an injected REST-transport client instead:
+
+```python
+# python manage.py shell
+from google.cloud import texttospeech
+from google.cloud.texttospeech_v1.services.text_to_speech \
+    import transports
+from bible.services.google_tts import client as tts_mod
+
+tts_mod._default = tts_mod.GoogleTTSClient(
+    client=texttospeech.TextToSpeechClient(
+        transport=transports.TextToSpeechRestTransport()))
+
+from django.core.management import call_command
+call_command("repair_audio_files",
+             manifest="/tmp/manifest.json", apply=True)
+```
+
+REST transport is plain HTTPS through `requests`, which
+honours `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`. Chapter-mode
+entries (`audio_chapter/` suspects) additionally hit the
+lazy v1beta1 client for SSML marks — seed
+`tts_mod._default._beta_client` the same way, importing
+`transports` from
+`google.cloud.texttospeech_v1beta1.services.text_to_speech`
+and wrapping it in
+`texttospeech_v1beta1.TextToSpeechClient`.
+
 Engine scope: only the Google TTS modes (`audio/`,
 `audio_chapter/`) regenerate today; `audio_gemini/` and
 `audio_edge/` suspects are reported
