@@ -17,9 +17,22 @@ set -e
 # the target dir resolve regardless.
 cd "$(dirname "$0")/.."
 
-PYVER="$(head -n1 .python-version)"
+PYVER="$(head -n1 .python-version | tr -d '[:space:]')"
 PYMM="$(echo "$PYVER" | cut -d. -f1-2)"
 TARGET=.vercel_python_packages
+
+# Only a numeric X.Y pin is supported below — a name or
+# major-only pin must fail loudly rather than resolve the
+# newest interpreter and reproduce the drift bug this
+# script exists to fix.
+case "$PYMM" in
+  [0-9]*.[0-9]*) ;;
+  *)
+    echo "vercel_install: unsupported .python-version" \
+      "'$PYVER' (need X.Y)" >&2
+    exit 1
+    ;;
+esac
 
 # Diagnostics — the build log must show which installer
 # ran and which interpreters the image actually offers.
@@ -28,12 +41,17 @@ echo "vercel_install: uv=$(command -v uv || echo absent)"
 for P in "python$PYMM" python3; do
   echo "vercel_install: $P=$(command -v "$P" || echo absent)"
 done
+MANAGED="$(ls -d \
+  /uv/python/versions/*/bin/"python$PYMM" \
+  "$HOME"/.local/share/uv/python/*/bin/"python$PYMM" \
+  2>/dev/null | head -1)"
+echo "vercel_install: managed=${MANAGED:-none}"
 
-if command -v uv >/dev/null 2>&1; then
-  uv pip install \
-    --python "$PYVER" \
-    --target "$TARGET" \
-    -r requirements.txt
+if command -v uv >/dev/null 2>&1 && \
+   uv pip install \
+     --python "$PYVER" \
+     --target "$TARGET" \
+     -r requirements.txt; then
   exit 0
 fi
 
@@ -41,27 +59,43 @@ fi
 # invokes its own binary by absolute path. Fall back to
 # pip, but only on an interpreter matching the pin: a
 # newer one (e.g. a 3.14 build venv) reproduces the
-# original cp314-vs-3.12 wheel bug.
-for PY in "python$PYMM" python3; do
-  command -v "$PY" >/dev/null 2>&1 || continue
-  PYV="$("$PY" -c 'import sys
-print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
+# original cp314-vs-3.12 wheel bug. uv-managed CPython
+# lives under its own dirs (the runtime traceback showed
+# /uv/python/versions/...), not on PATH, so glob those
+# before the PATH names.
+for PY in \
+  /uv/python/versions/*/bin/"python$PYMM" \
+  "$HOME"/.local/share/uv/python/*/bin/"python$PYMM" \
+  "python$PYMM" \
+  python3
+do
+  command -v "$PY" >/dev/null 2>&1 || [ -x "$PY" ] || \
+    continue
+  if ! PYV="$("$PY" -c 'import sys
+print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"; then
+    continue
+  fi
   [ "$PYV" = "$PYMM" ] || continue
   "$PY" -m pip --version >/dev/null 2>&1 || continue
-  "$PY" -m pip install \
-    --target "$TARGET" \
-    -r requirements.txt
-  exit 0
+  if "$PY" -m pip install \
+       --target "$TARGET" \
+       -r requirements.txt; then
+    exit 0
+  fi
 done
 
-# No uv on PATH and no pinned interpreter with pip —
-# bootstrap the standalone uv binary; it resolves wheels
-# for $PYVER via its managed interpreters (the image has
-# cpython under uv's install dir; it can also download).
+# Last resort: bootstrap the standalone uv binary; it
+# resolves wheels for $PYVER via managed interpreters
+# (the image carries cpython under uv's dirs; it can also
+# download one) regardless of what is on PATH.
 echo "vercel_install: no uv/pinned-pip; bootstrapping uv"
 curl -LsSf https://astral.sh/uv/install.sh | sh
 UV_BIN="$HOME/.local/bin/uv"
 [ -x "$UV_BIN" ] || UV_BIN="$HOME/.cargo/bin/uv"
+[ -x "$UV_BIN" ] || {
+  echo "vercel_install: uv bootstrap failed" >&2
+  exit 1
+}
 "$UV_BIN" pip install \
   --python "$PYVER" \
   --target "$TARGET" \
