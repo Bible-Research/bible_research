@@ -10,11 +10,21 @@
 # function actually run — observed as `No module named
 # 'psycopg2._psycopg'` → ImproperlyConfigured at migrate
 # time. `--target` must stay `.vercel_python_packages`
-# (where the preset expects deps) and `--python` must stay
-# in sync with `.python-version`.
+# (where the preset expects deps) and `--python` is read
+# from `.python-version` so the pin cannot drift.
 set -e
 
-uv pip install \
-  --python 3.12 \
-  --target .vercel_python_packages \
-  -r requirements.txt
+if command -v uv >/dev/null 2>&1; then
+  uv pip install \
+    --python "$(cat .python-version)" \
+    --target .vercel_python_packages \
+    -r requirements.txt
+else
+  # uv absent from the installCommand PATH — fall back to
+  # the build/runtime interpreter's own pip (python3 is
+  # CPython 3.12 in this image). If pip is missing too the
+  # build fails loudly here, not later at migrate.
+  python3 -m pip install \
+    --target .vercel_python_packages \
+    -r requirements.txt
+fi
