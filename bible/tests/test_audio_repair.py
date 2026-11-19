@@ -652,3 +652,32 @@ def test_audit_report_supports_gs_uri():
     assert blob.uploads
     report = json.loads(blob.uploads[0])
     assert report["scanned"] == 1
+
+
+def test_apply_regen_failure_is_captured(tmp_path):
+    """A tolerated per-artifact regen failure reports an
+    error-level event tagged with the job label."""
+    path = write_manifest(
+        tmp_path,
+        make_manifest(
+            [NUM24_MP3], issues={NUM24_MP3: ["clipped"]},
+        ),
+    )
+    inst = MagicMock()
+    inst.run.side_effect = RuntimeError("synth blew up")
+    mocks = _patches()
+    mocks["synth_cls"] = patch(
+        f"{_CMD}.Synthesizer", return_value=inst,
+    )
+    with patch(
+        f"{_CMD}.capture_provider_exception"
+    ) as mock_capture:
+        out, started, exc = _run(path, mocks, "--apply")
+    # The command exits nonzero on failed repairs — the capture
+    # is what keeps the failure visible in Sentry.
+    assert isinstance(exc, CommandError)
+    assert mock_capture.call_count == 1
+    assert (
+        mock_capture.call_args.kwargs["tags"]["job"]
+        == "repair_audio_files"
+    )

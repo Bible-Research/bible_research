@@ -410,3 +410,22 @@ class TestEdgeSynthesizerTimestamps:
             for c in client.synthesize.call_args_list
         ]
         assert calls == ["aaa", "bbbb", "cc"]
+
+
+@patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_edge_tts_error_reports_once_per_run(
+    sword_factory, tmp_path, worklist_client,
+):
+    """A tolerated edge-tts outage reports ONE warning-level
+    provider event for the run (deduped, upstream=True)."""
+    sword_factory.return_value = worklist_client
+    _FakeEdgeSynth.outcome = EdgeTTSError("no audio")
+
+    with patch(f"{_CMD}.capture_provider_exception") as cap:
+        _invoke_out(tmp_path)
+
+    cap.assert_called_once()
+    kwargs = cap.call_args.kwargs
+    assert kwargs["tags"]["job"] == "generate_edge_audio"
+    assert kwargs["upstream"] is True

@@ -2413,22 +2413,61 @@ sent (local dev and CI are silent by default).
 - **Local**: set `SENTRY_DSN` in `config.yaml` (see
   `config_template.yaml`) to the `bible-research-api` project's
   Client Key DSN.
-- **Production (GAE)**: create the `SENTRY_DSN` secret in GCP
-  Secret Manager (Terraform reads its metadata via
-  `terraform/secrets.tf`); the env var of the same name also
-  works. `GAE_VERSION` is used as the Sentry release;
+- **Production (GAE + Cloud Run jobs)**: `SENTRY_DSN` is an
+  entry inside the shared `env-file` GCP Secret Manager secret —
+  never a standalone secret. Verify with
+  `gcloud secrets versions access latest --secret=env-file |
+  grep SENTRY_DSN`; the env var of the same name also works.
+  Release is `SENTRY_RELEASE` when set, else `GAE_VERSION`
+  (Cloud Run jobs set neither → release-less events);
   environment is `production` on GCP, `development` otherwise.
-- Uncaught exceptions (HTTP 500s) are captured automatically.
-  Provider failures surfaced through the `error`/`error_code`
-  contract are additionally captured at `warning` level with an
-  `error_code` tag (`rate_limited`/`provider_error` only —
-  `not_found` and `book_not_in_fileset` are never sent). Log
-  records INFO+ are breadcrumbs only, not events.
-- `send_default_pii=False`; `before_send` drops request bodies
-  on `/api/token/` and `/api/v1/users/` (they contain
-  passwords).
-- `sentry-trace`/`baggage` are allowed CORS headers so the
-  frontend can link its traces to backend requests.
+
+**Event streams** — the alert queue is
+`is:unresolved level:error environment:production`:
+
+- Uncaught exceptions (HTTP 500s) are captured automatically at
+  error level.
+- `capture_internal_exception`
+  (`bible/utils/provider_errors.py`) reports caught server-side
+  failures — GCS signing/counter bugs, unexpected DB
+  `IntegrityError`/`OperationalError` (deadlocks), SWORD data
+  corruption, and Cloud Run job failures — at **error** level,
+  tagged `error_code:internal_error`. Job events also carry a
+  `job:<label>` tag; `run_all_jobs` adds an aggregate
+  `capture_message` and flushes before exit.
+- `capture_provider_exception` reports upstream outages at
+  **warning** level, tagged `error_code` in
+  {`rate_limited`, `provider_error`} —
+  `not_found`/`book_not_in_fileset` are never sent. An exception
+  caught at a provider boundary that is *not* upstream-caused
+  (no upstream status, not a transport/SDK family — e.g. a
+  `TypeError` in response shaping) is re-routed to error-level
+  `internal_error` automatically.
+- Provider/job events carry `fileset_id`, `provider`, and
+  `endpoint` tags when known; fingerprints group on
+  `error_code` (+`fileset_id`) so one bad fileset cannot spawn
+  unbounded issue groups.
+- Log records INFO+ are breadcrumbs only, not events;
+  `ignore_errors` skips `KeyboardInterrupt` and `before_send`
+  drops `DisallowedHost` scanner noise.
+- `send_default_pii=False`; `SentryUserMiddleware` attaches only
+  `{'id': pk}` for authenticated requests; `before_send` drops
+  request bodies on `/api/token/` and `/api/v1/users/`
+  (they contain passwords).
+
+**Performance monitoring**: `traces_sampler` returns 0 for
+`/_ah/` health checks and the docs/schema routes, ~0.3 for
+`/api/`, 0.1 elsewhere; `profiles_sample_rate=0.1`. Provider
+calls, GCS reads/signing, and SWORD module scans emit explicit
+spans. `sentry-trace`/`baggage` are allowed CORS headers so the
+frontend can link its traces to backend requests.
+
+**Alert rules** (created manually in the Sentry UI): a new-issue
+alert on `level:error environment:production`, and a metric
+alert on warning-rate spikes tagged `error_code:provider_error`
+(upstream-outage detection). A GCP monitoring alert on failed
+`all-jobs` executions is the optional belt-and-suspenders
+fallback.
 
 ---
 
@@ -2582,8 +2621,9 @@ To run the app against the restored copy, repoint `config.yaml`'s
 - [ ] Configure allowed hosts
 - [ ] Set up database backups
 - [ ] Configure logging to external service
-- [ ] Create `SENTRY_DSN` in Secret Manager (enables Sentry
-      monitoring — see "Monitoring (Sentry)")
+- [ ] Add `SENTRY_DSN` to the shared `env-file` secret in Secret
+      Manager (enables Sentry monitoring — see
+      "Monitoring (Sentry)")
 - [ ] Review security settings
 
 ---

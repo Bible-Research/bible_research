@@ -24,6 +24,11 @@ from rest_framework.exceptions import (
     UnsupportedMediaType,
 )
 
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+    sentry_span,
+)
+
 
 class FileTooLarge(APIException):
     status_code = drf_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
@@ -252,36 +257,55 @@ def signed_image_url(
         bucket_name, object_name = without_scheme.split(
             "/", 1
         )
-    except (ValueError, IndexError):
+    except (ValueError, IndexError) as e:
         logger.error(
             "Cannot parse storage_url for image %s: %r",
             image_id,
             storage_url,
         )
+        # A malformed stored URL is a data bug, not a routine
+        # degradation — surface it while keeping the None
+        # contract.
+        capture_internal_exception(
+            e,
+            tags={'endpoint': 'annotations/images'},
+            contexts={'image': {'image_id': image_id}},
+        )
         return None
 
     try:
-        blob = _get_client().bucket(bucket_name).blob(
-            object_name
-        )
-        creds = _get_credentials()
-        url = blob.generate_signed_url(
-            version="v4",
-            expiration=datetime.timedelta(
-                seconds=ttl_seconds
-            ),
-            method="GET",
-            service_account_email=(
-                creds.service_account_email
-            ),
-            access_token=creds.token,
-        )
-    except Exception:
+        with sentry_span(
+            op='gcs.sign', description=object_name,
+        ):
+            blob = _get_client().bucket(bucket_name).blob(
+                object_name
+            )
+            creds = _get_credentials()
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=datetime.timedelta(
+                    seconds=ttl_seconds
+                ),
+                method="GET",
+                service_account_email=(
+                    creds.service_account_email
+                ),
+                access_token=creds.token,
+            )
+    except Exception as e:
         logger.exception(
             "Failed to sign URL for image %s "
             "(storage_url=%r)",
             image_id,
             storage_url,
+        )
+        # IAM/GCS signing outage or a credentials bug — the
+        # response still degrades to None, but the failure must
+        # reach the error queue.
+        capture_internal_exception(
+            e,
+            tags={'endpoint': 'annotations/images'},
+            contexts={'image': {'image_id': image_id}},
         )
         return None
 
@@ -314,10 +338,18 @@ def delete_original(
             image_id,
             storage_url,
         )
-    except Exception:
+    except Exception as e:
         logger.exception(
             "Failed to delete GCS object for image %s "
             "(storage_url=%r) — tolerated.",
             image_id,
             storage_url,
+        )
+        # Tolerated so the note/image row delete still succeeds,
+        # but an orphaning GCS failure is a real infrastructure
+        # failure worth reporting.
+        capture_internal_exception(
+            e,
+            tags={'endpoint': 'annotations/images'},
+            contexts={'image': {'image_id': image_id}},
         )

@@ -1,7 +1,15 @@
-from django.core.management.base import BaseCommand
 import json
-from bible.models import Verse
+import logging
 from datetime import datetime
+
+from django.core.management.base import BaseCommand, CommandError
+
+from bible.models import Verse
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -13,11 +21,20 @@ class Command(BaseCommand):
 
         try:
             populate_verses()
-            end_time = datetime.now()
-            print(f'ESV Bible verses import completed successfully at {end_time}')
-            print(f'Total time taken: {end_time - start_time}')
         except Exception as e:
-            print(f'Error importing ESV Bible verses: {e}')
+            logger.exception('Error importing ESV Bible verses')
+            capture_internal_exception(
+                e, tags={'job': 'import_esv_verses'},
+            )
+            raise CommandError(
+                f'ESV Bible verses import failed: {e}'
+            )
+        end_time = datetime.now()
+        print(
+            'ESV Bible verses import completed successfully '
+            f'at {end_time}'
+        )
+        print(f'Total time taken: {end_time - start_time}')
 
 
 def populate_verses():

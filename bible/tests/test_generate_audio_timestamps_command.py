@@ -452,4 +452,60 @@ def test_max_failures_aborts_on_consecutive_errors():
         ["--fileset-ids", "LATLVRN1DA"], stt=stt, dbt=dbt,
     )
     assert stt.long_running_recognize_uri.call_count == 3
-    assert "reason=consecutive_failures" in out
+    # A systematic outage ends all_failed — the month lock is
+    # left un-completed so a later run can retry (same rule as
+    # generate_chapter_audio).
+    assert "reason=all_failed" in out
+    mocks["mark_stt_run_complete"].assert_not_called()
+
+
+def test_per_chapter_stt_failure_is_captured():
+    """A tolerated per-chapter STT failure reports a
+    self-routing provider capture tagged with the job label."""
+    stt = _fake_stt()
+    stt.long_running_recognize_uri.side_effect = RuntimeError(
+        "recognizer blew up"
+    )
+    with patch(
+        f"{_CMD}.capture_provider_exception"
+    ) as mock_capture:
+        _run(["--fileset-ids", "LATLVRN1DA"], stt=stt)
+    assert mock_capture.call_count == 2
+    assert (
+        mock_capture.call_args.kwargs["tags"]["job"]
+        == "generate_audio_timestamps"
+    )
+
+
+def test_dbt_check_failure_reports_once_per_fileset():
+    """The per-chapter DBT coverage check emits at most one
+    provider event per fileset per run."""
+    dbt = _fake_dbt()
+    dbt.get_timestamps.side_effect = RuntimeError("dbt down")
+    with patch(
+        f"{_CMD}.capture_provider_exception"
+    ) as mock_capture:
+        _run(["--fileset-ids", "LATLVRN1DA"], dbt=dbt)
+    assert mock_capture.call_count == 1
+    kwargs = mock_capture.call_args.kwargs
+    assert kwargs["tags"]["fileset_id"] == "LATLVRN1DA"
+
+
+def test_download_mp3_sanitizes_transport_errors():
+    """``_download_mp3`` must not leak the signed URL — session.get
+    failures stringify it via urllib3's MaxRetryError."""
+    from bible.management.commands.generate_audio_timestamps \
+        import Command
+
+    dbt = MagicMock()
+    dbt.session.get.side_effect = (
+        __import__('requests').exceptions.ConnectionError(
+            "Max retries exceeded with url: "
+            "https://x/y.mp3?X-Amz-Signature=SECRET"
+        )
+    )
+    with pytest.raises(Exception) as exc:
+        Command()._download_mp3(dbt, "https://x/y.mp3?sig=1")
+    assert "SECRET" not in str(exc.value)
+    assert "Signature" not in str(exc.value)
+    assert exc.value.__cause__ is None

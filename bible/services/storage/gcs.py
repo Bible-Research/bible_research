@@ -18,6 +18,11 @@ from google.cloud import storage
 from django.conf import settings
 from django.core.cache import cache
 
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+    sentry_span,
+)
+
 logger = logging.getLogger(__name__)
 
 _GCS_UPLOAD_CONFLICT = (_gax.PreconditionFailed, _gax.Conflict)
@@ -223,8 +228,12 @@ def read_timestamps_json(
     _, json_path = chapter_object_paths(
         fileset_id, book_id, chapter, voice_name, mode=mode,
     )
-    blob = _bucket().blob(json_path)
-    payload = json.loads(blob.download_as_bytes())
+    with sentry_span(
+        op='gcs.read', description=json_path,
+        data={'fileset_id': fileset_id},
+    ):
+        blob = _bucket().blob(json_path)
+        payload = json.loads(blob.download_as_bytes())
     # Only successful reads are cached — a ``NotFound`` miss
     # ("audio exists but timestamps not generated yet") must
     # become visible as soon as the artifact is uploaded.
@@ -284,21 +293,26 @@ def signed_audio_url(
     )
     blob = _bucket().blob(audio_path)
 
-    credentials, _ = google.auth.default(
-        scopes=[
-            "https://www.googleapis.com/auth/devstorage.read_only",
-            "https://www.googleapis.com/auth/iam",
-        ]
-    )
-    credentials.refresh(Request())
+    with sentry_span(
+        op='gcs.sign', description=audio_path,
+        data={'fileset_id': fileset_id},
+    ):
+        credentials, _ = google.auth.default(
+            scopes=[
+                "https://www.googleapis.com/auth/"
+                "devstorage.read_only",
+                "https://www.googleapis.com/auth/iam",
+            ]
+        )
+        credentials.refresh(Request())
 
-    url = blob.generate_signed_url(
-        version="v4",
-        expiration=datetime.timedelta(seconds=ttl_seconds),
-        method="GET",
-        service_account_email=credentials.service_account_email,
-        access_token=credentials.token,
-    )
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.timedelta(seconds=ttl_seconds),
+            method="GET",
+            service_account_email=credentials.service_account_email,
+            access_token=credentials.token,
+        )
     expires_at = now + max(
         ttl_seconds - _SIGNED_URL_SAFETY_MARGIN_SECONDS, 0
     )
@@ -344,8 +358,16 @@ def _read_usage(path: str, usage_key: str) -> int:
         return int(
             json.loads(blob.download_as_bytes()).get(usage_key, 0)
         )
-    except Exception:
+    except Exception as e:
         logger.exception("Failed to parse usage object %s", blob.name)
+        # A corrupt counter is a real bug/infra failure — the job
+        # still degrades to 0, but the failure must reach the
+        # error queue.
+        capture_internal_exception(
+            e,
+            tags={'component': 'gcs-state'},
+            contexts={'gcs_object': {'name': blob.name}},
+        )
         return 0
 
 
@@ -630,10 +652,15 @@ def read_generated_timestamps_json(
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
-    blob = _bucket().blob(
-        generated_timestamps_object_path(fileset_id, book_id, chapter)
+    path = generated_timestamps_object_path(
+        fileset_id, book_id, chapter,
     )
-    payload = json.loads(blob.download_as_bytes())
+    with sentry_span(
+        op='gcs.read', description=path,
+        data={'fileset_id': fileset_id},
+    ):
+        blob = _bucket().blob(path)
+        payload = json.loads(blob.download_as_bytes())
     # Only successful reads are cached — a ``NotFound`` miss must
     # become visible as soon as the artifact is uploaded.
     cache.set(
@@ -816,9 +843,17 @@ def read_gemini_daily_requests(
                 "requests_today", 0
             )
         )
-    except Exception:
+    except Exception as e:
         logger.exception(
             "Failed to parse gemini requests object %s", blob.name,
+        )
+        # Corrupt spend counter — the run degrades to 0 (safe
+        # direction, the API enforces the real cap) but the
+        # failure must reach the error queue.
+        capture_internal_exception(
+            e,
+            tags={'component': 'gcs-state'},
+            contexts={'gcs_object': {'name': blob.name}},
         )
         return 0
 

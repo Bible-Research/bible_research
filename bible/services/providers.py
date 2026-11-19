@@ -96,12 +96,25 @@ from bible.utils.provider_errors import (
     InvalidSearchCursorError,
     PassageNotFoundError,
     TimestampsNotGeneratedError,
+    capture_internal_exception,
     capture_provider_exception,
     provider_error_fields,
+    sentry_span,
     upstream_status_code,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _concrete_provider(provider):
+    """Unwrap caching/tracing decorators to the concrete
+    provider object (``DbtProvider``, ``ESVProvider``, …)."""
+    concrete = provider
+    # isinstance, not hasattr — a duck-typed test double claims
+    # every attribute and would loop forever.
+    while isinstance(concrete, (_TracedProvider, _CachingProvider)):
+        concrete = concrete.inner
+    return concrete
 
 
 def provider_for(fileset_id):
@@ -116,15 +129,23 @@ def provider_for(fileset_id):
     (``bible/services/chapter_cache.py``). ``ApiBibleProvider``
     stays unwrapped: its FUMS ``meta`` token must be reported
     per display, so serving a cached response would risk
-    under-reporting (license requirement).
+    under-reporting (license requirement). Every provider is
+    wrapped in ``_TracedProvider`` — inside the cache wrapper so
+    spans only cover real upstream calls, not cache hits.
     """
     if is_esv_fileset(fileset_id):
-        return _CachingProvider(ESVProvider(fileset_id))
+        return _CachingProvider(
+            _TracedProvider(ESVProvider(fileset_id))
+        )
     if is_apibible_fileset(fileset_id):
-        return ApiBibleProvider(fileset_id)
+        return _TracedProvider(ApiBibleProvider(fileset_id))
     if is_sword_fileset(fileset_id):
-        return _CachingProvider(SwordProvider(fileset_id))
-    return _CachingProvider(DbtProvider(fileset_id))
+        return _CachingProvider(
+            _TracedProvider(SwordProvider(fileset_id))
+        )
+    return _CachingProvider(
+        _TracedProvider(DbtProvider(fileset_id))
+    )
 
 
 class Provider:
@@ -415,6 +436,51 @@ class _CachingProvider(Provider):
 
     def get_structure(self):
         return self._inner.get_structure()
+
+
+class _TracedProvider:
+    """Wraps every provider capability call in a Sentry span.
+
+    Plain object + ``__getattr__`` rather than a ``Provider``
+    subclass so non-method attributes (``audio_codec``,
+    ``audio_kind``, ``fileset_id``) pass through untouched and no
+    base-class stub can shadow the inner provider's methods.
+    Spans only appear in sampled transactions — ``sentry_span``
+    is a no-op when Sentry is off or the request was unsampled,
+    so the wrapper is free to sit on every dispatch.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    @property
+    def inner(self):
+        """The wrapped provider — ``_concrete_provider`` unwinds
+        this plus ``_CachingProvider`` to the real class."""
+        return self._inner
+
+    def __getattr__(self, name):
+        # Same guard as ``_CachingProvider.__getattr__`` —
+        # ``self._inner`` inside would recurse into
+        # ``__getattr__`` before the attribute exists.
+        inner = self.__dict__.get('_inner')
+        if inner is None:
+            raise AttributeError(name)
+        attr = getattr(inner, name)
+        if not callable(attr) or name.startswith('_'):
+            return attr
+
+        def traced(*args, **kwargs):
+            concrete = _concrete_provider(inner)
+            with sentry_span(
+                op='provider',
+                description=(
+                    f'{type(concrete).__name__}.{name}'
+                ),
+                data={'fileset_id': inner.fileset_id},
+            ):
+                return attr(*args, **kwargs)
+        return traced
 
 
 class ESVProvider(Provider):
@@ -1006,9 +1072,21 @@ class DbtProvider(Provider):
             result = get_default_dbt_client().get_timestamps(
                 self.fileset_id, book_id, chapter
             )
-        except Exception:
+        except Exception as e:
             generated = self._generated_timestamps(book_id, chapter)
             if generated is not None:
+                # The artifact masks the DBT outage — the 200
+                # response must still leave a trail: the
+                # upstream failure is captured at warning level
+                # like any other provider failure.
+                capture_provider_exception(
+                    e,
+                    tags={
+                        'fileset_id': self.fileset_id,
+                        'provider': 'DbtProvider',
+                        'endpoint': 'bible/timestamps',
+                    },
+                )
                 return generated
             raise
         data = [
@@ -1045,7 +1123,7 @@ class DbtProvider(Provider):
             ]
         except gcs_exceptions.NotFound:
             return None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             # A transient GCS failure or a malformed artifact
             # must degrade like a missing artifact — a 502 here
             # would turn a 200-empty into an error and mask the
@@ -1054,6 +1132,13 @@ class DbtProvider(Provider):
                 "Generated-timestamps read failed for %s %s %s; "
                 "treating as no artifact.",
                 base_id, book_id, chapter, exc_info=True,
+            )
+            capture_internal_exception(
+                e,
+                tags={
+                    'fileset_id': self.fileset_id,
+                    'endpoint': 'bible/timestamps',
+                },
             )
             return None
 
@@ -1289,8 +1374,9 @@ def get_passage_body(data):
         'response_format', data.get('format', 'text')
     )
 
+    provider = provider_for(fileset_id)
     try:
-        payload = provider_for(fileset_id).get_passage(
+        payload = provider.get_passage(
             book_id, chapter, response_format,
             verse_start=verse_start, verse_end=verse_end,
         )
@@ -1362,8 +1448,20 @@ def get_passage_body(data):
             )
         fields = provider_error_fields(e)
         # Report upstream outages to Sentry (no-op for
-        # not_found and when Sentry is not configured).
-        capture_provider_exception(e, fields['error_code'])
+        # not_found and when Sentry is not configured);
+        # non-upstream exceptions route to error-level
+        # internal_error inside the capture helper.
+        capture_provider_exception(
+            e,
+            fields['error_code'],
+            tags={
+                'fileset_id': fileset_id,
+                'provider': (
+                    type(_concrete_provider(provider)).__name__
+                ),
+                'endpoint': 'bible/passage',
+            },
+        )
         return {
             'book': book_id,
             'book_name': book_name,

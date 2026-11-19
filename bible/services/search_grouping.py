@@ -21,6 +21,8 @@ from bible.utils.bible_books import (
 )
 from bible.utils.provider_errors import (
     InvalidSearchCursorError,
+    capture_internal_exception,
+    sentry_span,
 )
 
 logger = logging.getLogger(__name__)
@@ -510,62 +512,95 @@ def scan_sword_matches(
         else None
     )
     total = len(chapters)
-    for idx in range(start_index, total):
-        if (
-            deadline is not None
-            and idx > start_index
-            and time.monotonic() >= deadline
-        ):
-            # Budget spent between chapters: report the matches
-            # collected so far plus the resume position. At
-            # least one chapter always scans (a zero/negative
-            # budget still makes progress).
-            next_index = idx
-            break
-        book_id, chapter = chapters[idx]
-        try:
-            verses = client.get_chapter_verses(
-                fileset_id, book_id, chapter
-            )
-        except (ValueError, OSError) as e:
-            # Expected coverage misses: the chapter is outside
-            # the module's canon (ValueError /
-            # PassageNotFoundError) or its data file is absent
-            # (OSError) — skip it like the old bare ``except``.
-            logger.debug(
-                "Skipping SWORD chapter %s %s: %s",
-                book_id, chapter, e,
-            )
-            continue
-        except Exception:
-            # Anything else is a real bug or data corruption —
-            # log it instead of swallowing silently, but keep
-            # the scan going so one bad chapter can't blank a
-            # whole search.
-            logger.exception(
-                "Unexpected error scanning SWORD chapter "
-                "%s %s in %s",
-                book_id, chapter, fileset_id,
-            )
-            continue
-        for v in verses:
-            text = v.get('verse_text', '')
-            if needle in text.lower():
-                matches.append({
-                    'book_id': book_id,
-                    'chapter': chapter,
-                    'verse_start': v['verse_start'],
-                    'verse_text': text,
-                })
-        if max_matches is not None and len(matches) >= max_matches:
-            # Only flag truncation when chapters remain unscanned
-            # — reaching the cap on the final chapter means the
-            # whole module was scanned and the total is exact.
-            truncated = idx < total - 1
-            if truncated:
-                next_index = idx + 1
-            matches = matches[:max_matches]
-            break
+    # One Sentry event per scan is enough — a broken module
+    # tends to fail on every chapter, and the fingerprint
+    # already groups them; the log keeps the full list.
+    unexpected_reported = False
+    with sentry_span(
+        op='sword.scan',
+        description='scan_sword_matches',
+        data={
+            'fileset_id': fileset_id,
+            'chapters': total,
+        },
+    ):
+        for idx in range(start_index, total):
+            if (
+                deadline is not None
+                and idx > start_index
+                and time.monotonic() >= deadline
+            ):
+                # Budget spent between chapters: report the
+                # matches collected so far plus the resume
+                # position. At least one chapter always scans
+                # (a zero/negative budget still makes progress).
+                next_index = idx
+                break
+            book_id, chapter = chapters[idx]
+            try:
+                verses = client.get_chapter_verses(
+                    fileset_id, book_id, chapter
+                )
+            except (ValueError, OSError) as e:
+                # Expected coverage misses: the chapter is
+                # outside the module's canon (ValueError /
+                # PassageNotFoundError) or its data file is
+                # absent (OSError) — skip it like the old bare
+                # ``except``.
+                logger.debug(
+                    "Skipping SWORD chapter %s %s: %s",
+                    book_id, chapter, e,
+                )
+                continue
+            except Exception as e:
+                # Anything else is a real bug or data
+                # corruption — log it instead of swallowing
+                # silently, but keep the scan going so one
+                # bad chapter can't blank a whole search.
+                logger.exception(
+                    "Unexpected error scanning SWORD chapter "
+                    "%s %s in %s",
+                    book_id, chapter, fileset_id,
+                )
+                if not unexpected_reported:
+                    unexpected_reported = True
+                    capture_internal_exception(
+                        e,
+                        tags={
+                            'fileset_id': fileset_id,
+                            'provider': 'SwordProvider',
+                            'endpoint': 'bible/search',
+                        },
+                        contexts={
+                            'sword_chapter': {
+                                'book_id': book_id,
+                                'chapter': chapter,
+                            },
+                        },
+                    )
+                continue
+            for v in verses:
+                text = v.get('verse_text', '')
+                if needle in text.lower():
+                    matches.append({
+                        'book_id': book_id,
+                        'chapter': chapter,
+                        'verse_start': v['verse_start'],
+                        'verse_text': text,
+                    })
+            if (
+                max_matches is not None
+                and len(matches) >= max_matches
+            ):
+                # Only flag truncation when chapters remain
+                # unscanned — reaching the cap on the final
+                # chapter means the whole module was scanned
+                # and the total is exact.
+                truncated = idx < total - 1
+                if truncated:
+                    next_index = idx + 1
+                matches = matches[:max_matches]
+                break
     if next_index is not None:
         truncated = True
     return matches, truncated, next_index
