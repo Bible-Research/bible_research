@@ -12,6 +12,10 @@
 # time. `--target` must stay `.vercel_python_packages`
 # (where the preset expects deps on sys.path).
 set -e
+# Trace every command — staging-only build, and the log
+# is the only observable output while iterating on the
+# install environment.
+set -x
 # installCommand runs at the repo root in practice; pin
 # cwd anyway so `.python-version`, `requirements.txt` and
 # the target dir resolve regardless.
@@ -55,6 +59,19 @@ if command -v uv >/dev/null 2>&1 && \
   exit 0
 fi
 
+# pip3 can belong to a different interpreter than
+# `python3` — Vercel's image carries a system Python for
+# its own tooling. Wheels resolve for pip3's interpreter,
+# so require it to match the pin.
+PIP3V="$(pip3 --version 2>/dev/null | sed -n \
+  's/.*(python \([0-9][0-9.]*\)).*/\1/p')"
+PIP3MM="$(echo "$PIP3V" | cut -d. -f1-2)"
+echo "vercel_install: pip3 python=${PIP3V:-absent}"
+if [ -n "$PIP3V" ] && [ "$PIP3MM" = "$PYMM" ] && \
+   pip3 install --target "$TARGET" -r requirements.txt; then
+  exit 0
+fi
+
 # uv is not on PATH for installCommand — the preset
 # invokes its own binary by absolute path. Fall back to
 # pip, but only on an interpreter matching the pin: a
@@ -89,7 +106,14 @@ done
 # (the image carries cpython under uv's dirs; it can also
 # download one) regardless of what is on PATH.
 echo "vercel_install: no uv/pinned-pip; bootstrapping uv"
-curl -LsSf https://astral.sh/uv/install.sh | sh
+if command -v curl >/dev/null 2>&1; then
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO- https://astral.sh/uv/install.sh | sh
+else
+  echo "vercel_install: no curl/wget for bootstrap" >&2
+  exit 1
+fi
 UV_BIN="$HOME/.local/bin/uv"
 [ -x "$UV_BIN" ] || UV_BIN="$HOME/.cargo/bin/uv"
 [ -x "$UV_BIN" ] || {
