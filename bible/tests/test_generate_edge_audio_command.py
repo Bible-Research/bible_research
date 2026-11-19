@@ -1,5 +1,6 @@
 """Tests for the generate_edge_audio management command."""
 import json
+import logging
 import os
 from io import StringIO
 from unittest.mock import DEFAULT, MagicMock, patch
@@ -16,6 +17,10 @@ from bible.services.edge_tts.client import (
 _CMD = "bible.management.commands.generate_edge_audio"
 
 WORKLIST = [("GEN", 1), ("GEN", 2), ("GEN", 3)]
+
+# Longer than the default 60-chapter cap — used to prove
+# --until-done really unbounds the run.
+LONG_WORKLIST = [("GEN", ch) for ch in range(1, 71)]
 
 VERSES = [
     {"verse_start": 1, "verse_text": "aaa"},
@@ -109,6 +114,20 @@ def _invoke_out(tmp_path, *extra):
     return out.getvalue()
 
 
+def _invoke_default_state_out(tmp_path, *extra):
+    """Local-mode invoke that omits ``--state-file`` so the
+    command's own default (``edge-tts-state.json``) is used —
+    callers patch ``{_CMD}.DEFAULT_STATE_PATH`` into tmp_path."""
+    out = StringIO()
+    call_command(
+        "generate_edge_audio",
+        "--output-dir", str(tmp_path / "tts-out"),
+        "--sleep-seconds", "0",
+        *extra, stdout=out,
+    )
+    return out.getvalue()
+
+
 def _invoke_gcs_out(*extra):
     out = StringIO()
     call_command(
@@ -166,6 +185,141 @@ def test_max_chapters_bounds_run(
     synth = _FakeEdgeSynth.instances[-1]
     assert len(synth.runs) == 2
     assert "reason=chapter_cap" in text
+
+
+@patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_until_done_bypasses_both_caps(
+    sword_factory, tmp_path,
+):
+    """--until-done drains the whole worklist — past the default
+    60-chapter cap and ignoring the wall-clock bound entirely."""
+    sword = MagicMock()
+    sword.list_chapters.return_value = list(LONG_WORKLIST)
+    sword_factory.return_value = sword
+
+    # A negative --max-minutes would short-circuit the very first
+    # iteration if the time cap were still in force.
+    text = _invoke_out(
+        tmp_path, "--until-done", "--max-minutes", "-1",
+    )
+
+    synth = _FakeEdgeSynth.instances[-1]
+    assert len(synth.runs) == len(LONG_WORKLIST)
+    assert f"generated={len(LONG_WORKLIST)}" in text
+    assert "reason=all_done" in text
+
+
+@patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_default_chapter_cap_still_binds_without_flag(
+    sword_factory, tmp_path,
+):
+    """Without --until-done the run still stops at the default
+    DEFAULT_MAX_CHAPTERS bound."""
+    sword = MagicMock()
+    sword.list_chapters.return_value = list(LONG_WORKLIST)
+    sword_factory.return_value = sword
+
+    text = _invoke_out(tmp_path)
+
+    from bible.management.commands.generate_edge_audio import (
+        DEFAULT_MAX_CHAPTERS,
+    )
+    synth = _FakeEdgeSynth.instances[-1]
+    assert len(synth.runs) == DEFAULT_MAX_CHAPTERS
+    assert "reason=chapter_cap" in text
+
+
+@patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_time_cap_still_binds_without_flag(
+    sword_factory, tmp_path, worklist_client,
+):
+    """Without --until-done a spent --max-minutes stops the run
+    before the first chapter."""
+    sword_factory.return_value = worklist_client
+
+    text = _invoke_out(tmp_path, "--max-minutes", "-1")
+
+    synth = _FakeEdgeSynth.instances[-1]
+    assert synth.runs == []
+    assert "reason=time_cap" in text
+
+
+@patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_until_done_ignored_in_gcs_mode(
+    sword_factory, tmp_path, worklist_client,
+    gcs_mocks, caplog,
+):
+    """--until-done is gated off in GCS mode so a cloud run
+    stays inside the Job-timeout caps."""
+    sword_factory.return_value = worklist_client
+
+    with caplog.at_level(logging.WARNING):
+        text = _invoke_gcs_out(
+            "--until-done", "--max-chapters", "2",
+        )
+
+    synth = _FakeEdgeSynth.instances[-1]
+    assert len(synth.runs) == 2
+    assert "reason=chapter_cap" in text
+    assert "--until-done ignored" in caplog.text
+
+
+@patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_default_state_file_is_edge_specific(
+    sword_factory, tmp_path, worklist_client,
+):
+    """Local mode defaults to ``edge-tts-state.json`` — a Gemini
+    ledger beside it must not mark chapters complete."""
+    sword_factory.return_value = worklist_client
+    edge_state = tmp_path / "edge-tts-state.json"
+    (tmp_path / "gemini-tts-state.json").write_text(
+        json.dumps({
+            "day": "2026-01-01",
+            "requests_today": 5,
+            "completed": {"GEN": [1, 2, 3]},
+        }),
+        encoding="utf-8",
+    )
+
+    with patch(f"{_CMD}.DEFAULT_STATE_PATH", edge_state):
+        text = _invoke_default_state_out(tmp_path)
+
+    synth = _FakeEdgeSynth.instances[-1]
+    assert len(synth.runs) == 3
+    assert "generated=3" in text
+    saved = json.loads(edge_state.read_text())
+    assert saved["completed"] == {"GEN": [1, 2, 3]}
+
+
+def test_default_state_path_names_edge_file():
+    from bible.management.commands.generate_edge_audio import (
+        DEFAULT_STATE_PATH,
+    )
+    assert DEFAULT_STATE_PATH.name == "edge-tts-state.json"
+
+
+@patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_state_file_override_still_honored(
+    sword_factory, tmp_path, worklist_client,
+):
+    """An explicit --state-file wins over the edge default."""
+    sword_factory.return_value = worklist_client
+    edge_default = tmp_path / "edge-tts-state.json"
+    custom = tmp_path / "custom-state.json"
+
+    with patch(f"{_CMD}.DEFAULT_STATE_PATH", edge_default):
+        _invoke_default_state_out(
+            tmp_path, "--state-file", str(custom),
+        )
+
+    assert custom.is_file()
+    assert not edge_default.exists()
 
 
 @patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
@@ -254,7 +408,13 @@ def test_gcs_mode_uploads_and_completes(
 ):
     sword_factory.return_value = worklist_client
 
-    text = _invoke_gcs_out()
+    # Redirect the local default so the no-local-writes
+    # assertion below can actually fail.
+    with patch(
+        f"{_CMD}._default_output_dir",
+        return_value=tmp_path / "tts-out",
+    ):
+        text = _invoke_gcs_out()
 
     upload = gcs_mocks["upload_chapter_artifacts"]
     assert upload.call_count == 3

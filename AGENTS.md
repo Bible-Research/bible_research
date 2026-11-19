@@ -10,7 +10,8 @@ Cross-repo contracts are spec'd in the workspace-level `openspec/`
 Django 6.1 + Django REST Framework API serving a Bible reading/study
 app (`reactive-bible` frontend). Deployed on Google App Engine at
 `https://bible-research-489314.ey.r.appspot.com`; PostgreSQL in prod.
-Local dev's `config.yaml` also points at prod via a read-only user;
+Local dev's `.env` resolves `DATABASE_LOCAL_URL` first —
+currently writable `stagingdb`/`avnadmin` (see Databases);
 tests run on SQLite.
 
 ## Layout
@@ -26,7 +27,9 @@ tests run on SQLite.
 - `bible_research/` — settings, urls, authentication.
 - `terraform/` — GCP infra (the `all-jobs` Cloud Run job, storage;
   see note below).
-- `config.yaml` — local secrets (gitignored). Tests do NOT need it.
+- `.env` — local secrets (gitignored; the legacy
+  `config.yaml` is still honored when no `.env` exists).
+  Tests need neither.
 
 All API routes live under `/api/v1/` (see `bible_research/urls.py`).
 
@@ -140,7 +143,7 @@ book-list calls through `bibles_api`.
 
 API.Bible text responses carry a `meta` block with FUMS fields the
 frontend must report (license requirement). The API.Bible client
-needs `API_BIBLE_KEY` (settings/`config.yaml`); the registry and
+needs `API_BIBLE_KEY` (settings/`.env`); the registry and
 translations listing work without it.
 
 Book-name handling lives in `bible/utils/bible_books.py`
@@ -225,7 +228,7 @@ credentials.
 Project `bible-research-api` (org `bible-research`, de.sentry.io);
 init lives in `bible_research/settings.py` and is DSN-gated — no
 DSN, no traffic. The DSN is an entry inside the shared
-`env-file` GCP secret (env var `SENTRY_DSN` or config.yaml
+`env-file` GCP secret (env var `SENTRY_DSN` or `.env`
 locally). What each stream means:
 
 - `DjangoIntegration` captures unhandled 500s at level error —
@@ -272,7 +275,8 @@ locally). What each stream means:
 The agent-fix queue for this project is `is:unresolved
 level:error environment:production` — warning-level provider
 events are excluded by the level filter. Events carry
-`environment:production` on GCP and `development` elsewhere,
+`environment:production` on GCP, `staging` on Vercel
+previews, and `development` elsewhere,
 with `release` = `SENTRY_RELEASE` else `GAE_VERSION`, so the
 environment filter skips dev noise and `resolvedInNextRelease`
 resolves an issue at the next GAE deploy.
@@ -303,21 +307,26 @@ resolves an issue at the next GAE deploy.
 
 ## Databases
 
-- Local `config.yaml` `DATABASES.default` connects to the
-  **production** Aiven PostgreSQL (`defaultdb`) as `ai_agent`, a
-  **read-only** user — `manage.py runserver` and `manage.py shell`
-  operate on live production data.
-- Read-only investigation is expected and encouraged: ORM reads work
+- Local `.env` resolves per
+  `_database_url_for_environment()`'s local chain:
+  `DATABASE_LOCAL_URL` → `DATABASE_READ_URL` →
+  `DATABASE_URL`. Today `DATABASE_LOCAL_URL` points at
+  **`stagingdb`** as `avnadmin` (**writable**), so
+  `manage.py runserver` and `manage.py shell` operate on
+  live STAGING data with write access. The read-only prod
+  `ai_agent` sits in `DATABASE_READ_URL`; reaching prod
+  `defaultdb` means clearing LOCAL+READ so `DATABASE_URL`
+  applies — a deliberate opt-in.
+- Writes and DDL SUCCEED — treat every local session as
+  writable; never attempt them deliberately. Read-only
+  investigation remains the expectation: ORM reads work
   as usual, and raw SQL via:
 
   ```python
   from django.db import connection
   with connection.cursor() as cur:
       cur.execute("SELECT ...")
-  ```
-
-- Writes and DDL fail with `InsufficientPrivilege` — never attempt
-  them. `manage.py dbshell` needs a `psql` client — installed at
+  ``` `manage.py dbshell` needs a `psql` client — installed at
   `/opt/homebrew/opt/postgresql@16/bin/psql` but off agent PATH;
   prefer `manage.py shell` or a `psycopg2` script built on
   `settings.DATABASES`.
@@ -325,17 +334,17 @@ resolves an issue at the next GAE deploy.
   "Database Backups") needs `pg_dump` matching the server major:
   Aiven runs PG16 but PATH's `pg_dump` is v14 and aborts. Run with
   `export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"` first.
-- For a writable local database, repoint `config.yaml`'s `default`
-  to SQLite (`ENGINE: django.db.backends.sqlite3`,
-  `NAME: db.sqlite3` — a file already exists in the repo root).
+- For a fully local database, set `.env`'s
+  `DATABASE_LOCAL_URL` to `sqlite:///db.sqlite3` (the file
+  is gitignored — created on first run if missing).
 - Staging database `stagingdb` lives on the same Aiven
   instance. `staging_rw` owns it (read/write + `CREATEDB`);
   its password is a deploy secret, never committed.
   `ai_agent` has `CONNECT` plus `SELECT` on
   `staging_rw`-created tables via default privileges, so
   read-only agent investigation works there exactly like on
-  `defaultdb`. For a writable remote dev DB, repoint
-  `config.yaml`'s `default` at `stagingdb`/`staging_rw`
+  `defaultdb`. For a writable remote dev DB, point `.env`'s
+  `DATABASE_LOCAL_URL` at `stagingdb`/`staging_rw`
   (password from the staging deploy's `DATABASE_STAGING_URL`
   — ask the user).
 - `settings.py` picks the DB URL per environment:
@@ -390,7 +399,7 @@ Serializers enforce all three application-side.
 - Never: modify applied migrations, raw SQL in app code (use the
   ORM — ad-hoc read-only investigation is the exception),
   circular imports (use `get_user_model()`), secrets in code
-  (`config.yaml` is gitignored).
+  (`.env` is gitignored).
 
 ## Testing
 
@@ -401,7 +410,8 @@ python -m pytest annotations/tests.py -q   # or a single class
 
 conftest.py imports the real `bible_research.settings` and
 overrides only the test deltas; tests run on SQLite in-memory —
-no `config.yaml`, no DB setup needed, and they never touch the
+no `.env`/`config.yaml`, no DB setup needed, and they never
+touch the
 production database. `manage.py test` also stays off prod:
 `settings.py` overrides `DATABASES` to local SQLite
 (`db.sqlite3`) whenever `'test'` is in `sys.argv`.
@@ -534,8 +544,9 @@ Universal rules — follow exactly:
   spec'd there (workspace AGENTS.md, "OpenSpec").
 - **All implementation work happens in a git worktree**
   (`worktrees/<slug>` inside this repo — gitignored; cut
-  from `origin/main`, needs its own venv + `config.yaml`
-  symlink) — never the main checkout. Once the PR's checks
+  from `origin/main`, needs its own venv + `.env` symlink —
+  legacy `config.yaml` also works) — never the main
+  checkout. Once the PR's checks
   are green, remove the worktree + local branch right away —
   don't wait for the merge (the PR lives on the remote
   branch). Full lifecycle: workspace `../AGENTS.md`
@@ -585,29 +596,34 @@ Universal rules — follow exactly:
   (see "Databases"). Serverless
   carries no GCP credentials, so GCS-backed features
   (generated audio, image attachments) are unavailable there.
-- All implementation work happens in a git worktree
-  (`worktrees/<slug>` inside this repo — gitignored) — never
-  the main checkout; remove the worktree + branch once the PR
-  merges green. Full workflow: workspace `../AGENTS.md`
-  "Repo-specific rules".
-- `terraform/scheduler.tf`: the *monthly* Google TTS Cloud
-  Scheduler stays intentionally commented out — do NOT enable it.
-  The `daily-edge-audio` job IS enabled: it triggers `all-jobs`
-  daily with a `jobs:run` container-args override of `--only
-  generate_edge_audio`, so the monthly `dom:3` entry cannot
-  piggyback on the trigger. The `eom-stt-timestamps` job IS also
-  enabled: it fires a plain `jobs:run` on days 28-31 and the
-  `last_day_of_month` predicate gates it to the real last day —
-  a future `daily` JOBS entry would ALSO run on 28-31 via this
-  trigger (review JOBS when adding entries).
+- `terraform/scheduler.tf`: all three Cloud Scheduler jobs
+  in this file are commented out (most recently
+  `daily-edge-audio`, per user request 2026-10-31) — do
+  NOT re-enable without asking.
+  The one LIVE scheduler lives elsewhere:
+  `note-translations-audit` in
+  `terraform/note_translations.tf` (enabled) fires a plain
+  `jobs:run` on days 28-31 for `check_note_translations`.
+  `daily-edge-audio` would
+  trigger `all-jobs` daily with a `jobs:run` container-args
+  override of `--only generate_edge_audio`; that override
+  exists so the monthly `dom:3` entry cannot piggyback on the
+  trigger. `eom-stt-timestamps` would fire a plain
+  `jobs:run` on days 28-31 — the `last_day_of_month`
+  predicate gates it to the real last day, and
+  `check_note_translations` (same predicate) would ALSO run
+  on that day, on top of its own live trigger; ditto any
+  future `daily` JOBS entry on 28-31 (review JOBS when
+  adding entries).
 - `terraform/all_jobs.tf`: the single `all-jobs` Cloud Run Job
   replaced the per-task `audio-generator` job (it reuses that SA and
   image repo, both still named `audio-generator`). Sub-jobs are
   listed in the `JOBS` table of
   `bible/management/commands/run_all_jobs.py` —
   `generate_chapter_audio` (`dom:3`, unscheduled),
-  `generate_audio_timestamps` (`last_day_of_month`, started by
-  the `eom-stt-timestamps` scheduler — spends the month's STT
+  `generate_audio_timestamps` (`last_day_of_month`, would be
+  started by the commented-out `eom-stt-timestamps` scheduler —
+  spends the month's STT
   free minutes before they reset on the 1st; NOTE: output is
   currently LOW quality — GLU8 is only a proxy reference text
   since DBT has no LVR/NLI text, so artifacts land at
@@ -615,9 +631,14 @@ Universal rules — follow exactly:
   a matching Latvian text is licensable — see
   DEVELOPER_GUIDE "Generated Timestamps"),
   `generate_gemini_audio` (`manual`), `generate_edge_audio`
-  (`manual`; started only by the daily scheduler's `--only`
-  override — the Everita voice) and `repair_audio_files`
-  (`manual`; manifest-driven artifact repair — see below).
+  (`manual`; would be started only by the commented-out
+  daily scheduler's `--only` override — the Everita voice)
+  and `repair_audio_files`
+  (`manual`; manifest-driven artifact repair — see below),
+  plus `check_note_translations`
+  (`last_day_of_month`; the only entry with a live trigger —
+  `note-translations-audit` in `terraform/note_translations.tf`,
+  monthly coverage audit, Sentry-only output).
   Generated artifacts land under
   `audio_gemini/` and `audio_edge/` in the audio bucket (GCS
   modes `"gemini"`/`"edge"` in `bible/services/storage/gcs.py`)
@@ -653,13 +674,19 @@ Universal rules — follow exactly:
   wiring.
 - `bible/management/commands/generate_gemini_audio.py` and
   `generate_edge_audio.py`: local mode (default) writes
-  `tts-out/` + `gemini-tts-state.json`; `--upload-gcs`
-  (auto-on when `CLOUD_RUN_JOB` is set) switches state +
-  artifacts to GCS. Gemini needs `GEMINI_API_KEY` in
-  `config.yaml` locally or the `env-file` secret on GCP —
-  normalized to `settings.GEMINI_API_KEYS`. The Edge command
-  is keyless (unofficial Microsoft endpoint, default voice
-  `lv-LV-EveritaNeural`, exact per-verse timestamps).
+  `tts-out/` + an engine-specific state file
+  (`gemini-tts-state.json` / `edge-tts-state.json`);
+  `--upload-gcs` (auto-on when `CLOUD_RUN_JOB` is set)
+  switches state + artifacts to GCS. Gemini needs
+  `GEMINI_API_KEY` in `.env` locally or the
+  `env-file` secret on GCP — normalized to
+  `settings.GEMINI_API_KEYS`. The Edge command is keyless
+  (unofficial Microsoft endpoint, default voice
+  `lv-LV-EveritaNeural`, exact per-verse timestamps) and has
+  an unbounded local mode — `--until-done` ignores the
+  `--max-chapters`/`--max-minutes` caps so one invocation
+  drains the whole worklist on a standalone box (see
+  DEVELOPER_GUIDE "Standalone full-Bible run").
 - GCP secrets: never create a new Secret Manager secret — new
   credentials go in as appended KEY=VALUE lines on the shared
   `env-file` secret (each extra secret adds cost).
