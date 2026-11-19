@@ -2035,11 +2035,12 @@ Differences from the Gemini pipeline:
 `--until-done` removes both run caps so a single invocation
 drains the entire pending worklist — the one-command way to
 render the whole Bible on a plain box instead of through the
-scheduled Cloud Run Job. Local mode only (`--upload-gcs`
-still gets its artifacts, but the flag is pointless there).
-On a fresh Ubuntu/Debian checkout:
+scheduled Cloud Run Job. Local mode only — under
+`--upload-gcs` the flag is ignored so a cloud run stays
+inside the Job timeout. On a fresh Ubuntu/Debian checkout:
 
 ```bash
+sudo apt install -y python3-venv python3-pip
 git clone https://github.com/Bible-Research/bible_research.git
 cd bible_research
 python3 -m venv venv && source venv/bin/activate

@@ -386,7 +386,13 @@ def test_gcs_mode_uploads_and_completes(
 ):
     sword_factory.return_value = worklist_client
 
-    text = _invoke_gcs_out()
+    # Redirect the local default so the no-local-writes
+    # assertion below can actually fail.
+    with patch(
+        f"{_CMD}._default_output_dir",
+        return_value=tmp_path / "tts-out",
+    ):
+        text = _invoke_gcs_out()
 
     upload = gcs_mocks["upload_chapter_artifacts"]
     assert upload.call_count == 3

@@ -20,7 +20,8 @@ There is no API key and no formal quota — the run is bounded by
 the Cloud Run Job's timeout; the daily scheduler re-triggers it
 until the listing shows every chapter done. ``--until-done``
 removes both caps so a single local invocation drains the whole
-pending worklist (meant for standalone boxes, not the Job).
+pending worklist (standalone boxes only — ignored under
+``--upload-gcs`` so a cloud run can never outlive its timeout).
 """
 import logging
 import os
@@ -101,7 +102,7 @@ class Command(BaseCommand):
             help=(
                 "Ignore --max-chapters/--max-minutes and "
                 "generate until the pending worklist is "
-                "drained (standalone local runs; pointless "
+                "drained (standalone local runs; ignored "
                 "with --upload-gcs)."
             ),
         )
@@ -158,6 +159,12 @@ class Command(BaseCommand):
             or bool(os.environ.get("CLOUD_RUN_JOB"))
         )
         voice_name = options["voice"] or DEFAULT_VOICE_NAME
+        until_done = options["until_done"] and not upload_gcs
+        if options["until_done"] and upload_gcs:
+            logger.warning(
+                "--until-done ignored under --upload-gcs: cloud "
+                "runs stay inside the Job-timeout caps."
+            )
 
         if upload_gcs:
             output_dir: Optional[Path] = None
@@ -191,7 +198,7 @@ class Command(BaseCommand):
         )
         if options["dry_run"]:
             cap = (
-                "unbounded" if options["until_done"]
+                "unbounded" if until_done
                 else options["max_chapters"]
             )
             self.stdout.write(
@@ -233,7 +240,6 @@ class Command(BaseCommand):
         chars_used = 0
         reason = "all_done"
         started = time.monotonic()
-        until_done = options["until_done"]
         max_chapters = options["max_chapters"]
         max_seconds = options["max_minutes"] * 60
 
