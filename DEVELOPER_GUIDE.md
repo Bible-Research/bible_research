@@ -2722,6 +2722,37 @@ and password hashes, so the same logins work). A staging
 DATABASE_URL=postgres://staging_rw:<pw>@<host>:10104/stagingdb?sslmode=require
 ```
 
+**Vercel staging backend**: the `bible-research-api` Vercel
+project builds this repo's `staging` branch (allowed by
+`vercel.json`'s `git.deploymentEnabled`; `main` and feature
+branches never build — prod stays GAE-only) and serves it at
+`staging-bibleresearchapi.vercel.app` plus the per-deployment
+`bible-research-api-*` URLs. Vercel's Django preset detects
+`manage.py` → `WSGI_APPLICATION`, installs
+`requirements.txt`, and collectstatics automatically;
+`scripts/vercel_build.sh` (the project's Build Command)
+additionally runs `migrate` — so every staging deploy also
+brings `stagingdb`'s schema up to date — then collectstatics
+again as a safety net.
+
+The project must define a **`DOTENV`** environment variable
+(Preview scope) holding the full .env payload — without it
+`settings.py` raises `FileNotFoundError`. Required contents:
+
+```bash
+SECRET_KEY=<django-secret>
+DEBUG=False
+DATABASE_URL=postgres://staging_rw:<pw>@<host>:10104/stagingdb?sslmode=require
+DB_SSL_CERT=<Aiven CA PEM, single line with \n escapes>
+DBT_KEY=<…>
+ESV_KEY=<…>
+API_BIBLE_KEY=<…>
+```
+
+Serverless functions have no GCP credentials, so GCS-backed
+features (generated audio, image attachments) cannot work on
+the Vercel backend; text/search/notes endpoints do.
+
 ### Static Files
 
 ```bash

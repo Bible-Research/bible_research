@@ -30,13 +30,14 @@ from .dotenv import load_dotenv, load_dotenv_file
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# The app is only ever served on its GAE appspot host
+# The app is served on its GAE appspot host
 # (bible-research-489314.ey.r.appspot.com, plus
 # <version>-dot-…appspot.com version-preview URLs covered by
-# the leading-dot suffix match) and localhost dev — there is
-# no custom domain.
+# the leading-dot suffix match), the staging backend's
+# *.vercel.app deployment/preview hostnames, and localhost dev.
 ALLOWED_HOSTS = [
     ".appspot.com",
+    ".vercel.app",
     "localhost",
     "127.0.0.1",
     "[::1]",
@@ -89,6 +90,9 @@ MIDDLEWARE = [
 CORS_ALLOWED_ORIGINS = [
     # reactive-bible production SPA
     "https://bibleresearch.vercel.app",
+    # reactive-bible staging SPA alias — the generated
+    # git-branch aliases are covered by the regex below
+    "https://staging-bibleresearch.vercel.app",
     # Capacitor app WebView (iOS origin is capacitor://; Android
     # defaults to https://localhost, http://localhost if the
     # app is ever built with an http server scheme)
