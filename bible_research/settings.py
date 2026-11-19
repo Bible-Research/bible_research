@@ -300,9 +300,9 @@ else:
             config = {}
         else:
             raise FileNotFoundError(
-                '.env not found. Copy .env.example to .env and fill '
-                'in your values (the legacy config.yaml is still '
-                'supported).'
+                'No config found: set DOTENV (full .env payload) '
+                'or DOTENV_PATH, or copy .env.example to .env '
+                '(the legacy config.yaml is still supported).'
             )
 
         SECRET_KEY = config.get('SECRET_KEY')

@@ -20,12 +20,17 @@ from bible_research.dotenv import parse_dotenv
 print(parse_dotenv(os.environ["DOTENV"]).get("DATABASE_URL", ""))
 ')
 fi
+# Export so Django consumes exactly the validated value —
+# an empty real env var would otherwise shadow a valid
+# DOTENV-carried URL (load_dotenv uses setdefault).
+export DATABASE_URL
 case "$DATABASE_URL" in
-  *stagingdb*)
+  */stagingdb | */stagingdb\?*)
     python3 manage.py migrate --noinput
     ;;
   *)
-    echo "Refusing to migrate: DATABASE_URL is not stagingdb." >&2
+    echo "Refusing to migrate: DATABASE_URL must name" \
+      "stagingdb (discrete DB_* vars cannot be guarded)." >&2
     exit 1
     ;;
 esac
