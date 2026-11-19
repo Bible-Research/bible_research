@@ -88,11 +88,13 @@ upstream call and no error, i.e. a coverage miss like
 request filter or the full sorted 66-id string
 (`CANONICAL_BOOKS_PARAM`) — so DBT-reported totals count
 canonical matches only; normalized rows are additionally
-post-filtered through `filter_canonical_verses` for every
-provider (API.Bible has no upstream book filter, so on a
+post-filtered through `filter_canonical_verses` on the DBT
+and API.Bible paths (ESV/SWORD are canon-by-construction —
+`get_dbt_book_id` refs and `_BIBLE_BOOKS`-mapped module
+books). API.Bible has no upstream book filter, so on a
 hypothetical deuterocanon bible its `total` could overcount
 the rows actually returned — registered bibles are NIV-only
-today). `get_passage_body` answers a non-canonical `book` id
+today. `get_passage_body` answers a non-canonical `book` id
 as `book_not_in_fileset` before provider dispatch (the public
 `passage=` path can't produce one — names resolve through
 `get_dbt_book_id`).

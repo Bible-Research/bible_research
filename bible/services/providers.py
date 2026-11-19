@@ -1203,7 +1203,8 @@ def get_passage_body(data):
     # when the upstream fileset carries it (deuterocanonical
     # DBT bibles). Unreachable via the public ``passage=``
     # param — book names resolve through ``get_dbt_book_id`` —
-    # so this guards direct callers only.
+    # so this guards direct callers only; a missing ``book``
+    # lands here too (``''`` is non-canonical).
     if (book_id or '').upper() not in CANONICAL_BOOK_IDS:
         return _book_not_in_fileset_body(
             book_id, book_name, chapter, fileset_id

@@ -749,13 +749,13 @@ class BibleSearchView(APIView):
             # coverage miss — an empty result set, not a 400.
             # An empty intersection becomes '' and
             # short-circuits below without a provider call.
-            books = ','.join(sorted(
+            books = ','.join(sorted({
                 t for t in (
                     token.strip().upper()
                     for token in books.split(',')
                 )
                 if t in CANONICAL_BOOK_IDS
-            ))
+            }))
         else:
             books = None
 

@@ -918,7 +918,8 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
   dropped, and a filter with no canonical survivors returns
   the provider-shaped empty result (paginated or grouped)
   with no upstream call and no error. Honored for DBT and
-  SWORD only — the ESV API has no book filter
+  SWORD only — the ESV and API.Bible search APIs have no
+  book filter
 - `group_by`: Set to `book` to return every match grouped by
   book instead of a paginated list
 
@@ -958,9 +959,10 @@ Only the 66-book Protestant canon is ever emitted: DBT search
 sends `books=` upstream on every call — the request filter
 intersected with the canon, or the full sorted 66-id list — so
 provider-reported totals count canonical matches only, and
-normalized rows are post-filtered for every provider (rows for
-deuterocanonical books like `TOB` are removed, never
-returned). API.Bible has no upstream book filter, so on a
+normalized rows are post-filtered on the DBT and API.Bible
+paths (rows for deuterocanonical books like `TOB` are
+removed, never returned; ESV/SWORD emit canon only by
+construction). API.Bible has no upstream book filter, so on a
 hypothetical deuterocanon bible its `total` could overcount
 the rows actually returned — registered bibles are NIV-only
 today.
