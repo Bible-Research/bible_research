@@ -387,10 +387,16 @@ if SENTRY_DSN:
         include_local_variables=False,
         # Ctrl+C/shutdown noise is never a defect.
         ignore_errors=[KeyboardInterrupt],
-        # GCP is the only production deploy path; every other
-        # environment (local dev, CI) reports 'development'.
+        # GCP is the only production deploy path; Vercel
+        # previews (the staging backend) report 'staging',
+        # and local dev / CI report 'development'.
         environment=(
-            'production' if IS_GCP_ENVIRONMENT else 'development'
+            'production'
+            if IS_GCP_ENVIRONMENT
+            or os.environ.get('VERCEL_ENV') == 'production'
+            else 'staging'
+            if os.environ.get('VERCEL_ENV') == 'preview'
+            else 'development'
         ),
         # SENTRY_RELEASE wins when set (Cloud Run jobs carry no
         # GAE_VERSION); GAE_VERSION is the per-deploy fallback.

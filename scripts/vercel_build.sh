@@ -9,7 +9,17 @@ set -e
 # Apply migrations, but never against a non-staging database —
 # a misconfigured DOTENV carrying the prod env-file's
 # `defaultdb` DATABASE_URL must fail the build loudly instead
-# of migrating production.
+# of migrating production. DATABASE_URL may live inside the
+# DOTENV payload rather than as a real env var, so resolve it
+# through the repo's own .env parser first (same setdefault
+# precedence settings.py applies: real env var wins).
+if [ -z "$DATABASE_URL" ] && [ -n "$DOTENV" ]; then
+  DATABASE_URL=$(python3 -c '
+import os
+from bible_research.dotenv import parse_dotenv
+print(parse_dotenv(os.environ["DOTENV"]).get("DATABASE_URL", ""))
+')
+fi
 case "$DATABASE_URL" in
   *stagingdb*)
     python3 manage.py migrate --noinput

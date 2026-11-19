@@ -2876,6 +2876,6 @@ For questions or issues:
 
 ---
 
-**Last Updated**: 2026-11-11
+**Last Updated**: 2026-11-19
 
 [bible-brain]: https://www.faithcomesbyhearing.com/bible-brain/api-reference
