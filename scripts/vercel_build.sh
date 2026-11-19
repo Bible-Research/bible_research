@@ -6,6 +6,12 @@
 # env var supplies DATABASE_STAGING_URL/DB_SSL_CERT.
 set -e
 
+# The custom installCommand drops wheels into the flat target
+# dir `.vercel_python_packages`, which nothing puts on
+# sys.path for plain `python3` invocations during the build
+# (the preset only wires it into the function bundle).
+export PYTHONPATH="$PWD/.vercel_python_packages${PYTHONPATH:+:$PYTHONPATH}"
+
 # Apply migrations, but never against a non-staging database.
 # On Vercel previews settings.py pins DATABASE_STAGING_URL;
 # the var may live inside the DOTENV payload rather than as a
@@ -22,13 +28,15 @@ fi
 # an empty real env var would otherwise shadow a valid
 # DOTENV-carried URL (load_dotenv uses setdefault).
 export DATABASE_STAGING_URL
+# Stdlib parsing — dj_database_url lives in
+# .vercel_python_packages, which may not be importable here.
 if ! python3 -c '
 import os, sys
-import dj_database_url
+from urllib.parse import urlparse
 try:
-    name = dj_database_url.parse(
+    name = urlparse(
         os.environ["DATABASE_STAGING_URL"]
-    )["NAME"]
+    ).path.lstrip("/")
 except Exception:
     name = ""
 sys.exit(0 if name == "stagingdb" else 1)
