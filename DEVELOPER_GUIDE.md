@@ -2315,7 +2315,7 @@ source venv/bin/activate
 # Dev-only decoder for --deep (miniaudio):
 pip install -r requirements-dev.txt
 
-# Django settings — local config.yaml (gitignored) already
+# Django settings — local .env (gitignored) already
 # points at prod; GCS access needs Application Default
 # Credentials, and on this network the Netskope CA bundle:
 gcloud auth application-default login      # once
@@ -2473,7 +2473,7 @@ translation).
   ONE Sentry `capture_message` when per-language misses
   exist, logs-only on a clean run.
 
-**Settings** (config.yaml / .env, via
+**Settings** (.env / config.yaml, via
 `_audio_settings_source`): `NOTE_TARGET_LANGUAGES`,
 `NOTE_TRANSLATION_ENGINE` (`google-nmt` default; future
 `google-llm`/`gemini-*` map to v3 models),
@@ -2689,8 +2689,9 @@ overrides only the test-required deltas (SQLite in-memory
 database, dummy provider keys, generous throttle rates), so
 tests exercise the production `REST_FRAMEWORK`
 authentication/permission stack and `MIDDLEWARE` chain.
-`config.yaml` is not required: under pytest, `settings.py`
-treats a missing config file as empty instead of raising.
+Neither `.env` nor `config.yaml` is required: under pytest,
+`settings.py` treats a missing config file as empty instead
+of raising.
 
 ```bash
 python -m pytest -q                # full suite
@@ -2856,8 +2857,8 @@ pg_restore -d bibledb --clean --if-exists \
   db_backups/backup_20251228_055249.dump
 ```
 
-To run the app against the restored copy, repoint `config.yaml`'s
-`DATABASES.default` at the local database.
+To run the app against the restored copy, repoint `.env`'s
+`DATABASE_URL` at the local database.
 
 ### Production Checklist
 

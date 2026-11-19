@@ -10,8 +10,9 @@ Cross-repo contracts are spec'd in the workspace-level `openspec/`
 Django 6.1 + Django REST Framework API serving a Bible reading/study
 app (`reactive-bible` frontend). Deployed on Google App Engine at
 `https://bible-research-489314.ey.r.appspot.com`; PostgreSQL in prod.
-Local dev's `config.yaml` also points at prod via a read-only user;
-tests run on SQLite.
+Local dev's `.env` `DATABASE_URL` points at prod (see
+Databases — currently the writable `avnadmin`, not the
+read-only `ai_agent`); tests run on SQLite.
 
 ## Layout
 
@@ -142,7 +143,7 @@ book-list calls through `bibles_api`.
 
 API.Bible text responses carry a `meta` block with FUMS fields the
 frontend must report (license requirement). The API.Bible client
-needs `API_BIBLE_KEY` (settings/`config.yaml`); the registry and
+needs `API_BIBLE_KEY` (settings/`.env`); the registry and
 translations listing work without it.
 
 Book-name handling lives in `bible/utils/bible_books.py`
@@ -227,7 +228,7 @@ credentials.
 Project `bible-research-api` (org `bible-research`, de.sentry.io);
 init lives in `bible_research/settings.py` and is DSN-gated — no
 DSN, no traffic. The DSN is an entry inside the shared
-`env-file` GCP secret (env var `SENTRY_DSN` or config.yaml
+`env-file` GCP secret (env var `SENTRY_DSN` or `.env`
 locally). What each stream means:
 
 - `DjangoIntegration` captures unhandled 500s at level error —
@@ -305,21 +306,24 @@ resolves an issue at the next GAE deploy.
 
 ## Databases
 
-- Local `.env` `DATABASE_URL` connects to the
-  **production** Aiven PostgreSQL (`defaultdb`) as `ai_agent`, a
-  **read-only** user — `manage.py runserver` and `manage.py shell`
-  operate on live production data.
-- Read-only investigation is expected and encouraged: ORM reads work
+- Local `.env` `DATABASE_URL` connects to the **production**
+  Aiven PostgreSQL (`defaultdb`) — currently as `avnadmin`
+  (**writable**, not the read-only `ai_agent` the `.env`'s
+  `DATABASE_READ_URL` alternate carries), so `manage.py
+  runserver` and `manage.py shell` operate on live production
+  data WITH write access. The `.env` header documents the
+  swap candidates (`DATABASE_LOCAL_URL` sqlite,
+  `DATABASE_READ_URL` read-only prod).
+- Writes and DDL now SUCCEED — treat every local session as
+  prod-capable; never attempt them deliberately. Read-only
+  investigation remains the expectation: ORM reads work
   as usual, and raw SQL via:
 
   ```python
   from django.db import connection
   with connection.cursor() as cur:
       cur.execute("SELECT ...")
-  ```
-
-- Writes and DDL fail with `InsufficientPrivilege` — never attempt
-  them. `manage.py dbshell` needs a `psql` client — installed at
+  ``` `manage.py dbshell` needs a `psql` client — installed at
   `/opt/homebrew/opt/postgresql@16/bin/psql` but off agent PATH;
   prefer `manage.py shell` or a `psycopg2` script built on
   `settings.DATABASES`.
@@ -327,17 +331,18 @@ resolves an issue at the next GAE deploy.
   "Database Backups") needs `pg_dump` matching the server major:
   Aiven runs PG16 but PATH's `pg_dump` is v14 and aborts. Run with
   `export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"` first.
-- For a writable local database, repoint `config.yaml`'s `default`
-  to SQLite (`ENGINE: django.db.backends.sqlite3`,
-  `NAME: db.sqlite3` — a file already exists in the repo root).
+- For a writable local database, repoint `.env`'s
+  `DATABASE_URL` to `sqlite:///db.sqlite3` (a `db.sqlite3`
+  file already exists in the repo root — or comment the URL
+  out entirely and settings falls back to it).
 - Staging database `stagingdb` lives on the same Aiven
   instance. `staging_rw` owns it (read/write + `CREATEDB`);
   its password is a deploy secret, never committed.
   `ai_agent` has `CONNECT` plus `SELECT` on
   `staging_rw`-created tables via default privileges, so
   read-only agent investigation works there exactly like on
-  `defaultdb`. For a writable remote dev DB, repoint
-  `config.yaml`'s `default` at `stagingdb`/`staging_rw`
+  `defaultdb`. For a writable remote dev DB, repoint `.env`'s
+  `DATABASE_URL` at `stagingdb`/`staging_rw`
   (password from the staging deploy's `DATABASE_URL` — ask
   the user).
 - Non-production backend deployments (e.g. a Vercel staging
@@ -392,7 +397,7 @@ Serializers enforce all three application-side.
 - Never: modify applied migrations, raw SQL in app code (use the
   ORM — ad-hoc read-only investigation is the exception),
   circular imports (use `get_user_model()`), secrets in code
-  (`config.yaml` is gitignored).
+  (`.env` is gitignored).
 
 ## Testing
 
@@ -403,7 +408,8 @@ python -m pytest annotations/tests.py -q   # or a single class
 
 conftest.py imports the real `bible_research.settings` and
 overrides only the test deltas; tests run on SQLite in-memory —
-no `config.yaml`, no DB setup needed, and they never touch the
+no `.env`/`config.yaml`, no DB setup needed, and they never
+touch the
 production database. `manage.py test` also stays off prod:
 `settings.py` overrides `DATABASES` to local SQLite
 (`db.sqlite3`) whenever `'test'` is in `sys.argv`.
@@ -536,8 +542,9 @@ Universal rules — follow exactly:
   spec'd there (workspace AGENTS.md, "OpenSpec").
 - **All implementation work happens in a git worktree**
   (`worktrees/<slug>` inside this repo — gitignored; cut
-  from `origin/main`, needs its own venv + `config.yaml`
-  symlink) — never the main checkout. Once the PR's checks
+  from `origin/main`, needs its own venv + `.env` symlink —
+  legacy `config.yaml` also works) — never the main
+  checkout. Once the PR's checks
   are green, remove the worktree + local branch right away —
   don't wait for the merge (the PR lives on the remote
   branch). Full lifecycle: workspace `../AGENTS.md`
@@ -584,7 +591,8 @@ Universal rules — follow exactly:
   "Repo-specific rules".
 - `terraform/scheduler.tf`: ALL Cloud Scheduler jobs are
   currently commented out (`daily-edge-audio` per user
-  request, 2026-10-31) — do NOT re-enable without asking. `daily-edge-audio` would
+  request, 2026-10-31) — do NOT re-enable without asking.
+  `daily-edge-audio` would
   trigger `all-jobs` daily with a `jobs:run` container-args
   override of `--only generate_edge_audio`; that override
   exists so the monthly `dom:3` entry cannot piggyback on the
@@ -652,7 +660,7 @@ Universal rules — follow exactly:
   (`gemini-tts-state.json` / `edge-tts-state.json`);
   `--upload-gcs` (auto-on when `CLOUD_RUN_JOB` is set)
   switches state + artifacts to GCS. Gemini needs
-  `GEMINI_API_KEY` in `config.yaml` locally or the
+  `GEMINI_API_KEY` in `.env` locally or the
   `env-file` secret on GCP — normalized to
   `settings.GEMINI_API_KEYS`. The Edge command is keyless
   (unofficial Microsoft endpoint, default voice

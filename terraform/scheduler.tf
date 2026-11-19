@@ -107,9 +107,9 @@ resource "google_cloud_run_v2_job_iam_member" "all_jobs_scheduler_invoker" {
 #   ]
 # }
 #
-# # ============================================================================
-# # END-OF-MONTH STT TIMESTAMPS TRIGGER — ENABLED
-# # ============================================================================
+# # ===========================================================================
+# # END-OF-MONTH STT TIMESTAMPS TRIGGER — DISABLED
+# # ===========================================================================
 # # Runs the ``generate_audio_timestamps`` sub-job on the last day of
 # # each month so the STT free tier (60 min/mo, resetting on the 1st)
 # # is spent just before it expires. Cloud Scheduler cron cannot
@@ -124,7 +124,6 @@ resource "google_cloud_run_v2_job_iam_member" "all_jobs_scheduler_invoker" {
 # # ``manual``). CAUTION: a future JOBS entry whose schedule matches
 # # any of 28-31 (e.g. ``daily``) would also run under this trigger —
 # # review the JOBS table when adding entries.
-# # ============================================================================
 # resource "google_cloud_scheduler_job" "eom_stt_timestamps" {
 #   name             = "eom-stt-timestamps"
 #   description      = "Last-day-of-month STT timestamps sub-job of all-jobs."

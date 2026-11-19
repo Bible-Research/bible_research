@@ -34,9 +34,10 @@ JOBS = [
     # no DBT coverage. Runs on the LAST day of the month — the
     # STT free tier (60 min/mo) resets on the 1st, so end-of-month
     # spends a budget that would otherwise expire days later. The
-    # ``eom-stt-timestamps`` Cloud Scheduler trigger fires a plain
-    # ``jobs:run`` on days 28-31; this predicate gates it to the
-    # real last day.
+    # ``eom-stt-timestamps`` Cloud Scheduler trigger would fire a
+    # plain ``jobs:run`` on days 28-31 (its resource is currently
+    # commented out in terraform/scheduler.tf); this predicate
+    # gates it to the real last day.
     (
         "generate_audio_timestamps",
         [
@@ -45,10 +46,11 @@ JOBS = [
         ],
         "last_day_of_month",
     ),
-    # Gemini free-tier audio drip. The ``daily-gemini-audio`` Cloud
-    # Scheduler job triggers all-jobs daily but overrides the
-    # container args to ``--only generate_gemini_audio``, which
-    # reaches this entry. ``manual`` on purpose: an unfiltered
+    # Gemini free-tier audio drip. No ``daily-gemini-audio`` Cloud
+    # Scheduler resource exists — manual ``--only`` runs only;
+    # a future scheduled pass would override the container args
+    # to ``--only generate_gemini_audio``, which reaches this
+    # entry. ``manual`` on purpose: an unfiltered
     # scheduled pass (e.g. a future plain daily/monthly trigger of
     # all-jobs, or a run whose arg override was lost) must not
     # start it implicitly — only an explicit ``--only``/``--force``
@@ -63,9 +65,11 @@ JOBS = [
         "manual",
     ),
     # Edge read-aloud TTS (lv-LV-EveritaNeural) — the production
-    # voice. The ``daily-edge-audio`` Cloud Scheduler job triggers
-    # all-jobs daily with ``--only generate_edge_audio`` container
-    # args; ``manual`` keeps unfiltered passes from starting it
+    # voice. The ``daily-edge-audio`` Cloud Scheduler job would
+    # trigger all-jobs daily with ``--only generate_edge_audio``
+    # container args (currently commented out in
+    # terraform/scheduler.tf); ``manual`` keeps unfiltered passes
+    # from starting it
     # implicitly (same reasoning as the Gemini entry above).
     (
         "generate_edge_audio",
@@ -89,9 +93,11 @@ JOBS = [
         "manual",
     ),
     # Monthly note-translation coverage audit. The
-    # ``note-translations-audit`` Cloud Scheduler trigger fires
-    # a plain ``jobs:run`` on days 28-31; this predicate gates
-    # it to the real last day. Emits one Sentry captureMessage
+    # ``note-translations-audit`` Cloud Scheduler trigger would
+    # fire a plain ``jobs:run`` on days 28-31 (resource currently
+    # commented out in terraform/scheduler.tf); this predicate
+    # gates it to the real last day. Emits one Sentry
+    # captureMessage
     # when per-language misses exist, logs-only on a clean run.
     (
         "check_note_translations",
