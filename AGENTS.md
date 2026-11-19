@@ -77,6 +77,28 @@ the chapter entry); `ApiBibleProvider` is returned unwrapped
 (FUMS `meta` tokens must be reported per display). Returned
 payloads are shared — never mutate them.
 
+Every provider surface is gated to the 66-book canon
+(`CANONICAL_BOOK_IDS` in `bible/utils/bible_books.py`, derived
+from `_BIBLE_BOOKS`): `bible/search/` intersects the `books`
+param with the canon — an empty intersection returns a
+provider-shaped empty payload (paginated or grouped) with no
+upstream call and no error, i.e. a coverage miss like
+`book_not_in_fileset`, not a 400. `DbtProvider.search` and
+`fetch_dbt_matches` always send `books=` upstream — the
+request filter or the full sorted 66-id string
+(`CANONICAL_BOOKS_PARAM`) — so DBT-reported totals count
+canonical matches only; normalized rows are additionally
+post-filtered through `filter_canonical_verses` on the DBT
+and API.Bible paths (ESV/SWORD are canon-by-construction —
+`get_dbt_book_id` refs and `_BIBLE_BOOKS`-mapped module
+books). API.Bible has no upstream book filter, so on a
+hypothetical deuterocanon bible its `total` could overcount
+the rows actually returned — registered bibles are NIV-only
+today. `get_passage_body` answers a non-canonical `book` id
+as `book_not_in_fileset` before provider dispatch (the public
+`passage=` path can't produce one — names resolve through
+`get_dbt_book_id`).
+
 Known fileset ids: `ENGKJV` (KJV), `ENGESV_API` (ESV), `LVSGLU8`
 (Latvian Glück text), `LVSGLU8C1DA` (Latvian Glück generated audio,
 verse-synthesis mode), `LVSGLU8C2DA` (same audio, chapter-synthesis
@@ -97,7 +119,10 @@ Worklist source is `DBTClient.get_fileset_files` —
 `GET /bibles/filesets/{fileset_id}` returns the fileset's real
 per-chapter coverage with signed `path` + `duration` (unlike
 `/bibles/{bible_id}/book`, which keys on the bible id and unions
-sibling filesets; a `*DA` fileset id 404s there).
+sibling filesets; a `*DA` fileset id 404s there). The worklist
+skips rows outside the 66-book canon — a deuterocanonical
+fileset can't burn STT spend on chapters the SWORD reference
+lacks, and `--book TOB` now yields an empty pending list.
 
 `DBTClient` methods that hit `/bibles/{id}/book`
 (`get_books`/`get_book`/`get_chapters`) use raw `session.get`
