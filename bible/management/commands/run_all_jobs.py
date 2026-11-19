@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # label, argv, schedule — runs only when `schedule` matches today (UTC)
 JOBS = [
     # Mirrors the intended monthly-3rd schedule of the (currently
-    # disabled) audio-generator Cloud Scheduler trigger.
+    # disabled) `monthly-all-jobs` Cloud Scheduler trigger.
     (
         "generate_chapter_audio",
         ["--fileset-id", "LVSGLU8", "--mode", "both"],

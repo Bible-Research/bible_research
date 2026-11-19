@@ -2319,8 +2319,9 @@ source venv/bin/activate
 # Dev-only decoder for --deep (miniaudio):
 pip install -r requirements-dev.txt
 
-# Django settings — this checkout's .env (gitignored) points
-# at prod; GCS access needs Application Default
+# Django settings — this checkout's .env resolves a remote
+# DB via the DATABASE_*_URL chain (stagingdb, writable);
+# GCS access needs Application Default
 # Credentials, and on this network the Netskope CA bundle:
 gcloud auth application-default login      # once
 export SSL_CERT_FILE=/tmp/combined-ca.pem  # see AGENTS.md
@@ -2634,7 +2635,8 @@ sent (local dev and CI are silent by default).
   grep SENTRY_DSN`; the env var of the same name also works.
   Release is `SENTRY_RELEASE` when set, else `GAE_VERSION`
   (Cloud Run jobs set neither → release-less events);
-  environment is `production` on GCP, `development` otherwise.
+  environment is `production` on GCP, `staging` on Vercel
+  previews, `development` otherwise.
 
 **Event streams** — the alert queue is
 `is:unresolved level:error environment:production`:

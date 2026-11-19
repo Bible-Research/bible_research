@@ -275,7 +275,8 @@ locally). What each stream means:
 The agent-fix queue for this project is `is:unresolved
 level:error environment:production` — warning-level provider
 events are excluded by the level filter. Events carry
-`environment:production` on GCP and `development` elsewhere,
+`environment:production` on GCP, `staging` on Vercel
+previews, and `development` elsewhere,
 with `release` = `SENTRY_RELEASE` else `GAE_VERSION`, so the
 environment filter skips dev noise and `resolvedInNextRelease`
 resolves an issue at the next GAE deploy.
@@ -334,8 +335,8 @@ resolves an issue at the next GAE deploy.
   Aiven runs PG16 but PATH's `pg_dump` is v14 and aborts. Run with
   `export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"` first.
 - For a fully local database, set `.env`'s
-  `DATABASE_LOCAL_URL` to `sqlite:///db.sqlite3` (a
-  `db.sqlite3` file already exists in the repo root).
+  `DATABASE_LOCAL_URL` to `sqlite:///db.sqlite3` (the file
+  is gitignored — created on first run if missing).
 - Staging database `stagingdb` lives on the same Aiven
   instance. `staging_rw` owns it (read/write + `CREATEDB`);
   its password is a deploy secret, never committed.
@@ -586,11 +587,6 @@ Universal rules — follow exactly:
   (see "Databases"). Serverless
   carries no GCP credentials, so GCS-backed features
   (generated audio, image attachments) are unavailable there.
-- All implementation work happens in a git worktree
-  (`worktrees/<slug>` inside this repo — gitignored) — never
-  the main checkout; remove the worktree + branch once the PR
-  merges green. Full workflow: workspace `../AGENTS.md`
-  "Repo-specific rules".
 - `terraform/scheduler.tf`: all three Cloud Scheduler jobs
   in this file are commented out (most recently
   `daily-edge-audio`, per user request 2026-10-31) — do
