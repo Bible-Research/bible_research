@@ -4,7 +4,10 @@ endpoint (edge-tts), voice ``lv-LV-EveritaNeural`` by default.
 Mirrors ``generate_gemini_audio``'s dual-mode shape:
 
 - **Local** (default): writes MP3 + timestamps under ``tts-out/``
-  and resumes via the same gitignored JSON state file.
+  and resumes via its own gitignored JSON state file
+  (``edge-tts-state.json`` — never shared with the Gemini job, so
+  a checkout that already ran ``generate_gemini_audio`` does not
+  skip chapters Edge has not generated).
 - **GCS** (``--upload-gcs``, or auto-enabled when the
   ``CLOUD_RUN_JOB`` env var is set — i.e. inside the ``all-jobs``
   Cloud Run Job): uploads artifacts to the audio bucket under
@@ -15,7 +18,9 @@ Mirrors ``generate_gemini_audio``'s dual-mode shape:
 There is no API key and no formal quota — the run is bounded by
 ``--max-chapters``/``--max-minutes`` so it always finishes inside
 the Cloud Run Job's timeout; the daily scheduler re-triggers it
-until the listing shows every chapter done.
+until the listing shows every chapter done. ``--until-done``
+removes both caps so a single local invocation drains the whole
+pending worklist (meant for standalone boxes, not the Job).
 """
 import logging
 import os
@@ -54,6 +59,13 @@ DEFAULT_MAX_MINUTES = 60.0
 # NoAudioReceived at 0.5 s spacing), so requests stay sparse.
 DEFAULT_SLEEP_SECONDS = 1.5
 
+# Engine-specific local resume ledger (repo root, gitignored) —
+# mirrors ``gemini_tts.state.DEFAULT_STATE_PATH`` resolution so
+# an edge run never inherits Gemini's completion marks.
+DEFAULT_STATE_PATH = (
+    Path(__file__).resolve().parents[3] / "edge-tts-state.json"
+)
+
 
 class Command(BaseCommand):
     help = (
@@ -71,7 +83,8 @@ class Command(BaseCommand):
             default=DEFAULT_MAX_CHAPTERS,
             help=(
                 "Max chapters to generate this run "
-                f"(default: {DEFAULT_MAX_CHAPTERS})."
+                f"(default: {DEFAULT_MAX_CHAPTERS}; ignored "
+                "with --until-done)."
             ),
         )
         parser.add_argument(
@@ -79,7 +92,17 @@ class Command(BaseCommand):
             default=DEFAULT_MAX_MINUTES,
             help=(
                 "Wall-clock bound per run "
-                f"(default: {DEFAULT_MAX_MINUTES})."
+                f"(default: {DEFAULT_MAX_MINUTES}; ignored "
+                "with --until-done)."
+            ),
+        )
+        parser.add_argument(
+            "--until-done", action="store_true",
+            help=(
+                "Ignore --max-chapters/--max-minutes and "
+                "generate until the pending worklist is "
+                "drained (standalone local runs; pointless "
+                "with --upload-gcs)."
             ),
         )
         parser.add_argument(
@@ -98,7 +121,7 @@ class Command(BaseCommand):
             "--state-file", default=None,
             help=(
                 "Override the JSON state file path "
-                "(default: <repo>/gemini-tts-state.json)."
+                "(default: <repo>/edge-tts-state.json)."
             ),
         )
         parser.add_argument(
@@ -150,7 +173,8 @@ class Command(BaseCommand):
             )
             state = RunState(
                 Path(options["state_file"])
-                if options["state_file"] else None
+                if options["state_file"]
+                else DEFAULT_STATE_PATH
             )
             completed = set()
 
@@ -166,9 +190,13 @@ class Command(BaseCommand):
             len(worklist) - len(pending), len(pending),
         )
         if options["dry_run"]:
+            cap = (
+                "unbounded" if options["until_done"]
+                else options["max_chapters"]
+            )
             self.stdout.write(
                 f"would generate {len(pending)} chapters "
-                f"(max_chapters={options['max_chapters']})"
+                f"(max_chapters={cap})"
             )
             return
 
@@ -205,18 +233,22 @@ class Command(BaseCommand):
         chars_used = 0
         reason = "all_done"
         started = time.monotonic()
+        until_done = options["until_done"]
         max_chapters = options["max_chapters"]
         max_seconds = options["max_minutes"] * 60
 
         for book_id, chap in pending:
-            if generated >= max_chapters:
+            if not until_done and generated >= max_chapters:
                 reason = "chapter_cap"
                 logger.info(
                     "Chapter cap reached (%d); next run resumes "
                     "from the listing.", generated,
                 )
                 break
-            if time.monotonic() - started > max_seconds:
+            if (
+                not until_done
+                and time.monotonic() - started > max_seconds
+            ):
                 reason = "time_cap"
                 logger.info(
                     "Time cap reached; next run resumes from the "

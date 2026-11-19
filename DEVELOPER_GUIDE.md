@@ -2001,7 +2001,9 @@ is free and keyless (the same endpoint Edge's browser
 read-aloud uses), so there is no API key, char budget, or
 daily quota — runs are bounded by `--max-chapters` (default
 60) and `--max-minutes` (default 60) instead, keeping each
-invocation inside the Job's 5400 s timeout. Same dual modes
+invocation inside the Job's 5400 s timeout (`--until-done`
+removes both caps for standalone local runs — see below).
+Same dual modes
 as the Gemini command (`--upload-gcs` / `CLOUD_RUN_JOB`
 auto-detect; artifacts under `audio_edge/`, GCS mode
 `"edge"`), minus the request counter — completion comes from
@@ -2027,6 +2029,47 @@ Differences from the Gemini pipeline:
   `--only generate_edge_audio`; the unscheduled monthly
   `dom:3` Google TTS entry can never piggyback (it needs a
   plain run on day 3, which no trigger performs).
+
+#### Standalone full-Bible run (Linux)
+
+`--until-done` removes both run caps so a single invocation
+drains the entire pending worklist — the one-command way to
+render the whole Bible on a plain box instead of through the
+scheduled Cloud Run Job. Local mode only (`--upload-gcs`
+still gets its artifacts, but the flag is pointless there).
+On a fresh Ubuntu/Debian checkout:
+
+```bash
+git clone https://github.com/Bible-Research/bible_research.git
+cd bible_research
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+# Django settings hard-fail without a config file; the
+# placeholders in the template are enough — the edge path
+# touches no DB, API key or cloud service.
+cp config_template.yaml config.yaml
+python manage.py generate_edge_audio --until-done
+```
+
+- **Output**: `tts-out/LVSGLU8/<BOOK>/<CH>.mp3` plus
+  `<CH>_timestamps.json` (exact per-verse offsets). Chapter
+  text comes from the vendored `bible/sword_modules/
+  LvGluck8.zip` — the only egress is the Edge endpoint.
+- **Resume**: `edge-tts-state.json` (gitignored, repo root)
+  plus the on-disk artifact check — reruns skip finished
+  chapters, and the file is engine-specific so a prior
+  `generate_gemini_audio` ledger never skips edge chapters.
+- **Restart loop** (optional belt-and-suspenders for a
+  multi-day run — per-verse retries already ride out the
+  endpoint's throttle bursts):
+
+  ```bash
+  while true; do
+      python manage.py generate_edge_audio --until-done \
+          && break
+      sleep 60
+  done
+  ```
 
 ### Audio Artifact Audit
 
