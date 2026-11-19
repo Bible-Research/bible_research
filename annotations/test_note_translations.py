@@ -616,6 +616,28 @@ class TranslateNotesCommandTest(_BaseCase):
         self.assertTrue(mine.translations.exists())
         self.assertFalse(theirs.translations.exists())
 
+    def test_tag_scope_only(self):
+        from .models import Tag
+        from django.core.management import call_command
+        tag = Tag.objects.create(user=self.user, name='wanted')
+        other_tag = Tag.objects.create(
+            user=self.user, name='other')
+        mine = _note(self.user, text='tagged', tag=tag)
+        theirs = _note(self.user, text='untagged', tag=other_tag)
+        client_obj = FakeTranslateClient(detected='lv')
+        with _patch_client(client_obj):
+            call_command(
+                'translate_notes', '--tag', tag.pk,
+            )
+        self.assertTrue(mine.translations.exists())
+        self.assertFalse(theirs.translations.exists())
+
+    def test_tag_unknown_id_raises(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+        with self.assertRaises(CommandError):
+            call_command('translate_notes', '--tag', 'TAGnope')
+
 
 class CheckNoteTranslationsTest(_BaseCase):
     """Task 4.5: coverage audit Sentry behavior."""
