@@ -2281,16 +2281,30 @@ python manage.py audit_audio_files --metadata-only
 python manage.py audit_audio_files --deep --book NUM
 ```
 
-#### Scheduling — do NOT automate this command
+#### Scheduling — CI cron only, never GCP
 
 `audit_audio_files` is deliberately **not wired into
 `run_all_jobs` or terraform**, and must not be: `--deep`
 requires the dev-only decoder (absent in the prod image) and
 downloads the entire bucket, and `--metadata-only` runs are
-cheap enough to do ad-hoc. If a scheduled structural pass is
-ever wanted, the entry point is a `manual` `JOBS` row plus a
-Cloud Scheduler trigger — decide that separately; the repair
-workflow below is the intended consumer instead.
+cheap enough to do ad-hoc. A Cloud Scheduler trigger on the
+prod job would need the decoder shipped in the image — a
+separate decision, not a quick win.
+
+The sanctioned automation is `.github/workflows/
+audio-audit.yml` — a **weekly GitHub Actions cron**
+(Mondays 05:17 UTC, plus `workflow_dispatch`) that runs
+`--deep` over all prefixes on a GitHub runner (the repo is
+public, so runner minutes are free; the only cost is ~1.2 GB
+of GCS egress, ~$8/yr). It authenticates through the same
+WIF provider as the deploy workflows (`github-deployer` SA,
+`roles/storage.admin`), installs `miniaudio` on the fly, and
+writes the JSON report to
+`gs://{bucket}/manifests/audio-repair.json` — the default
+manifest slot `repair_audio_files` consumes. Suspects open
+(or comment on) a deduplicated `audio-audit`-labeled GitHub
+issue; the run fails only when no report is produced, so an
+open backlog doesn't spam weekly red runs.
 
 #### Remediation workflow
 
