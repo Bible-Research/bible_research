@@ -515,6 +515,10 @@ if isinstance(NOTE_TARGET_LANGUAGES, str):
         for s in NOTE_TARGET_LANGUAGES.split(',')
         if s.strip()
     ]
+if os.environ.get('VERCEL'):
+    # Vercel serverless has no Google credentials — Cloud
+    # Translation/Tasks calls would 500 on every note write.
+    NOTE_TARGET_LANGUAGES = []
 # Engine provenance stamped on every NoteTranslation row; the
 # v3 general/nmt model is the MVP default ('google-llm' /
 # 'gemini-…' are future config flips, not code changes).
