@@ -338,15 +338,15 @@ resolves an issue at the next GAE deploy.
   `config.yaml`'s `default` at `stagingdb`/`staging_rw`
   (password from the staging deploy's `DATABASE_URL` — ask
   the user).
-- Non-production backend deployments (e.g. a Vercel staging
-  env whose config arrives via the `DOTENV` variable) set
-  `DATABASE_URL` to `stagingdb` — never `defaultdb`. The
-  shared `env-file` secret carries prod's `defaultdb` URL,
-  so a staging deploy must supply `DATABASE_URL` explicitly
-  — inside its own DOTENV payload or as a real env var
-  (env vars win over DOTENV-carried values). `DB_SSL_CERT`
-  is the same Aiven CA PEM in every environment. See
-  DEVELOPER_GUIDE "Environment Variables".
+- `settings.py` picks the DB URL per environment:
+  Vercel previews (staging backend) require
+  `DATABASE_STAGING_URL` → `stagingdb`, never `defaultdb`;
+  GCP and Vercel production use `DATABASE_URL`; local dev
+  falls back through `DATABASE_LOCAL_URL` →
+  `DATABASE_READ_URL` (read-only user) → `DATABASE_URL`, so
+  reaching prod from a dev shell is a deliberate opt-in.
+  `DB_SSL_CERT` is the same Aiven CA PEM in every
+  environment. See DEVELOPER_GUIDE "Environment Variables".
 - `stagingdb` was seeded from `defaultdb` (2026-11-16): prod
   schema via `pg_dump --schema-only`, all `bible_verse`
   rows, `django_migrations`/content types/auth permissions,
@@ -568,11 +568,12 @@ Universal rules — follow exactly:
   `manage.py` → `WSGI_APPLICATION`, installs
   `requirements.txt`, and runs collectstatic itself;
   `scripts/vercel_build.sh` additionally applies migrations
-  (refuses non-`stagingdb` `DATABASE_URL`s) so `stagingdb`'s
-  schema tracks `staging`. Runtime config arrives via the
-  project's `DOTENV` env var (Preview scope — required, or
-  settings raise `FileNotFoundError`) with `DATABASE_URL` →
-  `stagingdb`, never `defaultdb` (see "Databases"). Serverless
+  (refuses non-`stagingdb` `DATABASE_STAGING_URL`s) so
+  `stagingdb`'s schema tracks `staging`. Runtime config
+  arrives via the project's `DOTENV` env var (Preview scope —
+  required, or settings raise `FileNotFoundError`) with
+  `DATABASE_STAGING_URL` → `stagingdb`, never `defaultdb`
+  (see "Databases"). Serverless
   carries no GCP credentials, so GCS-backed features
   (generated audio, image attachments) are unavailable there.
 - All implementation work happens in a git worktree

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import dj_database_url
 from corsheaders.defaults import default_headers
+from django.core.exceptions import ImproperlyConfigured
 
 from .utils import (
     PROFILES_SAMPLE_RATE,
@@ -219,15 +220,45 @@ def _write_ca_pem(pem_source):
         f.write(pem_content)
 
 
+def _database_url_for_environment():
+    """Pick the database URL for the current environment.
+
+    Deployed environments are pinned: Vercel previews (the
+    staging backend) require ``DATABASE_STAGING_URL``, and GCP
+    or Vercel production use ``DATABASE_URL``. Local dev falls
+    back through ``DATABASE_LOCAL_URL`` (a fully-local or
+    writable dev DB), ``DATABASE_READ_URL`` (a read-only user),
+    and finally ``DATABASE_URL`` — so reaching prod stays a
+    deliberate opt-in, not the default.
+    """
+    vercel_env = os.environ.get('VERCEL_ENV')
+    if vercel_env == 'preview':
+        url = os.environ.get('DATABASE_STAGING_URL')
+        if not url:
+            raise ImproperlyConfigured(
+                'DATABASE_STAGING_URL is required on Vercel '
+                'preview deployments (the staging backend).'
+            )
+        return url
+    if vercel_env == 'production' or IS_GCP_ENVIRONMENT:
+        return os.environ.get('DATABASE_URL')
+    return (
+        os.environ.get('DATABASE_LOCAL_URL')
+        or os.environ.get('DATABASE_READ_URL')
+        or os.environ.get('DATABASE_URL')
+    )
+
+
 def _db_config_from_env():
     """Build the Django ``default`` database dict from env vars.
 
-    ``DATABASE_URL`` wins; discrete ``DB_*`` parts are the next
-    fallback; local SQLite is the last resort. A CA PEM provided via
-    ``DB_SSL_CERT`` (or its ``capem`` alias) is written to CA_PEM_PATH
-    and wired up as sslmode=require + sslrootcert.
+    The URL comes from ``_database_url_for_environment``;
+    discrete ``DB_*`` parts are the next fallback; local SQLite
+    is the last resort. A CA PEM provided via ``DB_SSL_CERT``
+    (or its ``capem`` alias) is written to CA_PEM_PATH and wired
+    up as sslmode=require + sslrootcert.
     """
-    database_url = os.environ.get('DATABASE_URL')
+    database_url = _database_url_for_environment()
     if database_url:
         db_config = dj_database_url.parse(database_url)
     elif os.environ.get('DB_NAME'):
