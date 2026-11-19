@@ -543,9 +543,11 @@ Universal rules — follow exactly:
   `http://localhost:<port>` dev servers. Token auth means no
   cookies/CSRF, so this bounds page embedding, not access —
   non-browser callers are unaffected. A new browser consumer
-  must be added to the list. Transport hardening is GCP-gated
-  on `IS_GCP_ENVIRONMENT` (X-Forwarded-Proto trust,
-  http→https redirect, Secure session/CSRF cookies);
+  must be added to the list. Transport hardening:
+  X-Forwarded-Proto trust is unconditional; Secure
+  session/CSRF cookies turn on for deployed envs (GCP or
+  Vercel); http→https redirect stays GCP-gated on
+  `IS_GCP_ENVIRONMENT`;
   `ALLOWED_HOSTS` is `.appspot.com` + `.vercel.app` (the
   staging backend's hostnames) + localhost.
 - Vercel staging backend: the `bible-research-api` Vercel

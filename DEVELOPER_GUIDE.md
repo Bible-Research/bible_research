@@ -2751,7 +2751,10 @@ API_BIBLE_KEY=<…>
 
 Optionally add `SENTRY_DSN=<…>` to report staging errors to
 the `bible-research-api` Sentry project — events carry
-`environment:staging` on Vercel previews.
+`environment:staging` on Vercel previews. To silence the
+note-translation pipeline (it runs inline outside GCP and has
+no Google credentials on Vercel, so every note write stamps
+`failed` rows), set `NOTE_TARGET_LANGUAGES=` empty.
 
 Serverless functions have no GCP credentials, so GCS-backed
 features (generated audio, image attachments) cannot work on
