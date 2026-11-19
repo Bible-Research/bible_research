@@ -118,26 +118,71 @@ class NotesSearchRateThrottle(UserRateThrottle):
     scope = 'notes-search'
 
 
-def _shared_tag_ids(user):
+def _shared_tag_ids(user, request=None):
     """Tag ids covered by TagShare grants to *user* — the
     granted tag itself always; descendants only when the grant
-    opted in, resolved live through subtree_tag_ids so notes
-    added later are covered and moved-out notes drop out."""
-    tag_ids = set()
-    shares = TagShare.objects.filter(
+    opted in, resolved live so notes added later are covered
+    and moved-out notes drop out.
+
+    Descendants resolve through ONE batched breadth-first
+    walk across all opted-in grants — a query per tree level,
+    not a subtree_tag_ids walk per grant. Each descent stays
+    bounded to its grant's owner exactly like subtree_tag_ids:
+    a child tag joins the set only when owned by the owner
+    whose walk reached its parent (cross-owner parent links
+    remain a boundary).
+
+    When *request* is supplied the result is cached on it —
+    comment surfaces evaluate the visibility funnel twice
+    per request and a grant cannot change mid-request.
+    """
+    if request is not None:
+        cached = getattr(
+            request, '_shared_tag_ids_cache', None
+        )
+        if cached is not None:
+            return cached
+    grants = TagShare.objects.filter(
         shared_with=user,
-    ).select_related('tag', 'owner')
-    for share in shares:
-        if share.include_descendants:
-            tag_ids |= subtree_tag_ids(
-                share.tag, user=share.owner
+    ).values('tag_id', 'owner_id', 'include_descendants')
+    tag_ids = set()
+    # frontier/visited map a tag id to the owner ids whose
+    # subtree walk has reached it — a node reached under a
+    # second owner must still expand for that owner.
+    frontier = {}
+    for grant in grants:
+        tag_ids.add(grant['tag_id'])
+        if grant['include_descendants']:
+            frontier.setdefault(
+                grant['tag_id'], set()
+            ).add(grant['owner_id'])
+    visited = {
+        tag_id: set(owners) for tag_id, owners in frontier.items()
+    }
+    while frontier:
+        children = Tag.objects.filter(
+            parent_tag_id__in=list(frontier),
+        ).values('id', 'parent_tag_id', 'user_id')
+        next_frontier = {}
+        for child in children:
+            owner_id = child['user_id']
+            if owner_id not in frontier[child['parent_tag_id']]:
+                continue
+            tag_ids.add(child['id'])
+            seen = visited.setdefault(child['id'], set())
+            if owner_id in seen:
+                continue
+            seen.add(owner_id)
+            next_frontier.setdefault(child['id'], set()).add(
+                owner_id
             )
-        else:
-            tag_ids.add(share.tag_id)
+        frontier = next_frontier
+    if request is not None:
+        request._shared_tag_ids_cache = tag_ids
     return tag_ids
 
 
-def _accessible_visibility_q(user):
+def _accessible_visibility_q(user, request=None):
     """Q matching every note *user* can read via ownership or
     a share grant — callers OR it with Q(public=True).
 
@@ -147,14 +192,14 @@ def _accessible_visibility_q(user):
     """
     return (
         Q(user=user)
-        | Q(tag_id__in=_shared_tag_ids(user))
+        | Q(tag_id__in=_shared_tag_ids(user, request))
         | Q(Exists(NoteShare.objects.filter(
             note=OuterRef('pk'), shared_with=user,
         )))
     )
 
 
-def get_accessible_notes_qs(user):
+def get_accessible_notes_qs(user, request=None):
     """
     Return a Note queryset scoped to what *user* may see:
     - Authenticated → own notes ∪ public notes ∪ notes granted
@@ -163,11 +208,13 @@ def get_accessible_notes_qs(user):
 
     Shared by NoteViewSet list/retrieve, CommentViewSet,
     order-index, counts and every other read surface so
-    access always matches.
+    access always matches. Pass *request* so the tag-share
+    resolution is computed once per request.
     """
     if user.is_authenticated:
         return Note.objects.filter(
-            Q(public=True) | _accessible_visibility_q(user)
+            Q(public=True)
+            | _accessible_visibility_q(user, request)
         )
     return Note.objects.filter(public=True)
 
@@ -391,9 +438,9 @@ def _next_tag_position(tag):
 
 def _copy_note(source, user, tag, tag_position):
     """Create *user*'s copy of *source* — private, unpublished,
-    provenance kept on copied_from, verse links duplicated,
-    images deliberately not copied (rows could orphan shared
-    GCS blobs)."""
+    provenance kept on copied_from, verse links and the
+    detected source_language duplicated, images deliberately
+    not copied (rows could orphan shared GCS blobs)."""
     new_note = Note.objects.create(
         user=user,
         tag=tag,
@@ -402,6 +449,10 @@ def _copy_note(source, user, tag, tag_position):
             source.note_text_plain
             or note_text_to_plain(source.note_text)
         ),
+        # The copy shares the source's language — carrying it
+        # over keeps ?lang= serving correct until the copy's
+        # own translation run re-detects.
+        source_language=source.source_language,
         public=False,
         published=False,
         copied_from=source,
@@ -912,27 +963,33 @@ class TagViewSet(viewsets.ModelViewSet):
             raise QueryParamError(
                 "'include_descendants' must be a boolean."
             )
+        # The cap is enforced BEFORE resolving the username:
+        # checked after the unknown-username branch, the
+        # 400-vs-silent-200 split at the cap would reveal
+        # whether an account exists. Every caller gets the
+        # same 400 once the tag is full.
+        if tag.shares.count() >= SHARE_RECIPIENT_CAP:
+            return _validation_error(
+                'Share recipient limit reached '
+                f'({SHARE_RECIPIENT_CAP}).'
+            )
         recipient = _resolve_share_recipient(username)
         if recipient is None or recipient.pk == request.user.pk:
             # Unknown username / self-share — same body as a
             # real grant, so existence is never revealed.
             return Response({'shared': True})
-        share = TagShare.objects.filter(
-            tag=tag, shared_with=recipient,
-        ).first()
-        if share is None:
-            if tag.shares.count() >= SHARE_RECIPIENT_CAP:
-                return _validation_error(
-                    'Share recipient limit reached '
-                    f'({SHARE_RECIPIENT_CAP}).'
-                )
-            share = TagShare.objects.create(
-                tag=tag,
-                owner=request.user,
-                shared_with=recipient,
-                include_descendants=include_descendants,
-            )
-        elif share.include_descendants != include_descendants:
+        share, created = TagShare.objects.get_or_create(
+            tag=tag,
+            shared_with=recipient,
+            defaults={
+                'owner': request.user,
+                'include_descendants': include_descendants,
+            },
+        )
+        if (
+            not created
+            and share.include_descendants != include_descendants
+        ):
             share.include_descendants = include_descendants
             share.save(update_fields=['include_descendants'])
         return Response({'shared': True})
@@ -979,20 +1036,43 @@ class TagViewSet(viewsets.ModelViewSet):
         source with more than 100 accessible notes fails 400
         rather than truncating silently.
         """
-        source = get_object_or_404(Tag.objects.all(), pk=pk)
-        target = _copy_target_tag(request, required=True)
-        sources = list(
-            get_accessible_notes_qs(request.user)
-            .filter(tag=source)
-            .select_related('tag')
-            .prefetch_related('verses')
-            .order_by('tag_position')
+        # The source resolves through the caller's accessible
+        # scope — an inaccessible tag is indistinguishable
+        # from a nonexistent one (same posture as note copy),
+        # so its existence and note count stay private.
+        source = get_object_or_404(
+            Tag.objects.filter(
+                Q(user=request.user)
+                | Q(shares__shared_with=request.user)
+                | Q(Exists(
+                    get_accessible_notes_qs(
+                        request.user, request
+                    ).filter(tag=OuterRef('pk'))
+                ))
+            ).distinct(),
+            pk=pk,
         )
-        if len(sources) > TAG_COPY_NOTE_CAP:
+        target = _copy_target_tag(request, required=True)
+        if target.pk == source.pk:
+            return _validation_error(
+                'Cannot copy a tag into itself.'
+            )
+        accessible = get_accessible_notes_qs(
+            request.user, request
+        ).filter(tag=source)
+        # Count before materializing — an over-cap source
+        # must fail without loading every note row.
+        if accessible.count() > TAG_COPY_NOTE_CAP:
             return _validation_error(
                 f'Tag has more than {TAG_COPY_NOTE_CAP} '
                 'accessible notes; copy refused.'
             )
+        sources = list(
+            accessible
+            .select_related('tag')
+            .prefetch_related('verses')
+            .order_by('tag_position')
+        )
         with transaction.atomic():
             base = _next_tag_position(target)
             created = [
@@ -1368,7 +1448,13 @@ class NoteViewSet(viewsets.ModelViewSet):
             )
 
         if directory_scope:
-            queryset = Note.objects.filter(published=True)
+            # public=True alongside published=True is
+            # defense-in-depth: published implies public on
+            # every write path, but a row that ever violates
+            # the invariant must not leak to anonymous readers.
+            queryset = Note.objects.filter(
+                published=True, public=True
+            )
             if q_param:
                 queryset = queryset.filter(
                     note_text_plain__icontains=q_param
@@ -1376,7 +1462,9 @@ class NoteViewSet(viewsets.ModelViewSet):
         elif note_pk or tag_id:
             # If specific note or tag is requested,
             # search it in public notes
-            queryset = get_accessible_notes_qs(user)
+            queryset = get_accessible_notes_qs(
+                user, self.request
+            )
             logger.debug(
                 "Using get_accessible_notes_qs due to "
                 "note_pk or tag_id filter"
@@ -1413,7 +1501,9 @@ class NoteViewSet(viewsets.ModelViewSet):
                 # Anonymous callers always see public notes
                 # only; the ?public= flag must not widen the
                 # scope to private notes (issue #47).
-                queryset = get_accessible_notes_qs(user)
+                queryset = get_accessible_notes_qs(
+                    user, self.request
+                )
                 logger.debug(
                     "Unauthenticated user: "
                     "Fetching public notes only"
@@ -1587,22 +1677,25 @@ class NoteViewSet(viewsets.ModelViewSet):
         """
         note = self._own_note(pk)
         username = _resolve_share_username(request)
-        recipient = _resolve_share_recipient(username)
-        if recipient is None or recipient.pk == request.user.pk:
-            # Unknown username / self-share — same body as a
-            # real grant, so existence is never revealed.
-            return Response({'shared': True})
-        if note.shares.filter(shared_with=recipient).exists():
-            return Response({'shared': True})
+        # The cap is enforced BEFORE resolving the username:
+        # checked after the unknown-username branch, the
+        # 400-vs-silent-200 split at the cap would reveal
+        # whether an account exists. Every caller gets the
+        # same 400 once the note is full.
         if note.shares.count() >= SHARE_RECIPIENT_CAP:
             return _validation_error(
                 'Share recipient limit reached '
                 f'({SHARE_RECIPIENT_CAP}).'
             )
-        NoteShare.objects.create(
+        recipient = _resolve_share_recipient(username)
+        if recipient is None or recipient.pk == request.user.pk:
+            # Unknown username / self-share — same body as a
+            # real grant, so existence is never revealed.
+            return Response({'shared': True})
+        NoteShare.objects.get_or_create(
             note=note,
-            owner=request.user,
             shared_with=recipient,
+            defaults={'owner': request.user},
         )
         return Response({'shared': True})
 
@@ -1651,7 +1744,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         note_ids = NoteShare.objects.filter(
             shared_with=request.user,
         ).values_list('note_id', flat=True)
-        tag_ids = _shared_tag_ids(request.user)
+        tag_ids = _shared_tag_ids(request.user, request)
         notes = (
             Note.objects.filter(
                 Q(id__in=note_ids) | Q(tag_id__in=tag_ids)
@@ -1703,7 +1796,10 @@ class NoteViewSet(viewsets.ModelViewSet):
             ).delete()
             return Response(status=drf_status.HTTP_204_NO_CONTENT)
         note = get_object_or_404(
-            get_accessible_notes_qs(request.user), pk=pk,
+            get_accessible_notes_qs(
+                request.user, request
+            ),
+            pk=pk,
         )
         if note.user_id == request.user.id:
             return _validation_error(
@@ -1735,7 +1831,9 @@ class NoteViewSet(viewsets.ModelViewSet):
         lost accessibility returns {note_id, available: false}
         until the user removes it.
         """
-        accessible = get_accessible_notes_qs(request.user)
+        accessible = get_accessible_notes_qs(
+            request.user, request
+        )
         saved = (
             SavedNote.objects.filter(user=request.user)
             .select_related('note', 'note__tag', 'note__user')
@@ -1783,7 +1881,10 @@ class NoteViewSet(viewsets.ModelViewSet):
         inaccessible notes fail 400/404 respectively.
         """
         note = get_object_or_404(
-            get_accessible_notes_qs(request.user), pk=pk,
+            get_accessible_notes_qs(
+                request.user, request
+            ),
+            pk=pk,
         )
         if note.user_id == request.user.id:
             return _validation_error(
@@ -2038,7 +2139,9 @@ class NoteViewSet(viewsets.ModelViewSet):
                 'tag_id query parameter is required.'
             )
 
-        notes_qs = get_accessible_notes_qs(request.user)
+        notes_qs = get_accessible_notes_qs(
+            request.user, request
+        )
         if tag_id == UNTAGGED_TAG_ID:
             # Same sentinel semantics as GET /notes/ and
             # /comments/counts/: 'untagged' resolves to notes
@@ -2355,7 +2458,9 @@ class CommentViewSet(viewsets.ModelViewSet):
         from nonexistent ones.
         """
         return get_object_or_404(
-            get_accessible_notes_qs(self.request.user),
+            get_accessible_notes_qs(
+                self.request.user, self.request
+            ),
             pk=self.kwargs['note_pk'],
         )
 
@@ -2377,7 +2482,7 @@ class CommentViewSet(viewsets.ModelViewSet):
             # duplicate that work. Detail routes still need it.
             queryset = queryset.filter(
                 note__in=get_accessible_notes_qs(
-                    self.request.user
+                    self.request.user, self.request
                 ),
             )
         return (
@@ -2568,7 +2673,9 @@ class CommentCountView(APIView):
                 )
             note_ids = raw_parts
 
-        notes_qs = get_accessible_notes_qs(request.user)
+        notes_qs = get_accessible_notes_qs(
+            request.user, request
+        )
 
         if has_tag:
             if tag_id == UNTAGGED_TAG_ID:
@@ -2746,7 +2853,9 @@ class NoteImageViewSet(_BaseImageViewSet):
         else raise 404 — inaccessible notes are indistinguishable
         from nonexistent ones (no existence oracle)."""
         return get_object_or_404(
-            get_accessible_notes_qs(self.request.user),
+            get_accessible_notes_qs(
+                self.request.user, self.request
+            ),
             pk=self.kwargs['note_pk'],
         )
 
@@ -2782,7 +2891,7 @@ class CommentImageViewSet(_BaseImageViewSet):
         return get_object_or_404(
             Comment.objects.filter(
                 note__in=get_accessible_notes_qs(
-                    self.request.user
+                    self.request.user, self.request
                 ),
             ),
             pk=self.kwargs['comment_pk'],

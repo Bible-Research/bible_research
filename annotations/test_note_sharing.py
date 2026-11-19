@@ -589,6 +589,83 @@ class ShareEndpointsTest(TestCase):
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(TagShare.objects.exists())
 
+    def _fill_note_shares(self, count):
+        """Seed *count* share rows on self.note."""
+        User = get_user_model()
+        recipients = User.objects.bulk_create([
+            User(username=f'cap_rcp{i}', password='p')
+            for i in range(count)
+        ])
+        NoteShare.objects.bulk_create([
+            NoteShare(
+                note=self.note,
+                owner=self.owner,
+                shared_with=user,
+            )
+            for user in recipients
+        ])
+
+    def test_share_cap_uniform_at_limit(self):
+        """At the 100-recipient cap every share attempt —
+        known or unknown username — gets the identical 400.
+        Checking the cap before username resolution keeps the
+        endpoint from becoming an account-existence oracle
+        exactly when it matters."""
+        self._fill_note_shares(100)
+        resp_known = self.client.post(
+            f'{NOTES_URL}{self.note.id}/share/',
+            {'username': 'ShareRecipient'},
+            format='json',
+        )
+        resp_unknown = self.client.post(
+            f'{NOTES_URL}{self.note.id}/share/',
+            {'username': 'nosuchuser'},
+            format='json',
+        )
+        self.assertEqual(resp_known.status_code, 400)
+        self.assertEqual(resp_unknown.status_code, 400)
+        self.assertEqual(resp_known.json(), resp_unknown.json())
+        # Below the cap a fresh recipient still succeeds.
+        NoteShare.objects.filter(
+            shared_with__username='cap_rcp0'
+        ).delete()
+        resp = self.client.post(
+            f'{NOTES_URL}{self.note.id}/share/',
+            {'username': 'ShareRecipient'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    def test_tag_share_cap_uniform_at_limit(self):
+        """The tag share cap is enforced the same way —
+        a uniform 400 at the limit for every username."""
+        User = get_user_model()
+        recipients = User.objects.bulk_create([
+            User(username=f'tag_rcp{i}', password='p')
+            for i in range(100)
+        ])
+        TagShare.objects.bulk_create([
+            TagShare(
+                tag=self.tag,
+                owner=self.owner,
+                shared_with=user,
+            )
+            for user in recipients
+        ])
+        resp_known = self.client.post(
+            f'{TAGS_URL}{self.tag.id}/share/',
+            {'username': 'ShareRecipient'},
+            format='json',
+        )
+        resp_unknown = self.client.post(
+            f'{TAGS_URL}{self.tag.id}/share/',
+            {'username': 'nosuchuser'},
+            format='json',
+        )
+        self.assertEqual(resp_known.status_code, 400)
+        self.assertEqual(resp_unknown.status_code, 400)
+        self.assertEqual(resp_known.json(), resp_unknown.json())
+
 
 class SharedVisibilityTest(TestCase):
     """2.3/3.2 — grants widen the central visibility funnel."""
@@ -723,6 +800,42 @@ class SharedVisibilityTest(TestCase):
         resp = client.get(f'{NOTES_URL}shared-with-me/')
         self.assertEqual(resp.json(), {'notes': [], 'tag_shares': []})
 
+    def test_sharee_comments_but_cannot_edit_or_reshare(self):
+        """Spec scenario: a sharee may comment on a note
+        shared with them; PATCH and re-share stay owner-only
+        (403/404 as an owner-scoped resource)."""
+        note = self._note()
+        NoteShare.objects.create(
+            note=note,
+            owner=self.owner,
+            shared_with=self.sharee,
+        )
+        resp = self.sharee_client.post(
+            f'{NOTES_URL}{note.id}/comments/',
+            {'content': 'sharee remark'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        resp = self.sharee_client.patch(
+            f'{NOTES_URL}{note.id}/',
+            {'note_text': 'edited by sharee'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+        resp = self.sharee_client.post(
+            f'{NOTES_URL}{note.id}/share/',
+            {'username': 'vis_other'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 404)
+        note.refresh_from_db()
+        self.assertEqual(note.note_text, 'n')
+        self.assertFalse(
+            NoteShare.objects.filter(
+                shared_with=self.other
+            ).exists()
+        )
+
     def test_shared_tag_retrieve(self):
         """GET /tags/<id>/ resolves for sharees with a
         scoped note_count; strangers still 404."""
@@ -813,6 +926,20 @@ class BookmarkTest(TestCase):
         # Removal still works once access is gone.
         resp = self.client.delete(
             f'{NOTES_URL}{self.public_note.id}/bookmark/'
+        )
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(SavedNote.objects.exists())
+
+    def test_deleted_note_cascades_bookmark(self):
+        """A bookmarked note that is deleted takes the
+        SavedNote row with it (FK CASCADE)."""
+        SavedNote.objects.create(
+            user=self.saver, note=self.public_note,
+        )
+        owner_client = APIClient()
+        owner_client.force_authenticate(user=self.owner)
+        resp = owner_client.delete(
+            f'{NOTES_URL}{self.public_note.id}/'
         )
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(SavedNote.objects.exists())
@@ -933,6 +1060,73 @@ class CopyTest(TestCase):
         self.assertEqual(len(set(positions)), 2)
         private.refresh_from_db()
         self.assertEqual(private.user_id, self.owner.id)
+
+    def test_copy_carries_source_language(self):
+        """A copied note keeps the source's detected
+        source_language so ?lang= serving stays correct."""
+        self.source.source_language = 'lv'
+        self.source.save()
+        resp = self.client.post(
+            f'{NOTES_URL}{self.source.id}/copy/',
+            {},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        new_note = Note.objects.get(pk=resp.json()['id'])
+        self.assertEqual(new_note.source_language, 'lv')
+
+    def test_tag_copy_inaccessible_source_404(self):
+        """A foreign tag holding only inaccessible notes
+        404s — indistinguishable from nonexistent, matching
+        note copy's posture."""
+        foreign = Tag.objects.create(
+            user=self.owner, name='Private',
+        )
+        Note.objects.create(
+            user=self.owner, tag=foreign, note_text='secret',
+        )
+        resp = self.client.post(
+            f'{TAGS_URL}{foreign.id}/copy/',
+            {'tag_id': self.target_tag.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(
+            Note.objects.filter(user=self.copier).exists()
+        )
+
+    def test_tag_copy_shared_source_allowed(self):
+        """A tag granted via TagShare (even with no notes
+        the caller can see yet) is a valid copy source."""
+        foreign = Tag.objects.create(
+            user=self.owner, name='Granted',
+        )
+        TagShare.objects.create(
+            tag=foreign,
+            owner=self.owner,
+            shared_with=self.copier,
+        )
+        resp = self.client.post(
+            f'{TAGS_URL}{foreign.id}/copy/',
+            {'tag_id': self.target_tag.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()['copied'], 0)
+
+    def test_tag_copy_into_itself_400(self):
+        """Copying a tag into itself is rejected — it would
+        duplicate every note under it."""
+        own = Tag.objects.create(user=self.copier, name='Self')
+        resp = self.client.post(
+            f'{TAGS_URL}{own.id}/copy/',
+            {'tag_id': own.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            resp.json()['error'], 'validation_error'
+        )
 
     def test_tag_copy_over_cap_400(self):
         for i in range(101):
