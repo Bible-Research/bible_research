@@ -1,5 +1,8 @@
 from django.contrib import admin
-from .models import Tag, Note, NoteVerse, Comment, Image
+from .models import (
+    Tag, Note, NoteVerse, Comment, Image,
+    NoteShare, TagShare, SavedNote,
+)
 
 
 @admin.register(Tag)
@@ -130,3 +133,38 @@ class ImageAdmin(admin.ModelAdmin):
     list_filter = ('created_at',)
     raw_id_fields = ('uploaded_by', 'note', 'comment')
     readonly_fields = ('id', 'created_at')
+
+
+@admin.register(NoteShare)
+class NoteShareAdmin(admin.ModelAdmin):
+    """Read grant on a single note — audit-friendly listing."""
+    list_display = ('id', 'note', 'owner', 'shared_with', 'created_at')
+    search_fields = (
+        'note__id', 'owner__username', 'shared_with__username'
+    )
+    raw_id_fields = ('note', 'owner', 'shared_with')
+    readonly_fields = ('created_at',)
+
+
+@admin.register(TagShare)
+class TagShareAdmin(admin.ModelAdmin):
+    """Read grant on a tag (optionally its whole subtree)."""
+    list_display = (
+        'id', 'tag', 'owner', 'shared_with',
+        'include_descendants', 'created_at',
+    )
+    search_fields = (
+        'tag__name', 'owner__username', 'shared_with__username'
+    )
+    list_filter = ('include_descendants',)
+    raw_id_fields = ('tag', 'owner', 'shared_with')
+    readonly_fields = ('created_at',)
+
+
+@admin.register(SavedNote)
+class SavedNoteAdmin(admin.ModelAdmin):
+    """Bookmark pointer from a user to a non-owned note."""
+    list_display = ('id', 'user', 'note', 'created_at')
+    search_fields = ('user__username', 'note__id')
+    raw_id_fields = ('user', 'note')
+    readonly_fields = ('created_at',)

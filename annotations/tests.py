@@ -1,5 +1,4 @@
 import datetime
-from unittest import expectedFailure
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
@@ -1033,9 +1032,10 @@ class CommentCountViewTest(TestCase):
         self.assertIn(note_a.id, counts)
         self.assertNotIn(note_b.id, counts)
 
-    @expectedFailure
     def test_single_query_assertion(self):
-        """The endpoint executes at most 2 DB queries."""
+        """The endpoint executes a flat two queries: one
+        share-grant lookup from the visibility funnel plus the
+        counts aggregate itself."""
         note = self._make_note(self.user, tag=self.tag)
         self._make_comment(note)
         self.client.force_authenticate(user=self.user)

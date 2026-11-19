@@ -76,6 +76,8 @@ def pytest_configure():
         'search': '1000/min',
         'token': '1000/min',
         'register': '1000/min',
+        'share': '1000/min',
+        'notes-search': '1000/min',
     }
     settings.REST_FRAMEWORK = rest
 
