@@ -428,8 +428,54 @@ GEMINI_API_KEYS = [
     if str(k).strip()
 ]
 
+# Note translation pipeline (Cloud Translation + Cloud Tasks).
+# NOTE_TARGET_LANGUAGES accepts a YAML list in config.yaml or a
+# comma-separated string in .env — normalized to a list here.
+# Emptying it is the documented kill switch for the pipeline.
+NOTE_TARGET_LANGUAGES = _audio_settings_source.get(
+    "NOTE_TARGET_LANGUAGES", ["en", "lv"]
+)
+if isinstance(NOTE_TARGET_LANGUAGES, str):
+    NOTE_TARGET_LANGUAGES = [
+        s.strip()
+        for s in NOTE_TARGET_LANGUAGES.split(',')
+        if s.strip()
+    ]
+# Engine provenance stamped on every NoteTranslation row; the
+# v3 general/nmt model is the MVP default ('google-llm' /
+# 'gemini-…' are future config flips, not code changes).
+NOTE_TRANSLATION_ENGINE = _audio_settings_source.get(
+    "NOTE_TRANSLATION_ENGINE", "google-nmt"
+)
+# Per-note billed-char cap (D11): deterministic guardrail —
+# over-cap notes are marked failed/too_long, never truncated.
+NOTE_TRANSLATE_MAX_CHARS = int(
+    _audio_settings_source.get("NOTE_TRANSLATE_MAX_CHARS", 10000)
+)
+# Cloud Tasks delivery of the translate-note worker endpoint.
+TASKS_INVOKER_SA_EMAIL = _audio_settings_source.get(
+    "TASKS_INVOKER_SA_EMAIL", ""
+)
+TASK_QUEUE_ID = _audio_settings_source.get(
+    "TASK_QUEUE_ID", "note-translations"
+)
+TASK_QUEUE_LOCATION = _audio_settings_source.get(
+    "TASK_QUEUE_LOCATION", "europe-west3"
+)
+# Public base URL the task POSTs to (worker endpoint + OIDC
+# audience). Defaults to the prod appspot host.
+APP_BASE_URL = _audio_settings_source.get(
+    "APP_BASE_URL",
+    "https://bible-research-489314.ey.r.appspot.com",
+)
+
 _gcp_project = os.environ.get(
     "GOOGLE_CLOUD_PROJECT", "bible-research-489314"
+)
+# Canonical project id for Google API resource paths
+# (Translate parent, Cloud Tasks queue path).
+GOOGLE_CLOUD_PROJECT = _audio_settings_source.get(
+    "GOOGLE_CLOUD_PROJECT", _gcp_project
 )
 IMAGE_BUCKET_ORIGINALS = os.environ.get(
     "IMAGE_BUCKET_ORIGINALS",

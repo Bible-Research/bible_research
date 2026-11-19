@@ -149,6 +149,17 @@ class Note(models.Model):
         ),
     )
 
+    source_language = models.CharField(
+        max_length=10,
+        blank=True,
+        help_text=(
+            "ISO 639-1 code detected from this note's own text "
+            "by the translation pipeline. Empty until the first "
+            "translation run completes; never inferred from the "
+            "user profile or UI locale."
+        ),
+    )
+
     # Many-to-many relationship with Verse model, through the NoteVerse
     # intermediary table. This explicit 'through' model is necessary because
     # you have 'note_verses' table in your schema, which implies additional
@@ -188,6 +199,128 @@ class Note(models.Model):
             else self.id.hex[:8]
         )
         return f"Note (ID: {id_display}): {truncated_text}{ellipsis}"
+
+
+def generate_note_translation_id():
+    return f"NTR{str(uuid.uuid4()).upper().replace('-', '')[:15]}"
+
+
+class NoteTranslation(models.Model):
+    """
+    One machine-translated copy of a Note's text per language.
+
+    The detected source language also gets a row (status
+    ``source``) whose ``text`` stays EMPTY — the original is
+    served from ``Note.note_text``; the row is a language slot
+    and metadata anchor (and, later, the home of source-language
+    audio fields for note TTS).
+    """
+
+    STATUS_PENDING = 'pending'
+    STATUS_READY = 'ready'
+    STATUS_FAILED = 'failed'
+    STATUS_SOURCE = 'source'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_READY, 'Ready'),
+        (STATUS_FAILED, 'Failed'),
+        (STATUS_SOURCE, 'Source'),
+    ]
+
+    id = models.CharField(
+        max_length=18,
+        default=generate_note_translation_id,
+        primary_key=True,
+        editable=False,
+        help_text="Unique identifier for the note translation."
+    )
+    note = models.ForeignKey(
+        Note,
+        on_delete=models.CASCADE,
+        related_name='translations',
+        help_text="The note this translation belongs to."
+    )
+    language = models.CharField(
+        max_length=10,
+        help_text="ISO 639-1 target language code."
+    )
+    text = models.TextField(
+        blank=True,
+        help_text=(
+            "Translated note text (TipTap doc JSON, or plain "
+            "text for legacy notes). Empty on 'source' rows — "
+            "the original is served from Note.note_text."
+        ),
+    )
+    status = models.CharField(
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+        help_text="Translation lifecycle state."
+    )
+    source_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text=(
+            "sha256 of the Note.note_text this row was built "
+            "from; makes re-runs idempotent."
+        ),
+    )
+    engine = models.CharField(
+        max_length=40,
+        blank=True,
+        help_text=(
+            "Provenance of this output (e.g. 'google-nmt', "
+            "'google-llm', 'gemini-<model>')."
+        ),
+    )
+    error = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Failure code when status='failed'."
+    )
+    author_verified = models.BooleanField(
+        default=False,
+        help_text=(
+            "Author reviewed this translation. Reset on every "
+            "fresh translation write."
+        ),
+    )
+    verified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the author last verified this row."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Note Translation"
+        verbose_name_plural = "Note Translations"
+        ordering = ['language']
+        # The (note, language) UniqueConstraint's btree already
+        # covers the hot note_id + language lookups (detail
+        # ?lang= get + list prefetch). The extra index serves
+        # single-language scans — readers typically request one
+        # language, and backfill/diagnostics filter on status.
+        constraints = [
+            UniqueConstraint(
+                fields=['note', 'language'],
+                name='unique_note_translation_language',
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=['language', 'status'],
+                name='note_trans_lang_status_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"Translation {self.language} "
+            f"({self.status}) for note {self.note_id[:8]}"
+        )
 
 
 def generate_comment_id():
