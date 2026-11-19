@@ -922,6 +922,9 @@ GET /api/v1/bible/search/?query=love&fileset_id=ENGESV
   book filter
 - `group_by`: Set to `book` to return every match grouped by
   book instead of a paginated list
+- `cursor`: Resume token for grouped SWORD searches (see
+  "Resumable SWORD scans" below); ignored by other providers
+  and by paginated mode
 
 **Response** (default paginated mode):
 ```json
@@ -998,6 +1001,46 @@ within each group are sorted by chapter and verse:
 scanned for SWORD). `meta.truncated` is true when a safety cap
 cut results off (5000 results for DBT/API.Bible/SWORD, 30 pages
 for ESV).
+
+**Resumable SWORD scans** (grouped mode only): a SWORD grouped
+search walks the local module's ~1,189 chapters under a
+per-request wall-clock budget (6 seconds). When the budget
+expires mid-scan the response is a normal `200` carrying the
+matches found so far plus two extra `meta` fields:
+
+```json
+{
+  "meta": {
+    "total": 120,
+    "truncated": true,
+    "next_cursor": "djI6MDY0NThkZmMwOTo1MDA=",
+    "progress": {
+      "chapters_scanned": 500,
+      "chapters_total": 1189
+    }
+  }
+}
+```
+
+Resend the same request with `cursor=<next_cursor>` to resume
+where the scan stopped — each window returns only matches not
+yet reported, and `progress` is cumulative so clients can show
+a determinate indicator. `next_cursor` is absent when the scan
+completes. The token is bound to its scan context — a `cursor`
+that fails to decode, points past the end of the worklist, or
+was minted for a different (fileset, books, query) search
+returns `400` with `error_code: invalid_parameter`. The
+`search` throttle (`30/min`) applies to every window request —
+iterative clients fit comfortably.
+
+**SWORD search feature flag**: SWORD-fileset searches (both
+paginated and grouped) are gated by the `sword_search`
+`FeatureFlag` row, toggleable at runtime via Django admin — a
+kill switch for disabling the local scan without a redeploy. A
+missing row means enabled. When disabled, requests carrying a
+SWORD `fileset_id` return `403` with
+`error_code: search_disabled` before any provider work;
+ESV/API.Bible/DBT searches are unaffected.
 
 ### Tags
 
@@ -1333,6 +1376,70 @@ GET /api/v1/notes/{note_id}/
 Authorization: Token <your-token>
 ```
 
+#### Note Translations (`?lang=`)
+
+Every note payload carries `source_language` (ISO 639-1,
+detected on the first translation run — `""`/`null` until
+then), `served_language` (the language `note_text` actually
+contains), and a `translations` list of per-language metadata
+(`language`, `status` = `pending`/`ready`/`failed`/`source`,
+`verified`, `engine`, `error`).
+
+```
+GET /api/v1/notes/{note_id}/?lang=en
+GET /api/v1/notes/?lang=en          # same swap on list pages
+```
+
+`?lang=` swaps `note_text` to the requested language's
+`ready` translation row. Any miss — no row, `pending`,
+`failed`, or a row whose `source_hash` no longer matches the
+current note text — falls back to the ORIGINAL text (never a
+404) and `served_language` reports `source_language`. A
+`lang` equal to `source_language` serves the original.
+`?lang=` composes with every other notes filter (tag,
+ordering, pagination).
+
+#### Verify Translation
+```
+POST   /api/v1/notes/{note_id}/translations/{lang}/verify/
+DELETE /api/v1/notes/{note_id}/translations/{lang}/verify/
+Authorization: Token <your-token>
+```
+
+Owner-only author verification of a machine translation —
+POST sets `author_verified`/`verified_at`, DELETE clears
+them; both are idempotent. Non-owners and missing notes/rows
+get 404; `pending`/`failed`/`source` rows get
+`409 {"error": "translation_not_ready", "error_code":
+"translation_not_ready"}` — a `source` row is the author's
+own text, nothing to verify.
+
+#### Retranslate Note
+```
+POST /api/v1/notes/{note_id}/retranslate/
+Authorization: Token <your-token>
+```
+
+Owner-only retry of `failed` translation rows: re-marks them
+`pending` and enqueues a fresh run (idempotent via
+`source_hash`); rows in other states are untouched.
+Non-owners get 404. Response: `{"requeued": <count>}`.
+
+#### Translate-Note Task Worker
+```
+POST /api/v1/tasks/translate-note/
+```
+
+Cloud Tasks worker endpoint — accepts ONLY an OIDC Bearer
+token minted for `TASKS_INVOKER_SA_EMAIL`; anything else gets
+401. Body `{note_id, source_hash}`: stale `source_hash` (a
+newer edit superseded the run) or an over-cap note returns
+204; retryable upstream failure returns 500 so Cloud Tasks
+retries (queue `note-translations`, max 5 attempts, 5
+concurrent dispatches). Local dev never reaches this route —
+`enqueue()` runs the worker inline when
+`IS_GCP_ENVIRONMENT` is false.
+
 #### Update Note
 ```
 PUT /api/v1/notes/{note_id}/
@@ -1667,10 +1774,36 @@ class Note(models.Model):
     tag = ForeignKey(Tag, null=True, blank=True)
     note_text = TextField(blank=True)
     public = BooleanField(default=False)
+    source_language = CharField(max_length=10, blank=True)
     verses = ManyToManyField(Verse, through='NoteVerse')
     created_at = DateTimeField(auto_now_add=True)
     updated_at = DateTimeField(auto_now=True)
 ```
+
+### NoteTranslation Model
+```python
+class NoteTranslation(models.Model):
+    id = CharField(max_length=18, primary_key=True)  # NTR + 15 chars
+    note = ForeignKey(Note, related_name='translations')
+    language = CharField(max_length=10)
+    text = TextField(blank=True)          # empty on 'source' rows
+    status = CharField(                   # pending | ready |
+        choices=..., default='pending')   #   failed | source
+    source_hash = CharField(max_length=64)  # sha256 of note_text
+    engine = CharField(max_length=40)     # e.g. 'google-nmt'
+    error = CharField(max_length=100)
+    author_verified = BooleanField(default=False)
+    verified_at = DateTimeField(null=True, blank=True)
+    created_at = DateTimeField(auto_now_add=True)
+    updated_at = DateTimeField(auto_now=True)
+```
+
+**Constraints**: `unique_note_translation_language` on
+(note, language); index `note_trans_lang_status_idx` on
+(language, status). The detected source language gets a
+`source` row whose `text` stays empty — the original is
+served from `Note.note_text`; the row is a language slot and
+metadata anchor.
 
 ### NoteVerse Model
 ```python
@@ -2233,6 +2366,78 @@ command exits non-zero if any entry fails, so a partial
 run is visible to automation; fixed entries stay recorded
 and a re-run resumes with the remainder.
 
+### Note Translations (Cloud Translation + Cloud Tasks)
+
+Public notes are mixed-language (EN/LV); a `public` note is
+only useful to readers of its source language, so every note
+write enqueues an eager machine translation into each
+`NOTE_TARGET_LANGUAGES` code (default `['en', 'lv']` —
+emptying the setting is the kill switch).
+
+**Pipeline** (`annotations/services/`):
+
+1. `NoteViewSet` create/update/bulk upserts `pending`
+   `NoteTranslation` rows and enqueues a run inside
+   `transaction.on_commit` (`services/tasks.py::enqueue`).
+   Only `note_text` changes re-translate — tag/position edits
+   never spend quota.
+2. On GCP the enqueue POSTs to
+   `{APP_BASE_URL}/api/v1/tasks/translate-note/` through the
+   `note-translations` Cloud Tasks queue (max 5 attempts,
+   exponential backoff, 5 concurrent dispatches) with an OIDC
+   token minted for `TASKS_INVOKER_SA_EMAIL`. Locally the
+   worker runs inline — zero GCP infra needed.
+3. The worker (`views_tasks.py::TranslateNoteTaskView`)
+   verifies the OIDC token's `email` claim against
+   `TASKS_INVOKER_SA_EMAIL` — the only credential it accepts
+   — then runs `run_translation_task`. The run is keyed by
+   `sha256(note_text)`: a stale hash (superseded edit) is a
+   204 no-op, and the hash is re-checked under
+   `select_for_update` before rows are written.
+4. `translation_service.py` walks the TipTap doc, batches all
+   `type: 'text'` nodes into ONE `translate_text` call per
+   target, and splices results back — marks and
+   `scriptureRef`/`mention` atoms survive; `@USFM.C[.V[-E]]`
+   tokens are masked/restored so MT cannot mangle them.
+   Plain-text notes fall back to a single segment. The first
+   call detects the source language for free (v3 returns
+   `detected_language_code`); `Note.source_language` and a
+   `source` row (empty `text`) are stored, configured targets
+   become `ready` rows, and every fresh write resets
+   `author_verified`.
+5. Per-note cap `NOTE_TRANSLATE_MAX_CHARS` (default 10 000):
+   over-cap notes are marked `failed`/`too_long` and never
+   retried; `failed`/`translate_failed` rows return 500 so
+   Cloud Tasks retries. Owners re-run failures via
+   `POST /notes/<id>/retranslate/`.
+
+**Cost accounting**: every billed `translate_text` call adds
+its character count to the `note-translate` monthly counter
+via `bible/services/storage/gcs.py::increment_monthly_usage`
+(best-effort — counter failures log, never break
+translation).
+
+**Management commands**:
+- `translate_notes [--user U] [--note-id ID] [--dry-run]` —
+  backfill/repair; runs the same worker inline per note.
+- `check_note_translations` — monthly coverage audit (last
+  day of month via `run_all_jobs` JOBS + the
+  `note-translations-audit` Cloud Scheduler trigger); emits
+  ONE Sentry `capture_message` when per-language misses
+  exist, logs-only on a clean run.
+
+**Settings** (config.yaml / .env, via
+`_audio_settings_source`): `NOTE_TARGET_LANGUAGES`,
+`NOTE_TRANSLATION_ENGINE` (`google-nmt` default; future
+`google-llm`/`gemini-*` map to v3 models),
+`NOTE_TRANSLATE_MAX_CHARS`, `TASKS_INVOKER_SA_EMAIL`,
+`TASK_QUEUE_ID`, `TASK_QUEUE_LOCATION`, `APP_BASE_URL`.
+Terraform (`terraform/note_translations.tf`) enables
+`translate.googleapis.com`/`cloudtasks.googleapis.com`,
+creates the queue, `tasks-invoker` SA, TokenCreator for the
+Cloud Tasks service agent, and grants the appspot runtime SA
+`cloudtasks.enqueuer` + `cloudtranslate.user`.
+
 ---
 
 ## Authentication & Authorization
@@ -2370,22 +2575,61 @@ sent (local dev and CI are silent by default).
 - **Local**: set `SENTRY_DSN` in `config.yaml` (see
   `config_template.yaml`) to the `bible-research-api` project's
   Client Key DSN.
-- **Production (GAE)**: create the `SENTRY_DSN` secret in GCP
-  Secret Manager (Terraform reads its metadata via
-  `terraform/secrets.tf`); the env var of the same name also
-  works. `GAE_VERSION` is used as the Sentry release;
+- **Production (GAE + Cloud Run jobs)**: `SENTRY_DSN` is an
+  entry inside the shared `env-file` GCP Secret Manager secret —
+  never a standalone secret. Verify with
+  `gcloud secrets versions access latest --secret=env-file |
+  grep SENTRY_DSN`; the env var of the same name also works.
+  Release is `SENTRY_RELEASE` when set, else `GAE_VERSION`
+  (Cloud Run jobs set neither → release-less events);
   environment is `production` on GCP, `development` otherwise.
-- Uncaught exceptions (HTTP 500s) are captured automatically.
-  Provider failures surfaced through the `error`/`error_code`
-  contract are additionally captured at `warning` level with an
-  `error_code` tag (`rate_limited`/`provider_error` only —
-  `not_found` and `book_not_in_fileset` are never sent). Log
-  records INFO+ are breadcrumbs only, not events.
-- `send_default_pii=False`; `before_send` drops request bodies
-  on `/api/token/` and `/api/v1/users/` (they contain
-  passwords).
-- `sentry-trace`/`baggage` are allowed CORS headers so the
-  frontend can link its traces to backend requests.
+
+**Event streams** — the alert queue is
+`is:unresolved level:error environment:production`:
+
+- Uncaught exceptions (HTTP 500s) are captured automatically at
+  error level.
+- `capture_internal_exception`
+  (`bible/utils/provider_errors.py`) reports caught server-side
+  failures — GCS signing/counter bugs, unexpected DB
+  `IntegrityError`/`OperationalError` (deadlocks), SWORD data
+  corruption, and Cloud Run job failures — at **error** level,
+  tagged `error_code:internal_error`. Job events also carry a
+  `job:<label>` tag; `run_all_jobs` adds an aggregate
+  `capture_message` and flushes before exit.
+- `capture_provider_exception` reports upstream outages at
+  **warning** level, tagged `error_code` in
+  {`rate_limited`, `provider_error`} —
+  `not_found`/`book_not_in_fileset` are never sent. An exception
+  caught at a provider boundary that is *not* upstream-caused
+  (no upstream status, not a transport/SDK family — e.g. a
+  `TypeError` in response shaping) is re-routed to error-level
+  `internal_error` automatically.
+- Provider/job events carry `fileset_id`, `provider`, and
+  `endpoint` tags when known; fingerprints group on
+  `error_code` (+`fileset_id`) so one bad fileset cannot spawn
+  unbounded issue groups.
+- Log records INFO+ are breadcrumbs only, not events;
+  `ignore_errors` skips `KeyboardInterrupt` and `before_send`
+  drops `DisallowedHost` scanner noise.
+- `send_default_pii=False`; `SentryUserMiddleware` attaches only
+  `{'id': pk}` for authenticated requests; `before_send` drops
+  request bodies on `/api/token/` and `/api/v1/users/`
+  (they contain passwords).
+
+**Performance monitoring**: `traces_sampler` returns 0 for
+`/_ah/` health checks and the docs/schema routes, ~0.3 for
+`/api/`, 0.1 elsewhere; `profiles_sample_rate=0.1`. Provider
+calls, GCS reads/signing, and SWORD module scans emit explicit
+spans. `sentry-trace`/`baggage` are allowed CORS headers so the
+frontend can link its traces to backend requests.
+
+**Alert rules** (created manually in the Sentry UI): a new-issue
+alert on `level:error environment:production`, and a metric
+alert on warning-rate spikes tagged `error_code:provider_error`
+(upstream-outage detection). A GCP monitoring alert on failed
+`all-jobs` executions is the optional belt-and-suspenders
+fallback.
 
 ---
 
@@ -2539,8 +2783,9 @@ To run the app against the restored copy, repoint `config.yaml`'s
 - [ ] Configure allowed hosts
 - [ ] Set up database backups
 - [ ] Configure logging to external service
-- [ ] Create `SENTRY_DSN` in Secret Manager (enables Sentry
-      monitoring — see "Monitoring (Sentry)")
+- [ ] Add `SENTRY_DSN` to the shared `env-file` secret in Secret
+      Manager (enables Sentry monitoring — see
+      "Monitoring (Sentry)")
 - [ ] Review security settings
 
 ---

@@ -1,7 +1,9 @@
 """Thin pysword wrapper exposing the slice of the DBT client API used
 by `BiblePassageSerializer`."""
+import functools
 import logging
 import threading
+from collections import OrderedDict
 from typing import Any, Dict, List, Tuple
 
 from pysword.modules import SwordModules
@@ -10,7 +12,10 @@ from bible.utils.bible_books import (
     _BIBLE_BOOKS,
     normalize_sword_book_name,
 )
-from bible.utils.provider_errors import PassageNotFoundError
+from bible.utils.provider_errors import (
+    PassageNotFoundError,
+    capture_internal_exception,
+)
 
 from .registry import (
     SWORD_MODULES_DIR,
@@ -20,6 +25,11 @@ from .registry import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Bound on the verse-failure dedupe cache — large enough that
+# one request never re-reports the same chapter, small enough
+# that entries age out and later regressions still surface.
+_REPORTED_VERSE_FAILURES_MAX = 2048
 
 
 class SwordClient:
@@ -33,6 +43,12 @@ class SwordClient:
         self._cache: Dict[str, tuple] = {}
         # fileset_id -> {book_id: pysword book.name}
         self._book_name_cache: Dict[str, Dict[str, str]] = {}
+        # (fileset_id, book_id, chapter) -> True for verse-loop
+        # failures already sent to Sentry — a bounded LRU so one
+        # request cannot emit repeated events for the same
+        # chapter while later requests can still re-report.
+        self._reported_verse_failures: OrderedDict = OrderedDict()
+        self._reported_lock = threading.Lock()
 
     def _load(self, fileset_id: str):
         canon = canonical_sword_fileset_id(fileset_id)
@@ -58,6 +74,27 @@ class SwordClient:
             modules = SwordModules(str(zip_path))
             modules.parse_modules()
             bible = modules.get_bible_from_module(meta["module_name"])
+            # zText modules re-seek and re-decompress the same
+            # compressed chapter block once per verse — a whole-
+            # module scan pays ~35k decompressions for ~1,189
+            # blocks. Cache the last few blocks per loaded bible
+            # (a sequential scan only needs the current chapter's
+            # block); measured ~12x faster on a full scan.
+            decompress = getattr(bible, "_decompressed_text", None)
+            if decompress is not None:
+                bible._decompressed_text = functools.lru_cache(
+                    maxsize=8
+                )(decompress)
+            else:
+                # pysword renamed/dropped the hook — scans still
+                # work but lose the ~12x block-cache speedup;
+                # surface that instead of silently degrading.
+                logger.warning(
+                    "SWORD module %s has no _decompressed_text "
+                    "hook; chapter-block caching is off "
+                    "(pysword internals changed?).",
+                    meta["module_name"],
+                )
             self._cache[fileset_id] = (modules, bible)
             logger.info(
                 "Loaded SWORD module %s (%s) for fileset_id=%s",
@@ -134,7 +171,28 @@ class SwordClient:
                     verses=[verse_num],
                     clean=True,
                 )
-            except Exception:
+            except (ValueError, OSError) as e:
+                # Expected coverage miss — the verse/chapter is
+                # outside the module's canon (pysword raises
+                # ValueError past the last verse) or its data
+                # file is absent. This is how the loop detects
+                # the end of a chapter.
+                logger.debug(
+                    "SWORD verse lookup ended %s %s:%s: %s",
+                    book_id, chapter, verse_num, e,
+                )
+                break
+            except Exception as e:
+                # A real bug or corrupt module data — capture
+                # the first failure per (fileset, book, chapter)
+                # and keep the degrade-to-partial behavior.
+                logger.exception(
+                    "SWORD verse lookup failed %s %s:%s in %s",
+                    book_id, chapter, verse_num, canon,
+                )
+                self._report_verse_failure(
+                    canon, book_id, chapter, verse_num, e,
+                )
                 break
             text = (text or "").strip()
             if not text:
@@ -148,6 +206,49 @@ class SwordClient:
                 f"in fileset_id={fileset_id}"
             )
         return verses
+
+    def _report_verse_failure(
+        self,
+        fileset_id: str,
+        book_id: str,
+        chapter: int,
+        verse_num: int,
+        exc: Exception,
+    ) -> None:
+        """Capture the first unexpected verse-loop failure per
+        ``(fileset, book, chapter)``.
+
+        The dedupe cache is bounded LRU: repeated calls for the
+        same chapter (e.g. a grouped search re-scanning it) stay
+        silent while the entry is hot, but evicted entries can
+        report again so a recurring regression is not hidden
+        forever.
+        """
+        key = (fileset_id, book_id.upper(), int(chapter))
+        with self._reported_lock:
+            if key in self._reported_verse_failures:
+                self._reported_verse_failures.move_to_end(key)
+                return
+            self._reported_verse_failures[key] = True
+            while (
+                len(self._reported_verse_failures)
+                > _REPORTED_VERSE_FAILURES_MAX
+            ):
+                self._reported_verse_failures.popitem(last=False)
+        capture_internal_exception(
+            exc,
+            tags={
+                'fileset_id': fileset_id,
+                'provider': 'SwordProvider',
+            },
+            contexts={
+                'sword_verse': {
+                    'book_id': book_id,
+                    'chapter': chapter,
+                    'verse': verse_num,
+                },
+            },
+        )
 
     def list_chapters(
         self, fileset_id: str

@@ -14,6 +14,7 @@ locals {
     "111270081806219228031", # thumbnail-worker
     "110192253908821077884", # appspot default runtime SA
     "102770082233043287598", # all-jobs-scheduler
+    "110572872994383852817", # tasks-invoker
   ]
 }
 
@@ -173,6 +174,7 @@ resource "google_project_iam_member" "github_deployer_service_account_admin_scop
           "all-jobs-scheduler@${var.project_id}.iam.gserviceaccount.com",
           "audio-generator@${var.project_id}.iam.gserviceaccount.com",
           "github-deployer@${var.project_id}.iam.gserviceaccount.com",
+          "tasks-invoker@${var.project_id}.iam.gserviceaccount.com",
           "thumbnail-worker@${var.project_id}.iam.gserviceaccount.com",
           local.appspot_email,
         ],

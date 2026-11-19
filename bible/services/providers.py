@@ -66,6 +66,9 @@ from bible.services.esv.registry import (
 from bible.services.google_tts.registry import get_tts_config
 from bible.services.search_grouping import (
     MAX_RESULTS,
+    SEARCH_SCAN_BUDGET_SECONDS,
+    decode_scan_cursor,
+    encode_scan_cursor,
     fetch_apibible_matches,
     fetch_dbt_matches,
     fetch_esv_matches,
@@ -75,6 +78,7 @@ from bible.services.search_grouping import (
     normalize_dbt_verse,
     parse_esv_results,
     scan_sword_matches,
+    sword_chapter_worklist,
 )
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
@@ -89,14 +93,28 @@ from bible.utils.bible_books import (
     CANONICAL_BOOKS_PARAM,
 )
 from bible.utils.provider_errors import (
+    InvalidSearchCursorError,
     PassageNotFoundError,
     TimestampsNotGeneratedError,
+    capture_internal_exception,
     capture_provider_exception,
     provider_error_fields,
+    sentry_span,
     upstream_status_code,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _concrete_provider(provider):
+    """Unwrap caching/tracing decorators to the concrete
+    provider object (``DbtProvider``, ``ESVProvider``, …)."""
+    concrete = provider
+    # isinstance, not hasattr — a duck-typed test double claims
+    # every attribute and would loop forever.
+    while isinstance(concrete, (_TracedProvider, _CachingProvider)):
+        concrete = concrete.inner
+    return concrete
 
 
 def provider_for(fileset_id):
@@ -111,15 +129,23 @@ def provider_for(fileset_id):
     (``bible/services/chapter_cache.py``). ``ApiBibleProvider``
     stays unwrapped: its FUMS ``meta`` token must be reported
     per display, so serving a cached response would risk
-    under-reporting (license requirement).
+    under-reporting (license requirement). Every provider is
+    wrapped in ``_TracedProvider`` — inside the cache wrapper so
+    spans only cover real upstream calls, not cache hits.
     """
     if is_esv_fileset(fileset_id):
-        return _CachingProvider(ESVProvider(fileset_id))
+        return _CachingProvider(
+            _TracedProvider(ESVProvider(fileset_id))
+        )
     if is_apibible_fileset(fileset_id):
-        return ApiBibleProvider(fileset_id)
+        return _TracedProvider(ApiBibleProvider(fileset_id))
     if is_sword_fileset(fileset_id):
-        return _CachingProvider(SwordProvider(fileset_id))
-    return _CachingProvider(DbtProvider(fileset_id))
+        return _CachingProvider(
+            _TracedProvider(SwordProvider(fileset_id))
+        )
+    return _CachingProvider(
+        _TracedProvider(DbtProvider(fileset_id))
+    )
 
 
 class Provider:
@@ -193,12 +219,16 @@ class Provider:
         page of search results."""
         raise NotImplementedError
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         """Return ``{'groups': [...], 'meta': {...}}`` — every
         match grouped per book (``group_by=book`` mode).
 
         ``sort_by`` is provider-specific (DBT only); providers
-        without an upstream sort parameter ignore it."""
+        without an upstream sort parameter ignore it. ``cursor``
+        resumes a partial SWORD scan; providers without a
+        resumable scan accept and ignore it."""
         raise NotImplementedError
 
     def translation_listing(self, language_iso=None):
@@ -394,9 +424,11 @@ class _CachingProvider(Provider):
             query, limit, page, sort_by=sort_by, books=books
         )
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         return self._inner.search_grouped(
-            query, books=books, sort_by=sort_by
+            query, books=books, sort_by=sort_by, cursor=cursor
         )
 
     def translation_listing(self, language_iso=None):
@@ -404,6 +436,51 @@ class _CachingProvider(Provider):
 
     def get_structure(self):
         return self._inner.get_structure()
+
+
+class _TracedProvider:
+    """Wraps every provider capability call in a Sentry span.
+
+    Plain object + ``__getattr__`` rather than a ``Provider``
+    subclass so non-method attributes (``audio_codec``,
+    ``audio_kind``, ``fileset_id``) pass through untouched and no
+    base-class stub can shadow the inner provider's methods.
+    Spans only appear in sampled transactions — ``sentry_span``
+    is a no-op when Sentry is off or the request was unsampled,
+    so the wrapper is free to sit on every dispatch.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    @property
+    def inner(self):
+        """The wrapped provider — ``_concrete_provider`` unwinds
+        this plus ``_CachingProvider`` to the real class."""
+        return self._inner
+
+    def __getattr__(self, name):
+        # Same guard as ``_CachingProvider.__getattr__`` —
+        # ``self._inner`` inside would recurse into
+        # ``__getattr__`` before the attribute exists.
+        inner = self.__dict__.get('_inner')
+        if inner is None:
+            raise AttributeError(name)
+        attr = getattr(inner, name)
+        if not callable(attr) or name.startswith('_'):
+            return attr
+
+        def traced(*args, **kwargs):
+            concrete = _concrete_provider(inner)
+            with sentry_span(
+                op='provider',
+                description=(
+                    f'{type(concrete).__name__}.{name}'
+                ),
+                data={'fileset_id': inner.fileset_id},
+            ):
+                return attr(*args, **kwargs)
+        return traced
 
 
 class ESVProvider(Provider):
@@ -479,7 +556,9 @@ class ESVProvider(Provider):
             'meta': {'pagination': pagination},
         }
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         verses, total, truncated = fetch_esv_matches(
             get_default_esv_client(), query
         )
@@ -624,7 +703,9 @@ class ApiBibleProvider(Provider):
             },
         }
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         verses, total, truncated = fetch_apibible_matches(
             get_default_apibible_client(),
             self._meta['bible_id'], query,
@@ -770,10 +851,11 @@ class SwordProvider(Provider):
         # the module to answer page 1 (S7/search #5). When the
         # cap stops the scan early, ``truncated`` marks ``total``
         # as a lower bound so callers keep paging.
-        matches, truncated = scan_sword_matches(
+        matches, truncated, _next_index = scan_sword_matches(
             get_default_sword_client(),
             self.fileset_id, query, books,
             max_matches=page * limit,
+            deadline_s=SEARCH_SCAN_BUDGET_SECONDS,
         )
         total = len(matches)
         start = (page - 1) * limit
@@ -795,21 +877,70 @@ class SwordProvider(Provider):
             },
         }
 
-    def search_grouped(self, query, books=None, sort_by=None):
-        # Grouped mode returns every match — cap it at the same
-        # MAX_RESULTS bound the other providers honor instead of
-        # scanning a whole-Bible result set into memory.
-        verses, truncated = scan_sword_matches(
-            get_default_sword_client(),
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
+        # Grouped mode returns every match — cap each window at
+        # the same MAX_RESULTS bound the other providers honor
+        # instead of scanning a whole-Bible result set into
+        # memory per request.
+        client = get_default_sword_client()
+        chapters = sword_chapter_worklist(
+            client, self.fileset_id, books
+        )
+        chapters_total = len(chapters)
+        start_index = 0
+        if cursor is not None:
+            # The token is bound to this scan context
+            # (canonical fileset, books, query): a cursor
+            # minted for a different scan would resume into a
+            # misaligned window, so a mismatch 400s.
+            start_index = decode_scan_cursor(
+                cursor, self._canon, books, query
+            )
+            # A cursor only ever points at a chapter this
+            # worklist still holds — anything past the end is a
+            # fabricated/stale token, not a resume.
+            if start_index >= chapters_total:
+                raise InvalidSearchCursorError(
+                    'cursor is past the end of the scan'
+                )
+        matches, truncated, next_index = scan_sword_matches(
+            client,
             self.fileset_id, query, books,
             max_matches=MAX_RESULTS,
+            deadline_s=SEARCH_SCAN_BUDGET_SECONDS,
+            start_index=start_index,
+            chapters=chapters,
         )
-        return {
-            'groups': group_verses_by_book(verses),
-            'meta': {
-                'total': len(verses),
-                'truncated': truncated,
+        meta = {
+            'total': len(matches),
+            'truncated': truncated,
+            'progress': {
+                # Cumulative position in the worklist — a
+                # determinate progress indicator across windows.
+                'chapters_scanned': (
+                    next_index
+                    if next_index is not None
+                    else chapters_total
+                ),
+                'chapters_total': chapters_total,
             },
+        }
+        # MAX_RESULTS bounds the matches a single window
+        # returns (per-request work) — not the cumulative total
+        # a client accumulates by following cursors, which is
+        # the point of a resumable scan. Only a deadline stop
+        # mints a cursor: a ``max_matches`` stop already
+        # returned a full page of matches, so it reports
+        # terminal truncation with no resume token.
+        if next_index is not None and len(matches) < MAX_RESULTS:
+            meta['next_cursor'] = encode_scan_cursor(
+                next_index, self._canon, books, query
+            )
+        return {
+            'groups': group_verses_by_book(matches),
+            'meta': meta,
         }
 
     def translation_listing(self, language_iso=None):
@@ -941,9 +1072,21 @@ class DbtProvider(Provider):
             result = get_default_dbt_client().get_timestamps(
                 self.fileset_id, book_id, chapter
             )
-        except Exception:
+        except Exception as e:
             generated = self._generated_timestamps(book_id, chapter)
             if generated is not None:
+                # The artifact masks the DBT outage — the 200
+                # response must still leave a trail: the
+                # upstream failure is captured at warning level
+                # like any other provider failure.
+                capture_provider_exception(
+                    e,
+                    tags={
+                        'fileset_id': self.fileset_id,
+                        'provider': 'DbtProvider',
+                        'endpoint': 'bible/timestamps',
+                    },
+                )
                 return generated
             raise
         data = [
@@ -980,7 +1123,7 @@ class DbtProvider(Provider):
             ]
         except gcs_exceptions.NotFound:
             return None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             # A transient GCS failure or a malformed artifact
             # must degrade like a missing artifact — a 502 here
             # would turn a 200-empty into an error and mask the
@@ -989,6 +1132,13 @@ class DbtProvider(Provider):
                 "Generated-timestamps read failed for %s %s %s; "
                 "treating as no artifact.",
                 base_id, book_id, chapter, exc_info=True,
+            )
+            capture_internal_exception(
+                e,
+                tags={
+                    'fileset_id': self.fileset_id,
+                    'endpoint': 'bible/timestamps',
+                },
             )
             return None
 
@@ -1072,7 +1222,9 @@ class DbtProvider(Provider):
         }
         return {'verses': normalized, 'meta': meta}
 
-    def search_grouped(self, query, books=None, sort_by=None):
+    def search_grouped(
+        self, query, books=None, sort_by=None, cursor=None
+    ):
         verses, total, truncated = fetch_dbt_matches(
             get_default_dbt_client(),
             self.fileset_id, query, books,
@@ -1222,8 +1374,9 @@ def get_passage_body(data):
         'response_format', data.get('format', 'text')
     )
 
+    provider = provider_for(fileset_id)
     try:
-        payload = provider_for(fileset_id).get_passage(
+        payload = provider.get_passage(
             book_id, chapter, response_format,
             verse_start=verse_start, verse_end=verse_end,
         )
@@ -1295,8 +1448,20 @@ def get_passage_body(data):
             )
         fields = provider_error_fields(e)
         # Report upstream outages to Sentry (no-op for
-        # not_found and when Sentry is not configured).
-        capture_provider_exception(e, fields['error_code'])
+        # not_found and when Sentry is not configured);
+        # non-upstream exceptions route to error-level
+        # internal_error inside the capture helper.
+        capture_provider_exception(
+            e,
+            fields['error_code'],
+            tags={
+                'fileset_id': fileset_id,
+                'provider': (
+                    type(_concrete_provider(provider)).__name__
+                ),
+                'endpoint': 'bible/passage',
+            },
+        )
         return {
             'book': book_id,
             'book_name': book_name,

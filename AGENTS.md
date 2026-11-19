@@ -16,7 +16,12 @@ tests run on SQLite.
 ## Layout
 
 - `bible/` — passage text, audio, search, translations, timestamps.
-- `annotations/` — notes, tags, comments, images, reading positions.
+- `annotations/` — notes, tags, comments, images, reading
+  positions, and the note-translation pipeline
+  (`services/translation_service.py` TipTap→Cloud Translation,
+  `services/tasks.py` Cloud Tasks enqueue + inline local worker,
+  `views_tasks.py` OIDC-protected worker endpoint,
+  `Note.source_language` + `NoteTranslation` model).
 - `users/` — auth/token endpoints.
 - `bible_research/` — settings, urls, authentication.
 - `terraform/` — GCP infra (the `all-jobs` Cloud Run job, storage;
@@ -157,7 +162,12 @@ is no `__init__.py` in `bible/utils/` — it is a namespace package.
 
 `annotations/urls.py` (DRF router):
 - `tags/`, `notes/` (supports `notes/reorder/` bulk update,
-  `notes/order-index/`, `notes/move/`)
+  `notes/order-index/`, `notes/move/`, `?lang=` language
+  serving on detail+list,
+  `notes/<id>/translations/<lang>/verify/` POST|DELETE
+  owner-only, `notes/<id>/retranslate/` POST owner-only)
+- `tasks/translate-note/` — Cloud Tasks worker endpoint,
+  AllowAny + explicit OIDC verification, never user tokens
 - `reading-positions/`
 - `notes/<note_pk>/comments/`, `notes/<note_pk>/images/`,
   `notes/<note_pk>/comments/<comment_pk>/images/`
@@ -193,7 +203,11 @@ Provider failures surface as `error` + `error_code` fields built by
 `not_found` (missing passage, upstream 404, or
 `PassageNotFoundError`) → HTTP 404, `book_not_in_fileset`
 (every provider's "fileset lacks this book/chapter" coverage
-miss on the passage endpoint) → HTTP 404, anything else →
+miss on the passage endpoint) → HTTP 404, `search_disabled`
+(SWORD search rejected because the `sword_search` FeatureFlag
+row is disabled — a runtime kill switch toggled via Django
+admin, read-through-cached, missing row = enabled) → HTTP 403,
+anything else →
 `provider_error` → HTTP 502 (see `bible/views.py`). Note
 serialization degrades the same way — verse refs kept, `text`
 empty. Client-input 400/404s in `bible/views.py` are built by
@@ -210,33 +224,58 @@ credentials.
 
 Project `bible-research-api` (org `bible-research`, de.sentry.io);
 init lives in `bible_research/settings.py` and is DSN-gated — no
-DSN, no traffic. What each stream means:
+DSN, no traffic. The DSN is an entry inside the shared
+`env-file` GCP secret (env var `SENTRY_DSN` or config.yaml
+locally). What each stream means:
 
 - `DjangoIntegration` captures unhandled 500s at level error —
   real bugs.
 - `capture_internal_exception` (in
-  `bible/utils/provider_errors.py`) reports caught server bugs at
-  level error, tagged `error_code:internal_error` — real bugs,
+  `bible/utils/provider_errors.py`) reports caught server-side
+  failures at level error, tagged `error_code:internal_error` —
+  GCS signing/counter/deletion failures, unexpected DB
+  `IntegrityError`/`OperationalError` (deadlocks) in reorder/move,
+  SWORD data corruption, timestamp-artifact read failures, and
+  Cloud Run job failures (also tagged `job:<label>`;
+  `run_all_jobs` adds an aggregate `capture_message` and
+  `sentry_sdk.flush(timeout=5)` before exit). Real bugs —
   agent-fixable.
 - `capture_provider_exception` reports upstream outages at level
   warning, tagged `error_code` in {`rate_limited`,
   `provider_error`} — the `_CAPTURED_ERROR_CODES` allowlist, so
   `not_found`/`book_not_in_fileset` are never sent. Trend-only;
-  NOT auto-fix candidates.
+  NOT auto-fix candidates. Classification:
+  `is_upstream_failure` treats exceptions carrying an upstream
+  status plus `requests`/`urllib3`/DBT-`ApiException`/
+  `google.api_core` families as upstream; anything else caught
+  at the provider boundary is re-routed to error-level
+  `internal_error` (a `TypeError` in response shaping is our
+  bug, not an upstream blip).
+- Triage tags: `fileset_id`, `provider`, `endpoint`,
+  `job:<label>`; fingerprints group on `{{ default }}` +
+  `error_code` (+`fileset_id` when known) so one bad fileset
+  can't spawn unbounded issue groups. `SentryUserMiddleware`
+  sets scope user `{'id': pk}` (pk only —
+  `send_default_pii=False` stays).
 - `LoggingIntegration(level=INFO, event_level=None)` — INFO+
   log records are breadcrumbs only, never events; DEBUG is
-  dropped entirely.
-- `sentry_before_send` (`bible_research/utils.py`) strips
-  `request.data` on `/api/token` and `/api/v1/users/` paths
-  (password-bearing bodies).
+  dropped entirely. `ignore_errors` skips `KeyboardInterrupt`;
+  `sentry_before_send` (`bible_research/utils.py`) drops
+  `DisallowedHost` scanner noise and strips `request.data` on
+  `/api/token` and `/api/v1/users/` paths (password-bearing
+  bodies).
+- Performance: `traces_sampler` → 0 for `/_ah/` + docs/schema
+  routes, ~0.3 for `/api/`, 0.1 elsewhere;
+  `profiles_sample_rate=0.1`; explicit spans wrap provider
+  calls, GCS reads/signing, and SWORD module scans.
 
 The agent-fix queue for this project is `is:unresolved
 level:error environment:production` — warning-level provider
 events are excluded by the level filter. Events carry
 `environment:production` on GCP and `development` elsewhere,
-with `release` = `GAE_VERSION`, so the environment filter
-skips dev noise and `resolvedInNextRelease` resolves an issue
-at the next GAE deploy.
+with `release` = `SENTRY_RELEASE` else `GAE_VERSION`, so the
+environment filter skips dev noise and `resolvedInNextRelease`
+resolves an issue at the next GAE deploy.
 
 ## Auth quirks
 
@@ -278,9 +317,14 @@ at the next GAE deploy.
   ```
 
 - Writes and DDL fail with `InsufficientPrivilege` — never attempt
-  them. `manage.py dbshell` needs a local `psql` client (not
-  installed); prefer `manage.py shell` or a `psycopg2` script built
-  on `settings.DATABASES`.
+  them. `manage.py dbshell` needs a `psql` client — installed at
+  `/opt/homebrew/opt/postgresql@16/bin/psql` but off agent PATH;
+  prefer `manage.py shell` or a `psycopg2` script built on
+  `settings.DATABASES`.
+- `db_backups/local_db_backup.sh` (prod dump — DEVELOPER_GUIDE
+  "Database Backups") needs `pg_dump` matching the server major:
+  Aiven runs PG16 but PATH's `pg_dump` is v14 and aborts. Run with
+  `export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"` first.
 - For a writable local database, repoint `config.yaml`'s `default`
   to SQLite (`ENGINE: django.db.backends.sqlite3`,
   `NAME: db.sqlite3` — a file already exists in the repo root).
@@ -468,6 +512,15 @@ Universal rules — follow exactly:
   other mutating `gcloud` calls; `terraform apply`. Deploys
   are CI's job — see the workspace AGENTS.md "Deployments"
   section for the manual-deploy contract.
+- **Local terraform hangs without the Netskope CA bundle** —
+  `terraform plan`/`apply` stalls with zero output (dead IPv6
+  TCP) unless `SSL_CERT_FILE`,
+  `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, `CURL_CA_BUNDLE` and
+  `REQUESTS_CA_BUNDLE` point at the combined bundle
+  (`~/.config/devin/combined-ca.pem`). Also set
+  `TF_VAR_alert_email_address` (same value as the
+  `ALERT_EMAIL_ADDRESS` repo variable) or plan proposes
+  destroying the monitoring channel/alert policies.
 - **Commits/PRs target `Bible-Research/bible_research`**
   (`origin`) — the only remote.
 - **Test logins**: `testuser`, `guest` — create via

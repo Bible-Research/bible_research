@@ -12,8 +12,17 @@ from bible.services.google_tts.synthesizer import Synthesizer
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import canonical_sword_fileset_id
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+    capture_provider_exception,
+)
 
 logger = logging.getLogger(__name__)
+
+# Abort a run after this many consecutive per-chapter failures —
+# a sustained TTS/GCS outage must not log-capture its way
+# through the entire worklist.
+_MAX_CONSECUTIVE_FAILURES = 3
 
 
 class Command(BaseCommand):
@@ -119,6 +128,7 @@ class Command(BaseCommand):
         synthesizer = Synthesizer()
         generated = 0
         complete_reason = "all_done"
+        consecutive_failures = 0
 
         for book_id, chap in pending:
             # Persist the delta in ``finally`` so characters that Cloud
@@ -163,6 +173,28 @@ class Command(BaseCommand):
                         "Failed to generate %s %s: %s",
                         book_id, chap, exc,
                     )
+                    # Self-routing: a Cloud TTS outage stays
+                    # warning-level; a code bug reports at error
+                    # level.
+                    capture_provider_exception(
+                        exc,
+                        tags={'job': 'generate_chapter_audio'},
+                    )
+                    consecutive_failures += 1
+                    if (
+                        consecutive_failures
+                        >= _MAX_CONSECUTIVE_FAILURES
+                    ):
+                        logger.error(
+                            "mode=%s %d consecutive chapter "
+                            "failures; aborting to protect "
+                            "spend.",
+                            mode, consecutive_failures,
+                        )
+                        complete_reason = (
+                            "consecutive_failures"
+                        )
+                        break
                     continue
 
                 try:
@@ -178,9 +210,29 @@ class Command(BaseCommand):
                         "Failed to upload %s %s: %s",
                         book_id, chap, exc,
                     )
+                    capture_internal_exception(
+                        exc,
+                        tags={'job': 'generate_chapter_audio'},
+                    )
+                    consecutive_failures += 1
+                    if (
+                        consecutive_failures
+                        >= _MAX_CONSECUTIVE_FAILURES
+                    ):
+                        logger.error(
+                            "mode=%s %d consecutive chapter "
+                            "failures; aborting to protect "
+                            "spend.",
+                            mode, consecutive_failures,
+                        )
+                        complete_reason = (
+                            "consecutive_failures"
+                        )
+                        break
                     continue
 
                 generated += 1
+                consecutive_failures = 0
                 logger.info(
                     "Generated %s %s mode=%s chars=%d duration=%.2fs",
                     book_id, chap, mode, artifacts.chars_used,
@@ -191,12 +243,16 @@ class Command(BaseCommand):
                 if delta > 0:
                     try:
                         gcs.increment_monthly_usage(fileset_id, delta)
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         logger.exception(
                             "Failed to persist usage delta=%d for "
                             "%s %s; in-memory budget still reflects "
                             "the spend but GCS counter is stale.",
                             delta, book_id, chap,
+                        )
+                        capture_internal_exception(
+                            exc,
+                            tags={'job': 'generate_chapter_audio'},
                         )
 
         # If every pending chapter hit the generic
@@ -207,7 +263,9 @@ class Command(BaseCommand):
         # ``LOCK_STALE_HOURS`` so a later run can retry.
         if (
             pending and generated == 0
-            and complete_reason == "all_done"
+            and complete_reason in (
+                "all_done", "consecutive_failures",
+            )
         ):
             complete_reason = "all_failed"
             logger.error(

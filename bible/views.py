@@ -25,6 +25,7 @@ from bible.utils.error_responses import (
     not_found,
 )
 from bible.utils.provider_errors import (
+    InvalidSearchCursorError,
     PassageNotFoundError,
     TimestampsNotGeneratedError,
     capture_internal_exception,
@@ -37,12 +38,19 @@ from bible.utils.request_params import (
     is_valid_book_name,
     is_valid_fileset_id,
     is_valid_language_iso,
+    is_valid_search_cursor,
+)
+from bible.services.feature_flags import (
+    is_sword_search_enabled,
 )
 from bible.services.providers import (
+    DbtProvider,
+    _concrete_provider,
     get_passage_body,
     provider_for,
 )
 from bible.services.structure import get_structure
+from bible.services.sword.registry import is_sword_fileset
 from .serializers import BiblePassageSerializer
 from .services.translation_service import TranslationService
 from .services.dbt.client import get_default_dbt_client
@@ -146,7 +154,30 @@ class SearchRateThrottle(UserRateThrottle):
     scope = 'search'
 
 
-def provider_error_response(exc, not_found_message=None):
+def _provider_tags(fileset_id, provider, endpoint):
+    """Triage tags for a provider-boundary Sentry capture.
+
+    ``fileset_id`` and ``provider`` identify the routing —
+    ``provider`` accepts a provider instance or class and is
+    recorded as the concrete class name; ``endpoint`` names the
+    API surface. Values may be ``None`` — the capture helper
+    skips them.
+    """
+    if isinstance(provider, type):
+        provider_name = provider.__name__
+    elif provider is not None:
+        provider_name = type(provider).__name__
+    else:
+        provider_name = None
+    return {
+        'fileset_id': fileset_id,
+        'provider': provider_name,
+        'endpoint': endpoint,
+    }
+
+
+def provider_error_response(exc, not_found_message=None,
+                            tags=None):
     """Build an error ``Response`` for an upstream provider failure.
 
     Uses ``provider_error_fields`` so raw exception text — which can
@@ -156,14 +187,19 @@ def provider_error_response(exc, not_found_message=None):
     ``not_found_message`` overrides the default "Passage not found"
     wording for endpoints that look up something else (e.g.
     copyright info) — the ``error_code`` contract is unchanged.
+    ``tags`` forwards triage tags (``fileset_id``/``provider``/
+    ``endpoint``) to the Sentry capture.
     """
     fields = provider_error_fields(
         exc, not_found_message=not_found_message
     )
     # Trend upstream outages in Sentry (warning-level, tagged
-    # with error_code); no-ops for not_found and when Sentry
-    # is off.
-    capture_provider_exception(exc, fields['error_code'])
+    # with error_code); non-upstream exceptions are re-routed
+    # to error-level internal_error inside the capture helper.
+    # No-ops for not_found and when Sentry is off.
+    capture_provider_exception(
+        exc, fields['error_code'], tags=tags
+    )
     return Response(
         fields,
         status=PROVIDER_ERROR_STATUSES.get(
@@ -470,6 +506,7 @@ class AudioTimestampView(APIView):
                 "chapter must be a positive integer."
             )
 
+        provider = provider_for(fileset_id)
         try:
             # Convert book name to DBT book ID
             # (e.g. "John" -> "JHN")
@@ -480,7 +517,7 @@ class AudioTimestampView(APIView):
             # Provider dispatch lives in the facade: SWORD reads
             # the generated GCS sidecar, API.Bible maps its
             # timecodes, everything else hits DBT timestamps.
-            data = provider_for(fileset_id).get_timestamps(
+            data = provider.get_timestamps(
                 book_id, chapter_num
             )
             return Response({"data": data})
@@ -496,7 +533,14 @@ class AudioTimestampView(APIView):
             logger.exception(
                 "Error fetching timestamps: %s", e
             )
-            return provider_error_response(e)
+            return provider_error_response(
+                e,
+                tags=_provider_tags(
+                    fileset_id,
+                    _concrete_provider(provider),
+                    'bible/timestamps',
+                ),
+            )
 
 
 @extend_schema(
@@ -556,7 +600,7 @@ class CopyrightView(VercelEdgeCacheMixin, APIView):
             # output: the resolved provider (unwrapped from
             # _CachingProvider so the class component still
             # distinguishes it) and the raw id.
-            concrete = getattr(provider, 'inner', provider)
+            concrete = _concrete_provider(provider)
             cache_key = (
                 f"v1:copyright:"
                 f"{type(concrete).__name__}:{bible_id}"
@@ -582,7 +626,11 @@ class CopyrightView(VercelEdgeCacheMixin, APIView):
                 "Error fetching copyright: %s", e
             )
             return provider_error_response(
-                e, not_found_message='Copyright not found'
+                e, not_found_message='Copyright not found',
+                tags={
+                    'fileset_id': bible_id,
+                    'endpoint': 'bible/copyright',
+                },
             )
 
 
@@ -655,6 +703,19 @@ class CopyrightView(VercelEdgeCacheMixin, APIView):
             ),
             required=False,
         ),
+        OpenApiParameter(
+            name='cursor',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                'Resume token for grouped SWORD searches. '
+                'When a scan cannot finish inside its time '
+                'budget the response carries '
+                'meta.next_cursor — resend the same request '
+                'with this value to continue scanning.'
+            ),
+            required=False,
+        ),
     ],
 )
 class BibleSearchView(APIView):
@@ -673,6 +734,19 @@ class BibleSearchView(APIView):
     ``book_id``/``count``/``verses`` groups in canonical book
     order) plus ``data.meta`` = ``{total, truncated}``.
 
+    SWORD grouped searches scan the local module under a
+    wall-clock budget: when a window cannot finish, ``meta``
+    additionally carries ``next_cursor`` (resend the same
+    request with ``cursor=<value>`` to resume) and ``progress``
+    (``{chapters_scanned, chapters_total}``). The field is
+    absent once the scan completes; a malformed or out-of-range
+    cursor — or one minted for a different
+    (fileset, books, query) scan — returns 400
+    ``invalid_parameter``. SWORD search is
+    also gated by the ``sword_search`` feature flag — when
+    disabled the endpoint returns 403 ``search_disabled``
+    (other providers are unaffected).
+
     Query Parameters:
         - query: Word/phrase to search (required)
         - fileset_id: DBT or SWORD fileset ID (required)
@@ -682,6 +756,7 @@ class BibleSearchView(APIView):
         - sort_by: Sort field (DBT only)
         - books: Comma-separated USFM book IDs
         - group_by: 'book' returns all matches grouped by book
+        - cursor: Resume token for grouped SWORD scans
 
     Examples:
         - ESV API search: ?query=love&fileset_id=ENGESV_API
@@ -759,6 +834,35 @@ class BibleSearchView(APIView):
         else:
             books = None
 
+        # ``cursor`` resumes a partial SWORD grouped scan — an
+        # opaque base64url token. Charset/shape is gated here;
+        # decode/range validation happens at the provider.
+        cursor = request.query_params.get('cursor')
+        if cursor and not is_valid_search_cursor(cursor):
+            return bad_request(
+                "cursor contains invalid characters."
+            )
+
+        # SWORD search is kill-switched by the ``sword_search``
+        # feature flag (runtime-toggleable via Django admin;
+        # a missing flag row means enabled). Gate before any
+        # provider dispatch — a disabled scan must not run.
+        if (
+            is_sword_fileset(fileset_id)
+            and not is_sword_search_enabled()
+        ):
+            return Response(
+                {
+                    'error': (
+                        'Search is disabled for this '
+                        'translation.'
+                    ),
+                    'error_code': 'search_disabled',
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        provider = provider_for(fileset_id)
         try:
             # Provider dispatch lives in the facade — grouped
             # mode skips pagination parsing entirely (``page``
@@ -769,10 +873,9 @@ class BibleSearchView(APIView):
                         'groups': [],
                         'meta': {'total': 0, 'truncated': False},
                     }})
-                payload = provider_for(
-                    fileset_id
-                ).search_grouped(
-                    query, books, sort_by=sort_by
+                payload = provider.search_grouped(
+                    query, books,
+                    sort_by=sort_by, cursor=cursor,
                 )
                 return Response({'data': payload})
 
@@ -821,16 +924,30 @@ class BibleSearchView(APIView):
 
             # Each provider returns the normalized
             # ``{verses, meta}`` payload.
-            payload = provider_for(fileset_id).search(
+            payload = provider.search(
                 query, limit, page,
                 sort_by=sort_by, books=books,
             )
             return Response({'data': payload})
+        except InvalidSearchCursorError:
+            # A malformed/out-of-range resume cursor is client
+            # input, not a provider failure — keep it out of
+            # the 502 mapping below.
+            return bad_request(
+                "cursor is not a valid resume token."
+            )
         except Exception as e:
             logger.exception(
                 "Error in BibleSearchView: %s", e
             )
-            return provider_error_response(e)
+            return provider_error_response(
+                e,
+                tags=_provider_tags(
+                    fileset_id,
+                    _concrete_provider(provider),
+                    'bible/search',
+                ),
+            )
 
 
 @extend_schema(
@@ -910,7 +1027,11 @@ class BibleStructureView(VercelEdgeCacheMixin, APIView):
                 fileset_id, e,
             )
             return provider_error_response(
-                e, not_found_message='Structure not found'
+                e, not_found_message='Structure not found',
+                tags={
+                    'fileset_id': fileset_id,
+                    'endpoint': 'bible/structure',
+                },
             )
 
 
@@ -1043,7 +1164,12 @@ class TranslationListView(VercelEdgeCacheMixin, APIView):
                 f"Error fetching translations for "
                 f"language_iso: {language_iso} - {e}"
             )
-            return provider_error_response(e)
+            return provider_error_response(
+                e,
+                tags=_provider_tags(
+                    None, DbtProvider, 'bible/translations',
+                ),
+            )
 
 
 class LanguageListView(VercelEdgeCacheMixin, APIView):
@@ -1165,4 +1291,9 @@ class LanguageListView(VercelEdgeCacheMixin, APIView):
                 f"Error fetching languages "
                 f"(search: {search}, code: {code}) - {e}"
             )
-            return provider_error_response(e)
+            return provider_error_response(
+                e,
+                tags=_provider_tags(
+                    None, DbtProvider, 'bible/languages',
+                ),
+            )

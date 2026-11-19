@@ -28,6 +28,8 @@ from django.core.management.base import BaseCommand, CommandError
 
 from bible.services.gemini_tts.client import (
     DEFAULT_VOICE_NAME,
+    GeminiApiError,
+    GeminiResponseError,
     GeminiTTSClient,
     QuotaExceeded,
 )
@@ -43,8 +45,19 @@ from bible.services.gemini_tts.synthesizer import (
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
 from bible.services.sword.registry import canonical_sword_fileset_id
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+    capture_provider_exception,
+)
 
 logger = logging.getLogger(__name__)
+
+_JOB_TAG = {'job': 'generate_gemini_audio'}
+
+# Abort a run after this many consecutive per-chapter failures —
+# a sustained Gemini/GCS outage must not log-capture its way
+# through the whole worklist.
+_MAX_CONSECUTIVE_FAILURES = 3
 
 # ~15 requests/day per free-tier project; leave one in reserve.
 DEFAULT_MAX_REQUESTS = 14
@@ -274,6 +287,7 @@ class Command(BaseCommand):
         generated = 0
         chars_used = 0
         reason = "all_done"
+        consecutive_failures = 0
         max_requests = options["max_requests"]
         for book_id, chap in pending:
             if state.requests_today >= max_requests:
@@ -303,11 +317,51 @@ class Command(BaseCommand):
                 )
                 reason = "quota_exhausted"
                 break
+            except (GeminiApiError, GeminiResponseError) as exc:
+                logger.warning(
+                    "Gemini API failure at %s %s: %s",
+                    book_id, chap, exc,
+                )
+                # Typed provider errors carry no HTTP status —
+                # force the upstream (warning) stream like the
+                # EdgeTTSError path in generate_edge_audio.
+                capture_provider_exception(
+                    exc, tags=_JOB_TAG, upstream=True,
+                )
+                consecutive_failures += 1
+                if (
+                    consecutive_failures
+                    >= _MAX_CONSECUTIVE_FAILURES
+                ):
+                    logger.error(
+                        "%d consecutive chapter failures; "
+                        "aborting to protect spend.",
+                        consecutive_failures,
+                    )
+                    reason = "consecutive_failures"
+                    break
+                continue
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "Failed to generate %s %s: %s",
                     book_id, chap, exc,
                 )
+                # Self-routing: an upstream outage stays
+                # warning-level; a code bug reports at error
+                # level.
+                capture_provider_exception(exc, tags=_JOB_TAG)
+                consecutive_failures += 1
+                if (
+                    consecutive_failures
+                    >= _MAX_CONSECUTIVE_FAILURES
+                ):
+                    logger.error(
+                        "%d consecutive chapter failures; "
+                        "aborting to protect spend.",
+                        consecutive_failures,
+                    )
+                    reason = "consecutive_failures"
+                    break
                 continue
             finally:
                 # Requests spent on a failed chapter still count
@@ -341,11 +395,25 @@ class Command(BaseCommand):
                     "Failed to persist %s %s artifacts: %s",
                     book_id, chap, exc,
                 )
+                capture_internal_exception(exc, tags=_JOB_TAG)
+                consecutive_failures += 1
+                if (
+                    consecutive_failures
+                    >= _MAX_CONSECUTIVE_FAILURES
+                ):
+                    logger.error(
+                        "%d consecutive chapter failures; "
+                        "aborting to protect spend.",
+                        consecutive_failures,
+                    )
+                    reason = "consecutive_failures"
+                    break
                 continue
 
             state.mark_completed(book_id, chap)
             state.save()
             generated += 1
+            consecutive_failures = 0
             chars_used += artifacts.chars_used
             logger.info(
                 "Generated %s %s chars=%d duration=%.2fs "
@@ -361,7 +429,9 @@ class Command(BaseCommand):
             # a zero-artifact "success" and hide a real outage.
             if (
                 pending and generated == 0
-                and reason == "all_done"
+                and reason in (
+                    "all_done", "consecutive_failures",
+                )
             ):
                 reason = "all_failed"
                 logger.error(

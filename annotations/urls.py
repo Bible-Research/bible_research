@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
+from .views_tasks import TranslateNoteTaskView
 
 router = DefaultRouter()
 router.register(r'tags', views.TagViewSet, basename='tag')
@@ -37,6 +38,11 @@ urlpatterns = [
         'images/<str:image_pk>/',
         views.ImageDestroyView.as_view(),
         name='image-destroy',
+    ),
+    path(
+        'tasks/translate-note/',
+        TranslateNoteTaskView.as_view(),
+        name='translate-note-task',
     ),
     path('', include(router.urls)),
 ]

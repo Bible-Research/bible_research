@@ -18,12 +18,14 @@ from bible.utils.provider_errors import (
 )
 from .models import (
     Note,
+    NoteTranslation,
     NoteVerse,
     Tag,
     Comment,
     Image,
     ReadingPosition
 )
+from .services.translation_service import hash_note_text
 User = get_user_model()
 
 logger = logging.getLogger(__name__)
@@ -301,6 +303,10 @@ class NoteSerializer(serializers.ModelSerializer):
             "owns this note. Always false for anonymous readers."
         ),
     )
+    # 'translations' and 'served_language' are NOT declared
+    # fields: both are computed inside to_representation from
+    # ONE fetched row list — a SerializerMethodField would
+    # re-query per access. They appear in every payload.
     # Declared so an omitted 'public' key is absent from
     # validated_data — create() then inherits the tag's flag.
     public = serializers.BooleanField(required=False)
@@ -327,13 +333,15 @@ class NoteSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'note_text', 'public', 'created_at',
             'updated_at', 'tag', 'tag_position', 'verse_references',
-            'is_owner'
+            'is_owner', 'source_language',
         ]
         # tag_position is managed exclusively by reorder/move —
         # a client-supplied value on write can collide with the
         # unique_tag_position_per_tag constraint and 500.
+        # source_language is detection output, never writable.
         read_only_fields = [
             'id', 'created_at', 'updated_at', 'tag_position',
+            'source_language',
         ]
 
     def validate_verse_references(self, value):
@@ -350,6 +358,46 @@ class NoteSerializer(serializers.ModelSerializer):
             and request.user.is_authenticated
             and obj.user_id == request.user.id
         )
+
+    @staticmethod
+    def _translation_meta(rows):
+        """Public metadata for the prefetched/fetched rows."""
+        return [
+            {
+                'language': row.language,
+                'status': row.status,
+                'verified': row.author_verified,
+                'engine': row.engine or None,
+                'error': row.error or None,
+            }
+            for row in rows
+        ]
+
+    def _serve_in_language(self, instance, translations):
+        """Resolve ``note_text`` for the ``?lang=`` contract.
+
+        Returns ``(text, served_language)``: the requested
+        language's ``ready`` row text when its hash matches the
+        CURRENT note text (a stale row can never serve outdated
+        content), the original text when the request matches the
+        note's ``source_language`` — and the original unchanged
+        on every miss (never a 404).
+        """
+        original = instance.note_text
+        lang = self.context.get('note_lang')
+        if not lang:
+            return original, instance.source_language or None
+        if lang == instance.source_language:
+            return original, instance.source_language
+        current_hash = hash_note_text(original)
+        for row in translations:
+            if (
+                row.language == lang
+                and row.status == NoteTranslation.STATUS_READY
+                and row.source_hash == current_hash
+            ):
+                return row.text, row.language
+        return original, instance.source_language or None
 
     def create(self, validated_data):
         """
@@ -463,6 +511,20 @@ class NoteSerializer(serializers.ModelSerializer):
         (empty 'text') and 'headings' is empty.
         """
         representation = super().to_representation(instance)
+        # ?lang= serving (D8): swap note_text to the requested
+        # ready translation; 'served_language' records what the
+        # payload actually carries so readers can label it.
+        # The same row list backs the 'translations' metadata —
+        # one prefetch/query total, not one per access.
+        translations = list(instance.translations.all())
+        representation['translations'] = (
+            self._translation_meta(translations)
+        )
+        text, served = self._serve_in_language(
+            instance, translations
+        )
+        representation['note_text'] = text
+        representation['served_language'] = served
         # Sort in Python so a prefetch_related('verses') cache is
         # reused; .order_by() on the related manager would issue
         # a fresh query per note.

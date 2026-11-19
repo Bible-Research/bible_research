@@ -25,6 +25,8 @@ from openapi_client.configuration import Configuration
 from openapi_client.api_client import ApiClient
 from openapi_client.exceptions import ApiException
 
+from bible.utils.provider_errors import is_upstream_failure
+
 
 # Bound every upstream call so a stalled b4.dbt.io socket cannot
 # pin a GAE worker indefinitely. Matches the ESV/API.Bible clients.
@@ -48,6 +50,39 @@ def _log_request_error(context, exc):
         "%s: %s (status=%s)",
         context, type(exc).__name__, status_code,
     )
+
+
+def _reraise_credential_free(context, exc):
+    """Re-raise *exc* without the request URL in ``str()``.
+
+    ``requests``/urllib3 exceptions stringify the full request
+    URL — including the ``?key=`` credential — and they
+    propagate into view logs and Sentry events. Re-raise a
+    same-type copy that keeps ``response`` so
+    ``upstream_status_code`` still sees the HTTP status.
+    ``JSONDecodeError`` cannot be reconstructed (its
+    ``__init__`` takes json's (msg, doc, pos) signature) so it
+    degrades to a plain ``RequestException``; non-``requests``
+    transport errors (urllib3) become ``ConnectionError``,
+    which stays inside the upstream exception families.
+    """
+    response = getattr(exc, 'response', None)
+    status = (
+        response.status_code if response is not None else 'n/a'
+    )
+    if isinstance(exc, requests.exceptions.JSONDecodeError):
+        raise requests.exceptions.RequestException(
+            f"{context} ({type(exc).__name__}, status={status})",
+            response=response,
+        ) from None
+    if isinstance(exc, requests.exceptions.RequestException):
+        raise type(exc)(
+            f"{context} ({type(exc).__name__}, status={status})",
+            response=response,
+        ) from None
+    raise requests.exceptions.ConnectionError(
+        f"{context} ({type(exc).__name__})"
+    ) from None
 
 
 class DBTClient:
@@ -118,6 +153,8 @@ class DBTClient:
             raise
         except Exception as e:
             _log_request_error("DBT unexpected error", e)
+            if is_upstream_failure(e):
+                _reraise_credential_free("DBT request failed", e)
             raise
 
     def get_bibles(self, language: str = None, **kwargs) -> Dict[str, Any]:
@@ -151,7 +188,9 @@ class DBTClient:
                 e.response.status_code == 401
             ):
                 logger.error("Authentication failed. Check your API key.")
-            raise
+            _reraise_credential_free(
+                "DBT bibles request failed", e
+            )
 
     def get_bible(self, bible_id: str, **kwargs) -> Dict[str, Any]:
         """
@@ -218,21 +257,9 @@ class DBTClient:
                 logger.error(
                     "Authentication failed. Check your API key."
                 )
-            # ``requests`` exceptions stringify with the full
-            # request URL — including the ``?key=`` credential —
-            # and this exception propagates into views' logs and
-            # Sentry. Re-raise a credential-free copy; keeping
-            # ``response`` lets ``upstream_status_code`` still
-            # classify the upstream status (404 -> not_found).
-            status = (
-                e.response.status_code
-                if e.response is not None else 'n/a'
+            _reraise_credential_free(
+                "DBT books request failed", e
             )
-            raise type(e)(
-                f"DBT books request failed "
-                f"({type(e).__name__}, status={status})",
-                response=e.response,
-            ) from None
 
     def get_book(
         self,
@@ -360,7 +387,9 @@ class DBTClient:
             _log_request_error(
                 "DBT fileset files request error", e
             )
-            raise
+            _reraise_credential_free(
+                "DBT fileset files request failed", e
+            )
 
     def get_timestamps(
         self,
@@ -403,7 +432,9 @@ class DBTClient:
             return response.json()
         except requests.exceptions.RequestException as e:
             _log_request_error("DBT timestamps request error", e)
-            raise
+            _reraise_credential_free(
+                "DBT timestamps request failed", e
+            )
 
     def get_copyright(
         self,
@@ -441,7 +472,9 @@ class DBTClient:
             _log_request_error(
                 "DBT copyright request error", e
             )
-            raise
+            _reraise_credential_free(
+                "DBT copyright request failed", e
+            )
 
     def search(
         self,
@@ -499,7 +532,9 @@ class DBTClient:
             _log_request_error(
                 "DBT search request error", e
             )
-            raise
+            _reraise_credential_free(
+                "DBT search request failed", e
+            )
 
     def get_languages(
         self,
@@ -552,7 +587,9 @@ class DBTClient:
             _log_request_error(
                 "DBT languages request error", e
             )
-            raise
+            _reraise_credential_free(
+                "DBT languages request failed", e
+            )
 
 
 _default_client: Optional["DBTClient"] = None

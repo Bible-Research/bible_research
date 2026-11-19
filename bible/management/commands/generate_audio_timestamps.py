@@ -19,6 +19,7 @@ from io import BytesIO
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from mutagen.mp3 import MP3
+import requests
 
 from bible.services.dbt.client import get_default_dbt_client
 from bible.services.dbt.timestamps_registry import (
@@ -41,8 +42,32 @@ from bible.services.google_stt.client import (
 from bible.services.storage import gcs
 from bible.services.sword.client import get_default_sword_client
 from bible.utils.bible_books import CANONICAL_BOOK_IDS
+from bible.utils.provider_errors import (
+    capture_internal_exception,
+    capture_provider_exception,
+    is_upstream_failure,
+)
 
 logger = logging.getLogger(__name__)
+
+_JOB_TAG = {'job': 'generate_audio_timestamps'}
+
+
+def _stt_failure_is_upstream(exc):
+    """``upstream`` override for the generic failure catches.
+
+    Bare ``TimeoutError`` (the LRO wait) and a
+    ``BilledRecognizeError`` with no cause can only mean the STT
+    upstream failed. A wrapped cause classifies on its own
+    merits — a post-LRO parsing bug must not hide at warning
+    level.
+    """
+    if isinstance(exc, BilledRecognizeError):
+        cause = exc.__cause__
+        return is_upstream_failure(cause) if cause else True
+    if isinstance(exc, TimeoutError):
+        return True
+    return None
 
 _MP3_DOWNLOAD_TIMEOUT_SECONDS = 60
 
@@ -88,6 +113,12 @@ class Command(BaseCommand):
             ),
         )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Dedupes _dbt_has_timestamps captures to one event per
+        # fileset per run.
+        self._dbt_check_reported = set()
+
     def handle(self, *args, **options):
         raw_ids = [
             s.strip()
@@ -132,11 +163,19 @@ class Command(BaseCommand):
                     max_chapters=options["max_chapters"],
                     max_failures=options["max_failures"],
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "STT run failed for fileset %s; continuing "
                     "with the remaining filesets.",
                     fileset_id,
+                )
+                # Self-routing: a DBT/STT outage stays warning;
+                # a client-side bug reports at error level. The
+                # typed STT wrapper errors carry no HTTP status.
+                capture_provider_exception(
+                    exc,
+                    tags=_JOB_TAG,
+                    upstream=_stt_failure_is_upstream(exc),
                 )
                 self.stdout.write(
                     f"fileset={fileset_id} failed"
@@ -186,10 +225,27 @@ class Command(BaseCommand):
     # ---------------------------------------------------------
 
     def _download_mp3(self, dbt, url):
-        response = dbt.session.get(
-            url, timeout=_MP3_DOWNLOAD_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
+        # Any ``requests`` failure here stringifies the signed
+        # URL — its query-string credentials would land in logs
+        # and Sentry, so both call sites re-raise sanitized.
+        try:
+            response = dbt.session.get(
+                url, timeout=_MP3_DOWNLOAD_TIMEOUT_SECONDS,
+            )
+        except requests.exceptions.RequestException as e:
+            raise requests.exceptions.ConnectionError(
+                f"MP3 download failed "
+                f"({type(e).__name__})",
+            ) from None
+        try:
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise requests.exceptions.HTTPError(
+                f"MP3 download failed "
+                f"({type(e).__name__}, status="
+                f"{response.status_code})",
+                response=response,
+            ) from None
         return response.content
 
     @staticmethod
@@ -204,12 +260,28 @@ class Command(BaseCommand):
         proceed rather than skipping the chapter every run."""
         try:
             result = dbt.get_timestamps(fileset_id, book_id, chap)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "DBT timestamps check failed for %s %s %s; "
                 "proceeding to generate.",
                 fileset_id, book_id, chap, exc_info=True,
             )
+            # One event per fileset per run is enough — a DBT
+            # outage otherwise emits a warning per chapter while
+            # still burning STT budget. Upstream blip -> warning
+            # stream; a client-side bug -> error-level
+            # internal_error; a 404 "no coverage" answer ->
+            # not_found, never sent (classified inside).
+            if fileset_id not in self._dbt_check_reported:
+                self._dbt_check_reported.add(fileset_id)
+                capture_provider_exception(
+                    exc,
+                    tags={
+                        **_JOB_TAG,
+                        'fileset_id': fileset_id,
+                        'endpoint': 'bible/timestamps',
+                    },
+                )
             return False
         return bool((result or {}).get("data"))
 
@@ -350,13 +422,18 @@ class Command(BaseCommand):
                         gcs.delete_stt_staging_audio(
                             fileset_id, book_id, chap,
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "stt_staging cleanup failed for %s "
                             "%s %s; the lifecycle rule is the "
                             "backstop.",
                             fileset_id, book_id, chap,
                             exc_info=True,
+                        )
+                        # Tolerated (lifecycle rule cleans up)
+                        # but still a real infra failure.
+                        capture_internal_exception(
+                            exc, tags=_JOB_TAG,
                         )
                 # The LRO completed — the full chapter duration
                 # is billed even when the transcript is empty.
@@ -410,6 +487,15 @@ class Command(BaseCommand):
                     "Failed to generate timestamps %s %s %s: %s",
                     fileset_id, book_id, chap, exc,
                 )
+                # Self-routing: STT/GCS outages stay warning;
+                # code bugs report at error level. The typed
+                # STT wrapper errors carry no HTTP status —
+                # force upstream like the EdgeTTSError path.
+                capture_provider_exception(
+                    exc,
+                    tags=_JOB_TAG,
+                    upstream=_stt_failure_is_upstream(exc),
+                )
                 consecutive_failures += 1
                 if (
                     max_failures
@@ -430,13 +516,16 @@ class Command(BaseCommand):
                 if delta > 0:
                     try:
                         gcs.increment_stt_monthly_usage(delta)
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         logger.exception(
                             "Failed to persist STT usage "
                             "delta=%d for %s %s; in-memory "
                             "budget still reflects the spend "
                             "but the GCS counter is stale.",
                             delta, book_id, chap,
+                        )
+                        capture_internal_exception(
+                            exc, tags=_JOB_TAG,
                         )
             if complete_reason != "all_done":
                 break
@@ -447,7 +536,9 @@ class Command(BaseCommand):
         # lock "running"; it goes stale after LOCK_STALE_HOURS.
         if (
             attempted and generated == 0
-            and complete_reason == "all_done"
+            and complete_reason in (
+                "all_done", "consecutive_failures",
+            )
         ):
             complete_reason = "all_failed"
             logger.error(

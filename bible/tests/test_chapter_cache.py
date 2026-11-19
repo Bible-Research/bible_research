@@ -15,6 +15,7 @@ from bible.services import chapter_cache
 from bible.services.providers import (
     ApiBibleProvider,
     _CachingProvider,
+    _concrete_provider,
     get_passage_body,
     provider_for,
 )
@@ -87,10 +88,14 @@ def test_text_providers_are_wrapped():
 
 def test_apibible_provider_is_not_wrapped():
     """API.Bible must report each response's FUMS ``meta``
-    token per display, so its provider is never cached."""
+    token per display, so its provider is never cached.
+    (The ``_TracedProvider`` span wrapper is fine — it adds no
+    caching.)"""
     provider = provider_for('ENGNIV_API')
-    assert isinstance(provider, ApiBibleProvider)
     assert not isinstance(provider, _CachingProvider)
+    assert isinstance(
+        _concrete_provider(provider), ApiBibleProvider
+    )
 
 
 def test_capability_metadata_delegates_to_inner():
