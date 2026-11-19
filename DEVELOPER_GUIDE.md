@@ -2749,6 +2749,10 @@ ESV_KEY=<…>
 API_BIBLE_KEY=<…>
 ```
 
+Optionally add `SENTRY_DSN=<…>` to report staging errors to
+the `bible-research-api` Sentry project — events carry
+`environment:staging` on Vercel previews.
+
 Serverless functions have no GCP credentials, so GCS-backed
 features (generated audio, image attachments) cannot work on
 the Vercel backend; text/search/notes endpoints do.

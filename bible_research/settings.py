@@ -167,8 +167,11 @@ IS_GCP_ENVIRONMENT = (
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SECURE_SSL_REDIRECT = IS_GCP_ENVIRONMENT
 SECURE_REDIRECT_EXEMPT = [r'^_ah/']
-SESSION_COOKIE_SECURE = IS_GCP_ENVIRONMENT
-CSRF_COOKIE_SECURE = IS_GCP_ENVIRONMENT
+# Vercel terminates TLS too, so its deployment gets the same
+# cookie hardening as GCP.
+_is_deployed = IS_GCP_ENVIRONMENT or os.environ.get('VERCEL')
+SESSION_COOKIE_SECURE = _is_deployed
+CSRF_COOKIE_SECURE = _is_deployed
 
 _dotenv_loaded = False
 if os.environ.get('DOTENV'):
@@ -683,8 +686,10 @@ def create_log_handler(
     backup_count=10
 ):
     # Only configure file logging for local development.
-    # GAE has a read-only filesystem.
-    is_local_dev = not IS_GCP_ENVIRONMENT
+    # GAE and Vercel have read-only filesystems.
+    is_local_dev = (
+        not IS_GCP_ENVIRONMENT and not os.environ.get('VERCEL')
+    )
     if DEBUG and filename and is_local_dev:
         logs_dir = os.path.join(BASE_DIR, 'logs')
         if not os.path.exists(logs_dir):
