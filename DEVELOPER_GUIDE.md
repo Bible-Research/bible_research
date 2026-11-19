@@ -2731,9 +2731,10 @@ branches never build — prod stays GAE-only) and serves it at
 `manage.py` → `WSGI_APPLICATION` and collectstatics
 automatically; dependencies come from
 `scripts/vercel_install.sh` (the project's Install
-Command), which pins `uv pip install` to Python 3.12 —
-the preset's own installer ignores `.python-version` and
-resolves cp314 wheels the 3.12 runtime cannot import.
+Command), which pins `uv pip install` to `.python-version`
+— the preset's own installer ignores it and resolves
+wheels for its newest CPython, which the pinned runtime
+cannot import.
 `scripts/vercel_build.sh` (the project's Build Command)
 additionally runs `migrate` — so every staging deploy also
 brings `stagingdb`'s schema up to date — then collectstatics

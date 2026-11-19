@@ -16,7 +16,7 @@ set -e
 
 if command -v uv >/dev/null 2>&1; then
   uv pip install \
-    --python "$(cat .python-version)" \
+    --python "$(head -n1 .python-version)" \
     --target .vercel_python_packages \
     -r requirements.txt
 else
