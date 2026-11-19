@@ -3,7 +3,7 @@
 Calls ``generativelanguage.googleapis.com`` directly with
 ``requests`` (no ``google-genai`` dependency) so the free-tier
 ``gemini-2.5-flash-preview-tts`` model can synthesize chapter audio.
-API keys come from ``config.yaml`` via ``settings.GEMINI_API_KEYS``;
+API keys come from ``.env``/env vars via ``settings.GEMINI_API_KEYS``;
 the key travels in the ``x-goog-api-key`` header so it never lands
 in a URL, log line, or error message.
 """
@@ -99,7 +99,7 @@ class GeminiTTSClient:
         if not self._keys:
             raise GeminiApiError(
                 "No Gemini API keys configured; add GEMINI_API_KEY "
-                "to config.yaml."
+                "to .env or the env-file secret."
             )
         payload = build_payload(
             text, voice_name or self._voice_name,
