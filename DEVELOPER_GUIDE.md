@@ -2035,9 +2035,9 @@ Differences from the Gemini pipeline:
 `--until-done` removes both run caps so a single invocation
 drains the entire pending worklist — the one-command way to
 render the whole Bible on a plain box instead of through the
-scheduled Cloud Run Job. Local mode only — under
-`--upload-gcs` the flag is ignored so a cloud run stays
-inside the Job timeout. On a fresh Ubuntu/Debian checkout:
+scheduled Cloud Run Job. Local mode only — in GCS mode
+(`--upload-gcs`/`CLOUD_RUN_JOB`) the flag is ignored so a
+cloud run stays inside the Job timeout. On a fresh Ubuntu/Debian checkout:
 
 ```bash
 sudo apt install -y python3-venv python3-pip

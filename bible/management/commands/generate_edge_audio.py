@@ -20,8 +20,8 @@ There is no API key and no formal quota — the run is bounded by
 the Cloud Run Job's timeout; the daily scheduler re-triggers it
 until the listing shows every chapter done. ``--until-done``
 removes both caps so a single local invocation drains the whole
-pending worklist (standalone boxes only — ignored under
-``--upload-gcs`` so a cloud run can never outlive its timeout).
+pending worklist (standalone boxes only — ignored in GCS mode
+so a cloud run can never outlive its timeout).
 """
 import logging
 import os
@@ -103,7 +103,7 @@ class Command(BaseCommand):
                 "Ignore --max-chapters/--max-minutes and "
                 "generate until the pending worklist is "
                 "drained (standalone local runs; ignored "
-                "with --upload-gcs)."
+                "in GCS mode)."
             ),
         )
         parser.add_argument(
@@ -162,8 +162,9 @@ class Command(BaseCommand):
         until_done = options["until_done"] and not upload_gcs
         if options["until_done"] and upload_gcs:
             logger.warning(
-                "--until-done ignored under --upload-gcs: cloud "
-                "runs stay inside the Job-timeout caps."
+                "--until-done ignored in GCS mode "
+                "(--upload-gcs/CLOUD_RUN_JOB): cloud runs "
+                "stay inside the Job-timeout caps."
             )
 
         if upload_gcs:

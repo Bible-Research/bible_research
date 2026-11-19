@@ -1,5 +1,6 @@
 """Tests for the generate_edge_audio management command."""
 import json
+import logging
 import os
 from io import StringIO
 from unittest.mock import DEFAULT, MagicMock, patch
@@ -244,6 +245,27 @@ def test_time_cap_still_binds_without_flag(
     synth = _FakeEdgeSynth.instances[-1]
     assert synth.runs == []
     assert "reason=time_cap" in text
+
+
+@patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
+@patch(f"{_CMD}.get_default_sword_client")
+def test_until_done_ignored_in_gcs_mode(
+    sword_factory, tmp_path, worklist_client,
+    gcs_mocks, caplog,
+):
+    """--until-done is gated off in GCS mode so a cloud run
+    stays inside the Job-timeout caps."""
+    sword_factory.return_value = worklist_client
+
+    with caplog.at_level(logging.WARNING):
+        text = _invoke_gcs_out(
+            "--until-done", "--max-chapters", "2",
+        )
+
+    synth = _FakeEdgeSynth.instances[-1]
+    assert len(synth.runs) == 2
+    assert "reason=chapter_cap" in text
+    assert "--until-done ignored" in caplog.text
 
 
 @patch(f"{_CMD}.EdgeSynthesizer", _FakeEdgeSynth)
