@@ -128,8 +128,7 @@ resource "google_cloud_scheduler_job" "note_translations_audit" {
     ])
 
     oauth_token {
-      service_account_email =
-        google_service_account.all_jobs_scheduler.email
+      service_account_email = google_service_account.all_jobs_scheduler.email
     }
   }
 
