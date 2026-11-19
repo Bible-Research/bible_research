@@ -2803,7 +2803,12 @@ cannot import.
 `scripts/vercel_build.sh` (the project's Build Command)
 additionally runs `migrate` — so every staging deploy also
 brings `stagingdb`'s schema up to date — then collectstatics
-again as a safety net.
+again as a safety net. `vercel.json` sets
+`outputDirectory: "staticfiles"` (the `STATIC_ROOT`
+parent): with a custom Build Command Vercel otherwise fails
+with `STATIC_BUILD_NO_OUT_DIR` expecting `public/`, and the
+setting also serves the collected assets at `/static/` from
+the CDN.
 
 The project must define a **`DOTENV`** environment variable
 (Preview scope) holding the full .env payload — without it
