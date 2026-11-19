@@ -2735,8 +2735,13 @@ project builds this repo's `staging` branch (allowed by
 branches never build — prod stays GAE-only) and serves it at
 `staging-bibleresearchapi.vercel.app` plus the per-deployment
 `bible-research-api-*` URLs. Vercel's Django preset detects
-`manage.py` → `WSGI_APPLICATION`, installs
-`requirements.txt`, and collectstatics automatically;
+`manage.py` → `WSGI_APPLICATION` and collectstatics
+automatically; dependencies come from
+`scripts/vercel_install.sh` (the project's Install
+Command), which pins `uv pip install` to `.python-version`
+— the preset's own installer ignores it and resolves
+wheels for its newest CPython, which the pinned runtime
+cannot import.
 `scripts/vercel_build.sh` (the project's Build Command)
 additionally runs `migrate` — so every staging deploy also
 brings `stagingdb`'s schema up to date — then collectstatics
