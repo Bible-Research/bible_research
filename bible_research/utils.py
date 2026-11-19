@@ -83,11 +83,13 @@ def sentry_release():
     ``SENTRY_RELEASE`` wins when set (Cloud Run jobs carry no
     ``GAE_VERSION`` — an image SHA or scheduler tag can be
     injected there); ``GAE_VERSION`` is the per-deploy GAE
-    fallback. ``None`` leaves events release-less.
+    fallback, then ``VERCEL_GIT_COMMIT_SHA`` on Vercel deploys.
+    ``None`` leaves events release-less.
     """
     return (
         os.environ.get('SENTRY_RELEASE')
         or os.environ.get('GAE_VERSION')
+        or os.environ.get('VERCEL_GIT_COMMIT_SHA')
     )
 
 

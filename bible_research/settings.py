@@ -30,13 +30,14 @@ from .dotenv import load_dotenv, load_dotenv_file
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# The app is only ever served on its GAE appspot host
+# The app is served on its GAE appspot host
 # (bible-research-489314.ey.r.appspot.com, plus
 # <version>-dot-…appspot.com version-preview URLs covered by
-# the leading-dot suffix match) and localhost dev — there is
-# no custom domain.
+# the leading-dot suffix match), the staging backend's
+# *.vercel.app deployment/preview hostnames, and localhost dev.
 ALLOWED_HOSTS = [
     ".appspot.com",
+    ".vercel.app",
     "localhost",
     "127.0.0.1",
     "[::1]",
@@ -89,6 +90,9 @@ MIDDLEWARE = [
 CORS_ALLOWED_ORIGINS = [
     # reactive-bible production SPA
     "https://bibleresearch.vercel.app",
+    # reactive-bible staging SPA alias — the generated
+    # git-branch aliases are covered by the regex below
+    "https://staging-bibleresearch.vercel.app",
     # Capacitor app WebView (iOS origin is capacitor://; Android
     # defaults to https://localhost, http://localhost if the
     # app is ever built with an http server scheme)
@@ -163,8 +167,11 @@ IS_GCP_ENVIRONMENT = (
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SECURE_SSL_REDIRECT = IS_GCP_ENVIRONMENT
 SECURE_REDIRECT_EXEMPT = [r'^_ah/']
-SESSION_COOKIE_SECURE = IS_GCP_ENVIRONMENT
-CSRF_COOKIE_SECURE = IS_GCP_ENVIRONMENT
+# Vercel terminates TLS too, so its deployment gets the same
+# cookie hardening as GCP.
+_is_deployed = IS_GCP_ENVIRONMENT or os.environ.get('VERCEL')
+SESSION_COOKIE_SECURE = _is_deployed
+CSRF_COOKIE_SECURE = _is_deployed
 
 _dotenv_loaded = False
 if os.environ.get('DOTENV'):
@@ -296,9 +303,9 @@ else:
             config = {}
         else:
             raise FileNotFoundError(
-                '.env not found. Copy .env.example to .env and fill '
-                'in your values (the legacy config.yaml is still '
-                'supported).'
+                'No config found: set DOTENV (full .env payload) '
+                'or DOTENV_PATH, or copy .env.example to .env '
+                '(the legacy config.yaml is still supported).'
             )
 
         SECRET_KEY = config.get('SECRET_KEY')
@@ -383,10 +390,16 @@ if SENTRY_DSN:
         include_local_variables=False,
         # Ctrl+C/shutdown noise is never a defect.
         ignore_errors=[KeyboardInterrupt],
-        # GCP is the only production deploy path; every other
-        # environment (local dev, CI) reports 'development'.
+        # GCP is the only production deploy path; Vercel
+        # previews (the staging backend) report 'staging',
+        # and local dev / CI report 'development'.
         environment=(
-            'production' if IS_GCP_ENVIRONMENT else 'development'
+            'production'
+            if IS_GCP_ENVIRONMENT
+            or os.environ.get('VERCEL_ENV') == 'production'
+            else 'staging'
+            if os.environ.get('VERCEL_ENV') == 'preview'
+            else 'development'
         ),
         # SENTRY_RELEASE wins when set (Cloud Run jobs carry no
         # GAE_VERSION); GAE_VERSION is the per-deploy fallback.
@@ -673,8 +686,10 @@ def create_log_handler(
     backup_count=10
 ):
     # Only configure file logging for local development.
-    # GAE has a read-only filesystem.
-    is_local_dev = not IS_GCP_ENVIRONMENT
+    # GAE and Vercel have read-only filesystems.
+    is_local_dev = (
+        not IS_GCP_ENVIRONMENT and not os.environ.get('VERCEL')
+    )
     if DEBUG and filename and is_local_dev:
         logs_dir = os.path.join(BASE_DIR, 'logs')
         if not os.path.exists(logs_dir):

@@ -6,8 +6,8 @@
 tasks-invoker service account. The worker endpoint verifies that
 token and calls :func:`run_translation_task`.
 
-Local dev (``not IS_GCP_ENVIRONMENT``) runs the worker inline
-inside ``enqueue`` — a zero-infra fallback, no emulator needed.
+Outside GCP (local dev, Vercel) ``enqueue`` runs the worker
+inline — a zero-infra fallback, no emulator needed.
 """
 import json
 import logging
@@ -69,13 +69,22 @@ def upsert_pending_rows(note, languages, source_hash):
 def enqueue(note_id, source_hash):
     """Enqueue a translation run for *note_id*.
 
-    On GCP this issues a Cloud Task; locally it runs the worker
-    inline so note writes translate with zero infrastructure.
+    On GCP this issues a Cloud Task; elsewhere it runs the
+    worker inline so note writes translate with zero
+    infrastructure. Inline runs have no retry semantics — the
+    worker already stamps ``failed`` rows, so a failure is
+    logged, not raised: a credential-less environment (e.g.
+    Vercel, where no GCP auth exists) must not 500 the write.
     """
     if getattr(settings, 'IS_GCP_ENVIRONMENT', False):
         _enqueue_cloud_task(note_id, source_hash)
     else:
-        run_translation_task(note_id, source_hash)
+        try:
+            run_translation_task(note_id, source_hash)
+        except TranslationError:
+            logger.exception(
+                'inline translation failed for note %s', note_id
+            )
 
 
 def _client_kwargs():
