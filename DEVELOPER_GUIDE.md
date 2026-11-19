@@ -1376,6 +1376,70 @@ GET /api/v1/notes/{note_id}/
 Authorization: Token <your-token>
 ```
 
+#### Note Translations (`?lang=`)
+
+Every note payload carries `source_language` (ISO 639-1,
+detected on the first translation run — `""`/`null` until
+then), `served_language` (the language `note_text` actually
+contains), and a `translations` list of per-language metadata
+(`language`, `status` = `pending`/`ready`/`failed`/`source`,
+`verified`, `engine`, `error`).
+
+```
+GET /api/v1/notes/{note_id}/?lang=en
+GET /api/v1/notes/?lang=en          # same swap on list pages
+```
+
+`?lang=` swaps `note_text` to the requested language's
+`ready` translation row. Any miss — no row, `pending`,
+`failed`, or a row whose `source_hash` no longer matches the
+current note text — falls back to the ORIGINAL text (never a
+404) and `served_language` reports `source_language`. A
+`lang` equal to `source_language` serves the original.
+`?lang=` composes with every other notes filter (tag,
+ordering, pagination).
+
+#### Verify Translation
+```
+POST   /api/v1/notes/{note_id}/translations/{lang}/verify/
+DELETE /api/v1/notes/{note_id}/translations/{lang}/verify/
+Authorization: Token <your-token>
+```
+
+Owner-only author verification of a machine translation —
+POST sets `author_verified`/`verified_at`, DELETE clears
+them; both are idempotent. Non-owners and missing notes/rows
+get 404; `pending`/`failed`/`source` rows get
+`409 {"error": "translation_not_ready", "error_code":
+"translation_not_ready"}` — a `source` row is the author's
+own text, nothing to verify.
+
+#### Retranslate Note
+```
+POST /api/v1/notes/{note_id}/retranslate/
+Authorization: Token <your-token>
+```
+
+Owner-only retry of `failed` translation rows: re-marks them
+`pending` and enqueues a fresh run (idempotent via
+`source_hash`); rows in other states are untouched.
+Non-owners get 404. Response: `{"requeued": <count>}`.
+
+#### Translate-Note Task Worker
+```
+POST /api/v1/tasks/translate-note/
+```
+
+Cloud Tasks worker endpoint — accepts ONLY an OIDC Bearer
+token minted for `TASKS_INVOKER_SA_EMAIL`; anything else gets
+401. Body `{note_id, source_hash}`: stale `source_hash` (a
+newer edit superseded the run) or an over-cap note returns
+204; retryable upstream failure returns 500 so Cloud Tasks
+retries (queue `note-translations`, max 5 attempts, 5
+concurrent dispatches). Local dev never reaches this route —
+`enqueue()` runs the worker inline when
+`IS_GCP_ENVIRONMENT` is false.
+
 #### Update Note
 ```
 PUT /api/v1/notes/{note_id}/
@@ -1710,10 +1774,36 @@ class Note(models.Model):
     tag = ForeignKey(Tag, null=True, blank=True)
     note_text = TextField(blank=True)
     public = BooleanField(default=False)
+    source_language = CharField(max_length=10, blank=True)
     verses = ManyToManyField(Verse, through='NoteVerse')
     created_at = DateTimeField(auto_now_add=True)
     updated_at = DateTimeField(auto_now=True)
 ```
+
+### NoteTranslation Model
+```python
+class NoteTranslation(models.Model):
+    id = CharField(max_length=18, primary_key=True)  # NTR + 15 chars
+    note = ForeignKey(Note, related_name='translations')
+    language = CharField(max_length=10)
+    text = TextField(blank=True)          # empty on 'source' rows
+    status = CharField(                   # pending | ready |
+        choices=..., default='pending')   #   failed | source
+    source_hash = CharField(max_length=64)  # sha256 of note_text
+    engine = CharField(max_length=40)     # e.g. 'google-nmt'
+    error = CharField(max_length=100)
+    author_verified = BooleanField(default=False)
+    verified_at = DateTimeField(null=True, blank=True)
+    created_at = DateTimeField(auto_now_add=True)
+    updated_at = DateTimeField(auto_now=True)
+```
+
+**Constraints**: `unique_note_translation_language` on
+(note, language); index `note_trans_lang_status_idx` on
+(language, status). The detected source language gets a
+`source` row whose `text` stays empty — the original is
+served from `Note.note_text`; the row is a language slot and
+metadata anchor.
 
 ### NoteVerse Model
 ```python
@@ -2275,6 +2365,78 @@ exits cleanly when it is absent — that default is what the
 command exits non-zero if any entry fails, so a partial
 run is visible to automation; fixed entries stay recorded
 and a re-run resumes with the remainder.
+
+### Note Translations (Cloud Translation + Cloud Tasks)
+
+Public notes are mixed-language (EN/LV); a `public` note is
+only useful to readers of its source language, so every note
+write enqueues an eager machine translation into each
+`NOTE_TARGET_LANGUAGES` code (default `['en', 'lv']` —
+emptying the setting is the kill switch).
+
+**Pipeline** (`annotations/services/`):
+
+1. `NoteViewSet` create/update/bulk upserts `pending`
+   `NoteTranslation` rows and enqueues a run inside
+   `transaction.on_commit` (`services/tasks.py::enqueue`).
+   Only `note_text` changes re-translate — tag/position edits
+   never spend quota.
+2. On GCP the enqueue POSTs to
+   `{APP_BASE_URL}/api/v1/tasks/translate-note/` through the
+   `note-translations` Cloud Tasks queue (max 5 attempts,
+   exponential backoff, 5 concurrent dispatches) with an OIDC
+   token minted for `TASKS_INVOKER_SA_EMAIL`. Locally the
+   worker runs inline — zero GCP infra needed.
+3. The worker (`views_tasks.py::TranslateNoteTaskView`)
+   verifies the OIDC token's `email` claim against
+   `TASKS_INVOKER_SA_EMAIL` — the only credential it accepts
+   — then runs `run_translation_task`. The run is keyed by
+   `sha256(note_text)`: a stale hash (superseded edit) is a
+   204 no-op, and the hash is re-checked under
+   `select_for_update` before rows are written.
+4. `translation_service.py` walks the TipTap doc, batches all
+   `type: 'text'` nodes into ONE `translate_text` call per
+   target, and splices results back — marks and
+   `scriptureRef`/`mention` atoms survive; `@USFM.C[.V[-E]]`
+   tokens are masked/restored so MT cannot mangle them.
+   Plain-text notes fall back to a single segment. The first
+   call detects the source language for free (v3 returns
+   `detected_language_code`); `Note.source_language` and a
+   `source` row (empty `text`) are stored, configured targets
+   become `ready` rows, and every fresh write resets
+   `author_verified`.
+5. Per-note cap `NOTE_TRANSLATE_MAX_CHARS` (default 10 000):
+   over-cap notes are marked `failed`/`too_long` and never
+   retried; `failed`/`translate_failed` rows return 500 so
+   Cloud Tasks retries. Owners re-run failures via
+   `POST /notes/<id>/retranslate/`.
+
+**Cost accounting**: every billed `translate_text` call adds
+its character count to the `note-translate` monthly counter
+via `bible/services/storage/gcs.py::increment_monthly_usage`
+(best-effort — counter failures log, never break
+translation).
+
+**Management commands**:
+- `translate_notes [--user U] [--note-id ID] [--dry-run]` —
+  backfill/repair; runs the same worker inline per note.
+- `check_note_translations` — monthly coverage audit (last
+  day of month via `run_all_jobs` JOBS + the
+  `note-translations-audit` Cloud Scheduler trigger); emits
+  ONE Sentry `capture_message` when per-language misses
+  exist, logs-only on a clean run.
+
+**Settings** (config.yaml / .env, via
+`_audio_settings_source`): `NOTE_TARGET_LANGUAGES`,
+`NOTE_TRANSLATION_ENGINE` (`google-nmt` default; future
+`google-llm`/`gemini-*` map to v3 models),
+`NOTE_TRANSLATE_MAX_CHARS`, `TASKS_INVOKER_SA_EMAIL`,
+`TASK_QUEUE_ID`, `TASK_QUEUE_LOCATION`, `APP_BASE_URL`.
+Terraform (`terraform/note_translations.tf`) enables
+`translate.googleapis.com`/`cloudtasks.googleapis.com`,
+creates the queue, `tasks-invoker` SA, TokenCreator for the
+Cloud Tasks service agent, and grants the appspot runtime SA
+`cloudtasks.enqueuer` + `cloudtranslate.user`.
 
 ---
 

@@ -88,6 +88,16 @@ JOBS = [
         ["--apply"],
         "manual",
     ),
+    # Monthly note-translation coverage audit. The
+    # ``note-translations-audit`` Cloud Scheduler trigger fires
+    # a plain ``jobs:run`` on days 28-31; this predicate gates
+    # it to the real last day. Emits one Sentry captureMessage
+    # when per-language misses exist, logs-only on a clean run.
+    (
+        "check_note_translations",
+        [],
+        "last_day_of_month",
+    ),
 ]
 
 

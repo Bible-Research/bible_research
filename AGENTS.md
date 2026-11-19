@@ -16,7 +16,12 @@ tests run on SQLite.
 ## Layout
 
 - `bible/` — passage text, audio, search, translations, timestamps.
-- `annotations/` — notes, tags, comments, images, reading positions.
+- `annotations/` — notes, tags, comments, images, reading
+  positions, and the note-translation pipeline
+  (`services/translation_service.py` TipTap→Cloud Translation,
+  `services/tasks.py` Cloud Tasks enqueue + inline local worker,
+  `views_tasks.py` OIDC-protected worker endpoint,
+  `Note.source_language` + `NoteTranslation` model).
 - `users/` — auth/token endpoints.
 - `bible_research/` — settings, urls, authentication.
 - `terraform/` — GCP infra (the `all-jobs` Cloud Run job, storage;
@@ -157,7 +162,12 @@ is no `__init__.py` in `bible/utils/` — it is a namespace package.
 
 `annotations/urls.py` (DRF router):
 - `tags/`, `notes/` (supports `notes/reorder/` bulk update,
-  `notes/order-index/`, `notes/move/`)
+  `notes/order-index/`, `notes/move/`, `?lang=` language
+  serving on detail+list,
+  `notes/<id>/translations/<lang>/verify/` POST|DELETE
+  owner-only, `notes/<id>/retranslate/` POST owner-only)
+- `tasks/translate-note/` — Cloud Tasks worker endpoint,
+  AllowAny + explicit OIDC verification, never user tokens
 - `reading-positions/`
 - `notes/<note_pk>/comments/`, `notes/<note_pk>/images/`,
   `notes/<note_pk>/comments/<comment_pk>/images/`

@@ -19,6 +19,7 @@ from django.db import models, transaction, IntegrityError
 from django.db.utils import OperationalError
 from django.db.models import Count, Q, F, Min, Prefetch
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
 from bible.models import Verse
 from bible.utils.bible_books import (
@@ -33,6 +34,7 @@ from bible_research.permissions import GuestReadOnly
 from .models import (
     Tag,
     Note,
+    NoteTranslation,
     Comment,
     Image,
     ReadingPosition,
@@ -53,6 +55,13 @@ from .serializers import (
     subtree_tag_ids,
 )
 from .services.image_storage import upload_original, delete_original
+from .services.tasks import (
+    enqueue,
+    note_translation_languages,
+    retranslate_failed,
+    upsert_pending_rows,
+)
+from .services.translation_service import hash_note_text
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +98,29 @@ def _canonical_note_order(queryset):
         F('tag_position').asc(nulls_last=True),
         '-created_at',
     )
+
+
+def _schedule_note_translations(note):
+    """Upsert ``pending`` translation rows for every configured
+    target and enqueue the worker run — inside
+    ``transaction.on_commit`` so the note write commits first
+    and the response can already list 'pending' translations
+    (on_commit executes immediately when no transaction is
+    active, which is the case here).
+
+    A no-op when ``NOTE_TARGET_LANGUAGES`` is empty — the
+    documented kill switch — or when the note has no text to
+    translate."""
+    languages = note_translation_languages(note.note_text, note)
+    if not languages or not (note.note_text or '').strip():
+        return
+    source_hash = hash_note_text(note.note_text)
+
+    def _after_commit():
+        upsert_pending_rows(note, languages, source_hash)
+        enqueue(note.id, source_hash)
+
+    transaction.on_commit(_after_commit)
 
 
 def _flatten_errors(errors):
@@ -618,11 +650,15 @@ class NoteViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated(), GuestReadOnly()]
 
     def get_serializer_context(self):
-        """Add fileset_id from query params to serializer context."""
+        """Add fileset_id + lang from query params to serializer
+        context."""
         context = super().get_serializer_context()
         fileset_id = self.request.query_params.get('fileset_id')
         if fileset_id:
             context['fileset_id'] = fileset_id
+        lang = self.request.query_params.get('lang')
+        if lang:
+            context['note_lang'] = lang
         return context
 
     def perform_create(self, serializer):
@@ -636,7 +672,11 @@ class NoteViewSet(viewsets.ModelViewSet):
                 'note_text',
                 'N/A'
             )[:50]
-            serializer.save(user=user)
+            note = serializer.save(user=user)
+            # Upsert pending rows + enqueue the translation run
+            # after commit — the 201 payload lists the targets
+            # as 'pending'.
+            _schedule_note_translations(note)
             logger.info(
                 f"Created note for user {user.username}: "
                 f"{note_text}..."
@@ -677,7 +717,12 @@ class NoteViewSet(viewsets.ModelViewSet):
                 "You do not have permission "
                 "to update this note."
             )
+        previous_text = instance.note_text
         serializer.save()
+        # Only a note_text change re-runs translation — tag/
+        # position edits must not spend Translate quota.
+        if instance.note_text != previous_text:
+            _schedule_note_translations(instance)
         logger.debug(
             f"Note ID: {instance.id} "
             f"successfully updated"
@@ -936,7 +981,7 @@ class NoteViewSet(viewsets.ModelViewSet):
         # notes costs two queries, not N+1.
         final_queryset = final_queryset.select_related(
             'tag'
-        ).prefetch_related('verses')
+        ).prefetch_related('verses', 'translations')
         logger.info(
             f"Returning notes with ordering: {ordering_param}"
         )
@@ -959,6 +1004,10 @@ class NoteViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
             notes = serializer.save()
+        # bulk_create bypasses perform_create — apply the same
+        # per-note pending-rows + enqueue as single creates.
+        for note in notes:
+            _schedule_note_translations(note)
         output = NoteSerializer(
             notes,
             many=True,
@@ -968,6 +1017,71 @@ class NoteViewSet(viewsets.ModelViewSet):
             output.data,
             status=drf_status.HTTP_201_CREATED,
         )
+
+    @action(
+        detail=True,
+        methods=['post', 'delete'],
+        url_path=r'translations/(?P<lang>[^/.]+)/verify',
+    )
+    def verify_translation(self, request, pk=None, lang=None):
+        """Owner-only author verification of a translation.
+
+        POST   /api/v1/notes/<id>/translations/<lang>/verify/
+        DELETE /api/v1/notes/<id>/translations/<lang>/verify/
+
+        Idempotent set/clear of ``author_verified`` +
+        ``verified_at`` on the child row. Non-owners and missing
+        notes/rows get 404 — the endpoint leaks nothing about
+        foreign notes. ``pending``/``failed``/``source`` rows get
+        409 ``translation_not_ready``: a ``source`` row is the
+        author's own text — nothing to verify (D9).
+        """
+        # Owner-scoped lookup — a non-owner hits the same 404 as
+        # a missing note.
+        note = get_object_or_404(
+            Note.objects.filter(user=request.user), pk=pk,
+        )
+        row = get_object_or_404(
+            note.translations, language=lang,
+        )
+        if row.status != NoteTranslation.STATUS_READY:
+            return Response(
+                {
+                    'error': 'translation_not_ready',
+                    'error_code': 'translation_not_ready',
+                },
+                status=drf_status.HTTP_409_CONFLICT,
+            )
+        if request.method == 'POST':
+            row.author_verified = True
+            row.verified_at = timezone.now()
+        else:
+            row.author_verified = False
+            row.verified_at = None
+        row.save(update_fields=['author_verified', 'verified_at'])
+        return Response({
+            'language': row.language,
+            'status': row.status,
+            'verified': row.author_verified,
+            'verified_at': row.verified_at,
+            'engine': row.engine or None,
+        })
+
+    @action(detail=True, methods=['post'], url_path='retranslate')
+    def retranslate(self, request, pk=None):
+        """Owner-only retry of ``failed`` translations.
+
+        POST /api/v1/notes/<id>/retranslate/
+
+        Re-marks every ``failed`` row ``pending`` and enqueues a
+        fresh run (idempotent via source_hash); rows in any other
+        state stay untouched. Non-owners get 404.
+        """
+        note = get_object_or_404(
+            Note.objects.filter(user=request.user), pk=pk,
+        )
+        requeued = retranslate_failed(note)
+        return Response({'requeued': requeued})
 
     @extend_schema(
         request=LinkedNotesRequestSerializer,
@@ -1040,7 +1154,7 @@ class NoteViewSet(viewsets.ModelViewSet):
             .filter(user=user)
             .filter(query)
             .select_related('tag')
-            .prefetch_related('verses')
+            .prefetch_related('verses', 'translations')
             .distinct()
             .order_by('-created_at')
         )

@@ -173,6 +173,7 @@ resource "google_project_iam_member" "github_deployer_service_account_admin_scop
           "all-jobs-scheduler@${var.project_id}.iam.gserviceaccount.com",
           "audio-generator@${var.project_id}.iam.gserviceaccount.com",
           "github-deployer@${var.project_id}.iam.gserviceaccount.com",
+          "tasks-invoker@${var.project_id}.iam.gserviceaccount.com",
           "thumbnail-worker@${var.project_id}.iam.gserviceaccount.com",
           local.appspot_email,
         ],

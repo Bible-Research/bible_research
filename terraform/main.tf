@@ -37,6 +37,8 @@ locals {
     "cloudscheduler.googleapis.com",
     "texttospeech.googleapis.com",
     "speech.googleapis.com",
+    "translate.googleapis.com",
+    "cloudtasks.googleapis.com",
   ]
 
   # Matches Artifact Registry + App Engine (artifact_registry.tf).
