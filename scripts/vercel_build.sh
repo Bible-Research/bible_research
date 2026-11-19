@@ -30,19 +30,22 @@ fi
 export DATABASE_STAGING_URL
 # Stdlib parsing — dj_database_url lives in
 # .vercel_python_packages, which may not be importable here.
-if ! python3 -c '
-import os, sys
+# Print the resolved DB name (not a credential) so a refusal
+# log distinguishes "var unset" from "wrong database".
+DB_NAME=$(python3 -c '
+import os
 from urllib.parse import urlparse
 try:
-    name = urlparse(
+    print(urlparse(
         os.environ["DATABASE_STAGING_URL"]
-    ).path.lstrip("/")
+    ).path.lstrip("/"))
 except Exception:
-    name = ""
-sys.exit(0 if name == "stagingdb" else 1)
-'; then
+    print("")
+')
+if [ "$DB_NAME" != "stagingdb" ]; then
   echo "Refusing to migrate: DATABASE_STAGING_URL must name" \
-    "stagingdb on a preview deployment." >&2
+    "stagingdb on a preview deployment" \
+    "(resolved name: '${DB_NAME:-<unset>}')." >&2
   exit 1
 fi
 python3 manage.py migrate --noinput
