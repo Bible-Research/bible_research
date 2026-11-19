@@ -120,8 +120,12 @@ resource "google_cloud_run_v2_job_iam_member" "all_jobs_scheduler_invoker" {
 # # No container overrides — deliberately a bare ``jobs:run``, because
 # # ``--only`` bypasses the schedule predicate and would run the job
 # # on the 28th regardless. On days 28-31 nothing else in JOBS can
-# # match (dom:3 is out of range; the Gemini/Edge entries are
-# # ``manual``). CAUTION: a future JOBS entry whose schedule matches
+# # match except ``check_note_translations`` (same
+# # ``last_day_of_month`` predicate — would double-fire on the
+# # real last day alongside its own live trigger in
+# # note_translations.tf); dom:3 is out of range and the
+# # Gemini/Edge entries are ``manual``. CAUTION: a future JOBS
+# # entry whose schedule matches
 # # any of 28-31 (e.g. ``daily``) would also run under this trigger —
 # # review the JOBS table when adding entries.
 # resource "google_cloud_scheduler_job" "eom_stt_timestamps" {

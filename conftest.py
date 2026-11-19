@@ -7,9 +7,9 @@ hand-rolled parallel settings), so tests see the production
 ``MIDDLEWARE`` chain. Only the deltas a test run genuinely
 requires are overridden:
 
-- ``DATABASES`` → SQLite in-memory (the local config.yaml DB is
-  a read-only production user and must never receive test
-  writes).
+- ``DATABASES`` → SQLite in-memory (the configured local DB —
+  `.env` `DATABASE_URL` — is a writable production user and
+  must never receive test writes).
 - Provider keys/secrets → dummy test values (tests mock the
   provider clients; the keys only need to exist).
 - Throttle rates → generous values: throttle history lives in

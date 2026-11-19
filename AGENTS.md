@@ -311,9 +311,12 @@ resolves an issue at the next GAE deploy.
   (**writable**, not the read-only `ai_agent` the `.env`'s
   `DATABASE_READ_URL` alternate carries), so `manage.py
   runserver` and `manage.py shell` operate on live production
-  data WITH write access. The `.env` header documents the
-  swap candidates (`DATABASE_LOCAL_URL` sqlite,
-  `DATABASE_READ_URL` read-only prod).
+  data WITH write access. The `.env` also carries
+  `DATABASE_LOCAL_URL` (writable `stagingdb`/`avnadmin`) and
+  `DATABASE_READ_URL` (read-only prod `ai_agent`) — but those
+  siblings are NOT auto-selected: `_db_config_from_env()`
+  reads only `DATABASE_URL`, so switching means editing that
+  one line.
 - Writes and DDL now SUCCEED — treat every local session as
   prod-capable; never attempt them deliberately. Read-only
   investigation remains the expectation: ORM reads work
@@ -589,18 +592,24 @@ Universal rules — follow exactly:
   the main checkout; remove the worktree + branch once the PR
   merges green. Full workflow: workspace `../AGENTS.md`
   "Repo-specific rules".
-- `terraform/scheduler.tf`: ALL Cloud Scheduler jobs are
-  currently commented out (`daily-edge-audio` per user
+- `terraform/scheduler.tf`: every Cloud Scheduler job in
+  this file is commented out (`daily-edge-audio` per user
   request, 2026-10-31) — do NOT re-enable without asking.
+  The one LIVE scheduler lives elsewhere:
+  `note-translations-audit` in
+  `terraform/note_translations.tf` (enabled) fires a plain
+  `jobs:run` on days 28-31 for `check_note_translations`.
   `daily-edge-audio` would
   trigger `all-jobs` daily with a `jobs:run` container-args
   override of `--only generate_edge_audio`; that override
   exists so the monthly `dom:3` entry cannot piggyback on the
   trigger. `eom-stt-timestamps` would fire a plain
   `jobs:run` on days 28-31 — the `last_day_of_month`
-  predicate gates it to the real last day, so a future
-  `daily` JOBS entry would ALSO run on 28-31 under that
-  trigger (review JOBS when adding entries).
+  predicate gates it to the real last day, and
+  `check_note_translations` (same predicate) would ALSO run
+  on that day, on top of its own live trigger; ditto any
+  future `daily` JOBS entry on 28-31 (review JOBS when
+  adding entries).
 - `terraform/all_jobs.tf`: the single `all-jobs` Cloud Run Job
   replaced the per-task `audio-generator` job (it reuses that SA and
   image repo, both still named `audio-generator`). Sub-jobs are
@@ -620,7 +629,11 @@ Universal rules — follow exactly:
   (`manual`; would be started only by the commented-out
   daily scheduler's `--only` override — the Everita voice)
   and `repair_audio_files`
-  (`manual`; manifest-driven artifact repair — see below).
+  (`manual`; manifest-driven artifact repair — see below),
+  plus `check_note_translations`
+  (`last_day_of_month`; the only entry with a live trigger —
+  `note-translations-audit` in `terraform/note_translations.tf`,
+  monthly coverage audit, Sentry-only output).
   Generated artifacts land under
   `audio_gemini/` and `audio_edge/` in the audio bucket (GCS
   modes `"gemini"`/`"edge"` in `bible/services/storage/gcs.py`)

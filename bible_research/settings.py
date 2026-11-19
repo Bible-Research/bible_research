@@ -324,8 +324,8 @@ else:
         _audio_settings_source = config
 
 # Tests always run on a local throwaway sqlite DB: the configured
-# connection is a read-only user against production that cannot
-# create the test database.
+# connection is a user against production that must never create
+# or write to the test database.
 if 'test' in sys.argv:
     DATABASES = {
         'default': {
@@ -415,9 +415,10 @@ if SENTRY_DSN:
     )
 
 # Audio / Cloud TTS settings are resolved from a single source per
-# environment (os.environ in cloud branches, the parsed config.yaml
-# dict locally). Both support .get(key, default), so one block covers
-# all three environments without duplication.
+# environment (os.environ in the .env/cloud branches, the parsed
+# config.yaml dict as legacy fallback). Both support
+# .get(key, default), so one block covers all environments
+# without duplication.
 _default_bucket = (
     f"{os.environ.get('GOOGLE_CLOUD_PROJECT', 'bible-research-489314')}"
     "-bible-audio"

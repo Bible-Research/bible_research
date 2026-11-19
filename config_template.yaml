@@ -1,4 +1,6 @@
 # This is an example configuration file.
+# NOTE: `config.yaml` is the LEGACY fallback — prefer `.env`
+# (see `.env.example`); settings reads `.env` first.
 # Copy this to a new file named `config.yaml` and fill in your actual values.
 # IMPORTANT: Do not commit your real `config.yaml` file to version control.
 

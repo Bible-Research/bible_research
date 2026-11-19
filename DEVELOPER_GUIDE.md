@@ -1962,8 +1962,11 @@ monthly STT timestamps pass, was started by the
 `eom-stt-timestamps` Cloud Scheduler job firing a plain
 `jobs:run` on days 28-31 — that trigger is commented out
 too; cron can't express "last day", so the predicate gates
-it), plus `generate_gemini_audio` and
-`generate_edge_audio` on `manual`
+it), plus `generate_gemini_audio`,
+`generate_edge_audio` and `repair_audio_files` on `manual`,
+and `check_note_translations` on `last_day_of_month` (the
+only entry with a live trigger —
+`note-translations-audit` in `terraform/note_translations.tf`)
 (the Edge entry was started daily by the `daily-edge-audio`
 Cloud Scheduler job via a `jobs:run` container-args override
 of `--only generate_edge_audio` — the job is commented out in
@@ -2741,7 +2744,8 @@ curl http://localhost:8000/api/v1/notes/ \
 
 ### Environment Variables
 
-For production, use environment variables instead of `config.yaml`:
+For any environment, prefer `.env`/environment variables
+over `config.yaml`:
 
 ```bash
 export SECRET_KEY='your-secret-key'
@@ -2759,7 +2763,9 @@ a staging deploy must supply `DATABASE_URL` explicitly —
 inside its own DOTENV payload or as a real env var (env
 vars win over DOTENV-carried values). Connect as
 `staging_rw` (database owner, read/write); `ai_agent` has
-read-only access, matching local dev's posture.
+read-only access — matching the `.env`'s `DATABASE_READ_URL`
+alternate, though the live `DATABASE_URL` is `avnadmin`
+(writable) today.
 `DB_SSL_CERT` is the same Aiven CA PEM in every
 environment. `stagingdb` is seeded from production (prod
 schema, all `bible_verse` rows, and the `Tester5`/`Daniels`
@@ -2819,7 +2825,10 @@ python manage.py collectstatic --noinput
 
 Backups are automated by `db_backups/local_db_backup.sh`, which
 reads the connection details from `config.yaml`
-(`DATABASES.default`) and runs `pg_dump` over TCP. No local
+(`DATABASES.default`) — the LEGACY file, literally, not
+`.env`: keep a `config.yaml` populated if you use this
+script (or port it to `.env`). It runs `pg_dump` over TCP.
+No local
 PostgreSQL server or role is needed — only the client tools.
 
 **Ubuntu/Debian setup** (first time only):
@@ -2840,8 +2849,8 @@ This writes a timestamped custom-format dump to
 `db_backups/backup_<YYYYMMDD_HHMMSS>.dump`.
 
 **Restore**: the dumps are custom format, so use `pg_restore`
-(not `psql`). The configured DB user is read-only, so restores
-target a local PostgreSQL instance:
+(not `psql`). Restores target a local PostgreSQL instance
+regardless of which user `.env`/`config.yaml` carries:
 
 ```bash
 # Install and start a local server (first time only)

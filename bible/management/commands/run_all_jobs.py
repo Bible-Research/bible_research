@@ -93,11 +93,11 @@ JOBS = [
         "manual",
     ),
     # Monthly note-translation coverage audit. The
-    # ``note-translations-audit`` Cloud Scheduler trigger would
-    # fire a plain ``jobs:run`` on days 28-31 (resource currently
-    # commented out in terraform/scheduler.tf); this predicate
-    # gates it to the real last day. Emits one Sentry
-    # captureMessage
+    # ``note-translations-audit`` Cloud Scheduler trigger fires
+    # a plain ``jobs:run`` on days 28-31 (ENABLED in
+    # terraform/note_translations.tf — the one live scheduler);
+    # this predicate gates it to the real last day. Emits one
+    # Sentry captureMessage
     # when per-language misses exist, logs-only on a clean run.
     (
         "check_note_translations",

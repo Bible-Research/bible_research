@@ -109,7 +109,7 @@ venv/bin/python manage.py check_note_translations
 ## Kill switch and config
 
 All settings resolve via the `_audio_settings_source` chain
-(env > `DOTENV`/`env-file` > `config.yaml`):
+(`.env`/env > `DOTENV`/`env-file` > `config.yaml`):
 
 - `NOTE_TARGET_LANGUAGES` (default `["en","lv"]`) — empty =
   pipeline off. Prod value lives in `env-file` as `en,lv`.
