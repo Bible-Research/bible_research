@@ -1872,8 +1872,10 @@ read from `settings.API_BIBLE_KEY` (`config.yaml` locally,
 Secret Manager / env in prod). `ApiBibleClient` raises
 `ProviderConfigError` (a `ValueError` subclass) at
 construction when the key is unset, empty, or whitespace-only
-— API.Bible filesets answer `502` `provider_error` ("Bible
-provider is not configured"), and the translations listing
+— API.Bible-backed content requests answer `502`
+`provider_error` ("Bible provider is not configured"; the
+structure endpoint still answers via the canonical fallback),
+and the translations listing
 omits NIV entirely, marked `degraded` + `no-store` so it
 recovers the moment a key is configured.
 
