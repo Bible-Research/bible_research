@@ -1,111 +1,64 @@
 #!/bin/sh
 # Dependency install for the `bible-research-api` Vercel
 # deployment (staging branch only — see
-# `git.deploymentEnabled` in vercel.json). Replaces the
-# Django preset's own installer, which ignores
-# `.python-version` and resolves wheels against the newest
-# managed CPython (3.14+): compiled extensions built for
-# cp314 (psycopg2, grpcio, pillow, ...) cannot be imported
-# by the CPython 3.12 runtime the build command and the
-# function actually run — observed as `No module named
-# 'psycopg2._psycopg'` → ImproperlyConfigured at migrate
-# time. `--target` must stay `.vercel_python_packages`
-# (where the preset expects deps on sys.path).
+# `git.deploymentEnabled` in vercel.json).
+#
+# With `"framework": "django"` the preset creates its own
+# virtualenv at `.vercel/python/.venv` BEFORE this command
+# runs and puts it on PATH. Both the preset's
+# DJANGO_SETTINGS probe (it imports manage.py to find the
+# WSGI entrypoint) and the function bundle (the venv is
+# vendored into the Lambda) read THAT venv. Installing
+# anywhere else — e.g. the legacy
+# `--target .vercel_python_packages` layout — leaves the
+# venv empty and the build dies at the probe with
+# `[DJANGO_SETTINGS_FAILED] ModuleNotFoundError: No module
+# named 'django'`.
 set -e
-# Trace every command — staging-only build, and the log
-# is the only observable output while iterating on the
-# install environment.
+# Trace every command — the build log is the only observable
+# output while iterating on the install environment.
 set -x
-# installCommand runs at the repo root in practice; pin
-# cwd anyway so `.python-version`, `requirements.txt` and
-# the target dir resolve regardless.
+# installCommand runs at the repo root in practice; pin cwd
+# anyway so `.python-version` and `requirements.txt` resolve
+# regardless.
 cd "$(dirname "$0")/.."
 
-PYVER="$(head -n1 .python-version | tr -d '[:space:]')"
-PYMM="$(echo "$PYVER" | cut -d. -f1-2)"
-TARGET=.vercel_python_packages
-
-# Only a numeric X.Y pin is supported below — a name or
-# major-only pin must fail loudly rather than resolve the
-# newest interpreter and reproduce the drift bug this
-# script exists to fix.
-case "$PYMM" in
-  [0-9]*.[0-9]*) ;;
-  *)
-    echo "vercel_install: unsupported .python-version" \
-      "'$PYVER' (need X.Y)" >&2
-    exit 1
-    ;;
-esac
-
-# Diagnostics — the build log must show which installer
-# ran and which interpreters the image actually offers.
-echo "vercel_install: pin=$PYVER"
-echo "vercel_install: uv=$(command -v uv || echo absent)"
-for P in "python$PYMM" python3; do
-  echo "vercel_install: $P=$(command -v "$P" || echo absent)"
-done
-MANAGED="$(ls -d \
-  /uv/python/versions/*/bin/"python$PYMM" \
-  "$HOME"/.local/share/uv/python/*/bin/"python$PYMM" \
-  2>/dev/null | head -1)"
-echo "vercel_install: managed=${MANAGED:-none}"
+# The venv interpreter: preset-created path first, PATH
+# fallback (the preset puts .venv/bin on PATH for
+# installCommand, so `python3` IS the venv python — observed
+# in build logs). `uv pip install --python <venv>` installs
+# into that interpreter's environment and resolves wheels
+# for ITS version, so no .python-version cross-check is
+# needed (the preset built the venv from that pin).
+PYBIN="$PWD/.vercel/python/.venv/bin/python"
+if [ ! -x "$PYBIN" ]; then
+  echo "vercel_install: preset venv missing — deps may" \
+    "land outside the vendored venv" >&2
+  PYBIN="$(command -v python3 || true)"
+fi
+[ -n "$PYBIN" ] || {
+  echo "vercel_install: no venv python / python3 found" >&2
+  exit 1
+}
+echo "vercel_install: python=$PYBIN"
+"$PYBIN" -c 'import sys; print(sys.executable)'
+"$PYBIN" -c 'import sys; print(sys.version)'
 
 if command -v uv >/dev/null 2>&1 && \
-   uv pip install \
-     --python "$PYVER" \
-     --target "$TARGET" \
-     -r requirements.txt; then
+   uv pip install --python "$PYBIN" -r requirements.txt; then
   exit 0
 fi
 
-# pip3 can belong to a different interpreter than
-# `python3` — Vercel's image carries a system Python for
-# its own tooling. Wheels resolve for pip3's interpreter,
-# so require it to match the pin.
-PIP3V="$(pip3 --version 2>/dev/null | sed -n \
-  's/.*(python \([0-9][0-9.]*\)).*/\1/p')"
-PIP3MM="$(echo "$PIP3V" | cut -d. -f1-2)"
-echo "vercel_install: pip3 python=${PIP3V:-absent}"
-if [ -n "$PIP3V" ] && [ "$PIP3MM" = "$PYMM" ] && \
-   pip3 install --target "$TARGET" -r requirements.txt; then
+# uv-created venvs ship no pip — bootstrap it via ensurepip
+# for images where the uv binary is absent.
+if "$PYBIN" -m ensurepip >/dev/null 2>&1 && \
+   "$PYBIN" -m pip install -r requirements.txt; then
   exit 0
 fi
 
-# uv is not on PATH for installCommand — the preset
-# invokes its own binary by absolute path. Fall back to
-# pip, but only on an interpreter matching the pin: a
-# newer one (e.g. a 3.14 build venv) reproduces the
-# original cp314-vs-3.12 wheel bug. uv-managed CPython
-# lives under its own dirs (the runtime traceback showed
-# /uv/python/versions/...), not on PATH, so glob those
-# before the PATH names.
-for PY in \
-  /uv/python/versions/*/bin/"python$PYMM" \
-  "$HOME"/.local/share/uv/python/*/bin/"python$PYMM" \
-  "python$PYMM" \
-  python3
-do
-  command -v "$PY" >/dev/null 2>&1 || [ -x "$PY" ] || \
-    continue
-  if ! PYV="$("$PY" -c 'import sys
-print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"; then
-    continue
-  fi
-  [ "$PYV" = "$PYMM" ] || continue
-  "$PY" -m pip --version >/dev/null 2>&1 || continue
-  if "$PY" -m pip install \
-       --target "$TARGET" \
-       -r requirements.txt; then
-    exit 0
-  fi
-done
-
-# Last resort: bootstrap the standalone uv binary; it
-# resolves wheels for $PYVER via managed interpreters
-# (the image carries cpython under uv's dirs; it can also
-# download one) regardless of what is on PATH.
-echo "vercel_install: no uv/pinned-pip; bootstrapping uv"
+# Last resort: standalone uv binary; `--python $PYBIN` still
+# installs into the venv regardless of where uv came from.
+echo "vercel_install: no uv/pip; bootstrapping uv"
 if command -v curl >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
 elif command -v wget >/dev/null 2>&1; then
@@ -120,7 +73,4 @@ UV_BIN="$HOME/.local/bin/uv"
   echo "vercel_install: uv bootstrap failed" >&2
   exit 1
 }
-"$UV_BIN" pip install \
-  --python "$PYVER" \
-  --target "$TARGET" \
-  -r requirements.txt
+"$UV_BIN" pip install --python "$PYBIN" -r requirements.txt

@@ -5,20 +5,33 @@
 # requirements are already installed and the `DOTENV` project
 # env var supplies DATABASE_STAGING_URL/DB_SSL_CERT.
 set -e
+# PYBIN below is relative — pin cwd to the repo root so it
+# resolves regardless of where buildCommand is invoked.
+cd "$(dirname "$0")/.."
 
-# The custom installCommand drops wheels into the flat target
-# dir `.vercel_python_packages`, which nothing puts on
-# sys.path for plain `python3` invocations during the build
-# (the preset only wires it into the function bundle).
-export PYTHONPATH="$PWD/.vercel_python_packages${PYTHONPATH:+:$PYTHONPATH}"
+# vercel_install.sh installs requirements into the preset's
+# own venv (.vercel/python/.venv) — use that interpreter
+# explicitly rather than relying on it staying on PATH.
+PYBIN="$PWD/.vercel/python/.venv/bin/python"
+if [ ! -x "$PYBIN" ]; then
+  echo "vercel_build: preset venv missing — manage.py runs" \
+    "under PATH python (deps may be absent)" >&2
+  PYBIN="$(command -v python3 || true)"
+fi
+[ -n "$PYBIN" ] || {
+  echo "vercel_build: no venv python / python3 found" >&2
+  exit 1
+}
 
 # Apply migrations, but never against a non-staging database.
+# Never add `set -x` here — the traced assignments below would
+# print the credential-bearing DATABASE_STAGING_URL.
 # On Vercel previews settings.py pins DATABASE_STAGING_URL;
 # the var may live inside the DOTENV payload rather than as a
 # real env var, so resolve it through the repo's own .env
 # parser first (same setdefault precedence: real env wins).
 if [ -z "$DATABASE_STAGING_URL" ] && [ -n "$DOTENV" ]; then
-  DATABASE_STAGING_URL=$(python3 -c '
+  DATABASE_STAGING_URL=$("$PYBIN" -c '
 import os
 from bible_research.dotenv import parse_dotenv
 print(parse_dotenv(os.environ["DOTENV"]).get("DATABASE_STAGING_URL", ""))
@@ -28,17 +41,17 @@ fi
 # an empty real env var would otherwise shadow a valid
 # DOTENV-carried URL (load_dotenv uses setdefault).
 export DATABASE_STAGING_URL
-# Stdlib parsing — dj_database_url lives in
-# .vercel_python_packages, which may not be importable here.
-# Print the resolved DB name (not a credential) so a refusal
-# log distinguishes "var unset" from "wrong database".
-DB_NAME=$(python3 -c '
+# Stdlib parsing keeps the guard independent of where the
+# install landed. Print the resolved DB name (not a
+# credential) so a refusal log distinguishes "var unset" from
+# "wrong database".
+DB_NAME=$("$PYBIN" -c '
 import os
 from urllib.parse import urlparse
 try:
     print(urlparse(
         os.environ["DATABASE_STAGING_URL"]
-    ).path.lstrip("/"))
+    ).path.strip("/"))
 except Exception:
     print("")
 ')
@@ -48,9 +61,9 @@ if [ "$DB_NAME" != "stagingdb" ]; then
     "(resolved name: '${DB_NAME:-<unset>}')." >&2
   exit 1
 fi
-python3 manage.py migrate --noinput
+"$PYBIN" manage.py migrate --noinput
 
 # The preset runs collectstatic automatically; running it here
 # too keeps static output populated even if a custom
 # buildCommand replaces the preset's own step. Idempotent.
-python3 manage.py collectstatic --noinput
+"$PYBIN" manage.py collectstatic --noinput
