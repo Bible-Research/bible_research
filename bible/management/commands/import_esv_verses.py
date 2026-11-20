@@ -3,8 +3,10 @@ import logging
 from datetime import datetime
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
 
 from bible.models import Verse
+from bible.utils.bible_books import get_dbt_book_id
 from bible.utils.provider_errors import (
     capture_internal_exception,
 )
@@ -41,17 +43,32 @@ def populate_verses():
     with open('bible/esv_bible_verses.json') as f:
         data = json.load(f)
 
+    existing = {
+        (v['book'], v['chapter'], v['verse'])
+        for v in Verse.objects.values('book', 'chapter', 'verse')
+    }
+    to_create = []
     for book, book_data in data.items():
+        dbt_book_id = get_dbt_book_id(book)
+        if dbt_book_id is None:
+            raise ValueError(
+                f'No DBT book id for {book!r} in '
+                'esv_bible_verses.json'
+            )
         chapters = book_data['chapters']
 
         for chapter, chapter_data in chapters.items():
-            verse_count = chapter_data['verse_count']
+            verse_count = int(chapter_data['verse_count'])
 
-            for verse in range(1, int(verse_count) + 1):
-                # Perform commit per verse to check db performance (for fun)
-                verse_obj = Verse(
+            for verse in range(1, verse_count + 1):
+                key = (book, int(chapter), verse)
+                if key in existing:
+                    continue
+                to_create.append(Verse(
                     book=book,
                     chapter=int(chapter),
-                    verse=verse
-                )
-                verse_obj.save()
+                    verse=verse,
+                    dbt_book_id=dbt_book_id,
+                ))
+    with transaction.atomic():
+        Verse.objects.bulk_create(to_create, ignore_conflicts=True)
