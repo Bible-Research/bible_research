@@ -140,8 +140,16 @@ book-list calls through `bibles_api`.
 
 API.Bible text responses carry a `meta` block with FUMS fields the
 frontend must report (license requirement). The API.Bible client
-needs `API_BIBLE_KEY` (settings/`config.yaml`); the registry and
-translations listing work without it.
+needs `API_BIBLE_KEY` (settings/`config.yaml`) — an unset, empty,
+or whitespace-only key counts as unconfigured
+(`apibible_configured()`): the client
+raises `ProviderConfigError` (a `ValueError` subclass → 502
+`provider_error`, Sentry `internal_error` at error level) and the
+translations listing omits NIV entirely, marked `degraded` +
+`no-store` so it recovers the moment the key is set. The registry
+itself still works without the key. The other provider clients
+raise the same `ProviderConfigError` for missing `ESV_KEY`/
+`DBT_KEY`.
 
 Book-name handling lives in `bible/utils/bible_books.py`
 (`get_dbt_book_id`, `get_book_name_from_id`, `get_testament`). There

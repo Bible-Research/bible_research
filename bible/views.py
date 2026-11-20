@@ -1065,8 +1065,11 @@ class TranslationListView(VercelEdgeCacheMixin, APIView):
 
     A DBT outage does not fail the request: the service falls
     back to the static registry entries and the response carries
-    ``"degraded": true`` (never cached). A failure outside the
-    DBT fetch still surfaces as 502 ``provider_error``.
+    ``"degraded": true`` (never cached). An unconfigured
+    ``API_BIBLE_KEY`` degrades the same way — the unservable
+    API.Bible entries are omitted rather than advertised. A
+    failure outside the DBT fetch still surfaces as 502
+    ``provider_error``.
 
     Query Parameters:
         - language_iso: Filter by ISO language code
@@ -1110,7 +1113,7 @@ class TranslationListView(VercelEdgeCacheMixin, APIView):
             return response
 
         try:
-            translations, dbt_failed = (
+            translations, degraded = (
                 TranslationService.get_live_translations(
                     language_iso
                 )
@@ -1140,13 +1143,14 @@ class TranslationListView(VercelEdgeCacheMixin, APIView):
             )
             body = {
                 'results': response_data,
-                'degraded': dbt_failed,
+                'degraded': degraded,
             }
             # Degraded responses are intentionally cached neither
             # server-side nor downstream — they must recover as
-            # soon as DBT does.
+            # soon as the catalog is complete again (DBT back,
+            # or API_BIBLE_KEY configured).
             response = Response(body)
-            if dbt_failed:
+            if degraded:
                 response['Cache-Control'] = 'no-store'
             else:
                 cache.set(

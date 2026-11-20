@@ -5,6 +5,7 @@ import logging
 from bible.utils.provider_errors import (
     capture_provider_exception,
 )
+from .apibible.client import apibible_configured
 from .fileset_groups import group_filesets
 from .providers import (
     ApiBibleProvider,
@@ -40,14 +41,18 @@ class TranslationService:
                 Defaults to None.
 
         Returns:
-            tuple: ``(translations, dbt_failed)`` — the processed
+            tuple: ``(translations, degraded)`` — the processed
                 translation list without video/audio-stream
                 filesets, and a flag that is ``True`` when the
-                live DBT fetch failed and the list only contains
-                static registry entries. The view surfaces the
-                flag as ``degraded`` so a DBT outage degrades the
-                response instead of breaking it; a truly fatal
-                error (registry/processing failure) still
+                catalog is incomplete: the live DBT fetch failed
+                (the list then only contains static registry
+                entries) or ``API_BIBLE_KEY`` is unconfigured
+                (the API.Bible entries are suppressed — every
+                request to that provider could only 502). The
+                view surfaces the flag as ``degraded`` so a
+                partial catalog degrades the response instead
+                of breaking it — and is never cached; a truly
+                fatal error (registry/processing failure) still
                 propagates to the view's 502 path.
         """
         logger.info(
@@ -78,6 +83,17 @@ class TranslationService:
             # any other provider failure (warning level).
             capture_provider_exception(e)
 
+        # An unconfigured API.Bible credential suppresses the
+        # NIV registry listing (``ApiBibleProvider`` returns no
+        # entries) — the catalog is then incomplete, so degrade
+        # it like a DBT outage: ``no-store`` and never cached,
+        # recovering as soon as the key is configured.
+        apibible_unconfigured = not apibible_configured()
+        if apibible_unconfigured:
+            logger.warning(
+                "API_BIBLE_KEY is not configured; omitting "
+                "API.Bible translations from the listing."
+            )
         registry_entries = []
         for provider_cls in _REGISTRY_PROVIDERS:
             registry_entries += provider_cls().translation_listing(
@@ -92,7 +108,7 @@ class TranslationService:
             options = group_filesets(entry)
             entry['text_options'] = options['text_options']
             entry['audio_options'] = options['audio_options']
-        return merged, dbt_failed
+        return merged, dbt_failed or apibible_unconfigured
 
     @staticmethod
     def _merge_by_abbr(processed, registry_entries):

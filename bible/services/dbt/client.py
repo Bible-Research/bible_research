@@ -25,7 +25,10 @@ from openapi_client.configuration import Configuration
 from openapi_client.api_client import ApiClient
 from openapi_client.exceptions import ApiException
 
-from bible.utils.provider_errors import is_upstream_failure
+from bible.utils.provider_errors import (
+    ProviderConfigError,
+    is_upstream_failure,
+)
 
 
 # Bound every upstream call so a stalled b4.dbt.io socket cannot
@@ -103,7 +106,9 @@ class DBTClient:
         api_key = api_key or getattr(settings, 'DBT_KEY', None)
 
         if not api_key:
-            raise ValueError("DBT_KEY not found in settings.")
+            raise ProviderConfigError(
+                "DBT_KEY not found in settings."
+            )
 
         self.api_key = api_key
         self.base_url = "https://b4.dbt.io/api"

@@ -9,6 +9,7 @@ import requests
 from django.conf import settings
 
 from bible.utils.bible_books import get_book_name_from_id
+from bible.utils.provider_errors import ProviderConfigError
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class ESVClient:
     def __init__(self, api_key=None):
         api_key = api_key or getattr(settings, "ESV_KEY", None)
         if not api_key:
-            raise ValueError("ESV_KEY not configured.")
+            raise ProviderConfigError("ESV_KEY not configured.")
         self.api_key = api_key
         self.session = requests.Session()
         self.session.headers.update(

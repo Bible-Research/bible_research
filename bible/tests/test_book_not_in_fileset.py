@@ -360,11 +360,11 @@ def test_service_groups_dbt_filesets(
     from bible.services.translation_service import (
         TranslationService,
     )
-    translations, dbt_failed = (
+    translations, degraded = (
         TranslationService.get_live_translations('lvs')
     )
 
-    assert not dbt_failed
+    assert not degraded
     assert len(translations) == 1
     entry = translations[0]
     assert entry['filesets'] == [

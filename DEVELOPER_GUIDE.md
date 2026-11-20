@@ -103,9 +103,10 @@ DRF throttling and these provider-data caches:
 
 - `GET /api/v1/bible/translations/` — the whole response is
   cached per `language_iso` for 6 h and carries
-  `Cache-Control: public, max-age=21600`. A DBT outage returns
-  the registry-only list with `"degraded": true`, which is
-  never cached (`Cache-Control: no-store`). Error responses
+  `Cache-Control: public, max-age=21600`. A DBT outage or an
+  unconfigured `API_BIBLE_KEY` returns the registry-only /
+  NIV-less list with `"degraded": true`, which is never
+  cached (`Cache-Control: no-store`). Error responses
   are not cached either.
 - `GET /api/v1/bible/copyright/` — cached per
   `(provider, bible_id)` for 24 h (copyright text is static)
@@ -762,8 +763,11 @@ GET /api/v1/bible/translations/
 list with bundled registry translations (ESV API, API.Bible NIV,
 SWORD), deduplicated by `abbr`. If the DBT fetch fails the
 request still returns `200` with the registry-only list and
-`"degraded": true` (`Cache-Control: no-store`); any other
-failure keeps the `502`/`provider_error` contract. Successful
+`"degraded": true` (`Cache-Control: no-store`). An unset,
+empty, or whitespace-only `API_BIBLE_KEY` degrades the same
+way — the unservable API.Bible entries are omitted rather
+than advertised; any other failure keeps the
+`502`/`provider_error` contract. Successful
 responses are cached per `language_iso` for 6 h (see
 *Caching*); the DBT listing itself is truncated at 500 rows.
 
@@ -1866,9 +1870,14 @@ verses = client.get_verses(
 **Authentication**: `api-key` header (never a query param);
 read from `settings.API_BIBLE_KEY` (`config.yaml` locally,
 Secret Manager / env in prod). `ApiBibleClient` raises
-`ValueError` at construction when the key is unset — the NIV
-filesets degrade to `provider_error` responses until a key is
-configured.
+`ProviderConfigError` (a `ValueError` subclass) at
+construction when the key is unset, empty, or whitespace-only
+— API.Bible-backed content requests answer `502`
+`provider_error` ("Bible provider is not configured"; the
+structure endpoint still answers via the canonical fallback),
+and the translations listing
+omits NIV entirely, marked `degraded` + `no-store` so it
+recovers the moment a key is configured.
 
 **Endpoints Used**:
 - `GET /bibles/{bible_id}/chapters/{BOOK}.{n}` - chapter text

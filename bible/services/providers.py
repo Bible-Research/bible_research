@@ -45,6 +45,7 @@ from google.api_core import exceptions as gcs_exceptions
 
 from bible.services import chapter_cache
 from bible.services.apibible.client import (
+    apibible_configured,
     get_default_apibible_client,
 )
 from bible.services.apibible.registry import (
@@ -716,6 +717,14 @@ class ApiBibleProvider(Provider):
         }
 
     def translation_listing(self, language_iso=None):
+        # An unset/empty ``API_BIBLE_KEY`` means every
+        # API.Bible request can only 502 — advertising NIV in
+        # the catalog would route users to a guaranteed-failing
+        # provider (Sentry REACTIVE-BIBLE-WEB-P/-Q). The caller
+        # flags the listing ``degraded`` so the shorter catalog
+        # is never cached.
+        if not apibible_configured():
+            return []
         return _filter_by_iso(
             get_apibible_translation_listing(), language_iso
         )
