@@ -263,6 +263,26 @@ def test_esv_id_answers_from_registry_license(
 
 @pytest.mark.django_db
 @patch('bible.services.providers.get_default_dbt_client')
+def test_esv_listing_abbr_answers_from_registry_license(
+    mock_get_client, client
+):
+    """``bible_id=ESV`` canonicalizes to ``ENGESV_API`` and
+    returns the same registry license — before the abbr
+    canonicalizer it fell through to DBT and 404'd
+    (Sentry REACTIVE-BIBLE-WEB-N)."""
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'ESV'})
+
+    assert response.status_code == status.HTTP_200_OK
+    entry = response.json()['data'][0]
+    assert entry['id'] == 'ESV'
+    assert entry['copyright'] == (
+        'Copyright Crossway. See api.esv.org.'
+    )
+    mock_get_client.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
 def test_sword_id_and_abbr_answer_from_registry_license(
     mock_get_client, client
 ):
