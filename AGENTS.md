@@ -152,6 +152,16 @@ is no `__init__.py` in `bible/utils/` — it is a namespace package.
 `ReadingPositionSerializer.validate_book` validates names through
 `get_dbt_book_id`.
 
+`Verse.book` stores the seed file's spelling —
+`esv_bible_verses.json` keys SNG as `Song of Songs` while the
+canonical name clients send is `Song of Solomon`. Matching
+stored rows on the client-supplied name must go through
+`dbt_book_id` (`resolve_verse_refs`, `POST /notes/linked/`,
+`?ordering=verse` book-order mapping); serializers and
+`order-index` report the canonical title via
+`get_book_name_from_id` so API responses always carry
+`Song of Solomon`.
+
 ## Endpoints
 
 `bible/urls.py`:
