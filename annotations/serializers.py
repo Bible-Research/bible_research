@@ -58,18 +58,21 @@ def subtree_tag_ids(tag, user=None):
 
 
 def dedupe_verse_refs(verse_refs):
-    """Drop duplicate ``{book, chapter, verse}`` refs — book is
-    matched case-insensitively — preserving first-seen order.
+    """Drop duplicate ``{book, chapter, verse}`` refs preserving
+    first-seen order.
 
-    Duplicate refs would otherwise write duplicate NoteVerse
-    links (guarded by the ``unique_note_verse_link`` constraint
-    once its migration lands).
+    The book key is the resolved DBT id when one exists, so
+    'Song of Songs' and 'Song of Solomon' count as the same
+    ref — both resolve to the same stored row in
+    ``resolve_verse_refs`` and would otherwise write duplicate
+    NoteVerse links (``unique_note_verse_link`` → 500).
+    Unresolvable names fall back to case-insensitive matching.
     """
     seen = set()
     deduped = []
     for ref in verse_refs:
         key = (
-            ref['book'].lower(),
+            (get_dbt_book_id(ref['book']) or ref['book']).lower(),
             ref['chapter'],
             ref['verse'],
         )

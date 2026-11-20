@@ -1280,6 +1280,38 @@ class NoteCreateViewTest(TestCase):
             note.verses.first().book, 'Song of Songs'
         )
 
+    def test_create_note_dedupes_alias_spellings(self):
+        """'Song of Songs' and 'Song of Solomon' in one request
+        resolve to the same row — the dedupe key canonicalizes
+        the book so only one NoteVerse link is written instead
+        of tripping unique_note_verse_link."""
+        Verse.objects.create(
+            book='Song of Songs',
+            chapter=1,
+            verse=1,
+            dbt_book_id='SNG',
+        )
+        payload = {
+            'note_text': 'Both spellings in one note',
+            'tag': self.tag.id,
+            'verse_references': [
+                {
+                    'book': 'Song of Songs',
+                    'chapter': 1,
+                    'verse': 1,
+                },
+                {
+                    'book': 'Song of Solomon',
+                    'chapter': 1,
+                    'verse': 1,
+                },
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        note = Note.objects.get(user=self.user)
+        self.assertEqual(note.verses.count(), 1)
+
     def test_create_ignores_client_tag_position(self):
         """tag_position is read-only on write: a client-supplied
         value is ignored (ordering is owned by reorder/move)."""
