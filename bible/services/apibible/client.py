@@ -67,7 +67,10 @@ class ApiBibleClient:
 
     def __init__(self, api_key=None):
         api_key = api_key or getattr(settings, "API_BIBLE_KEY", None)
-        if not api_key:
+        # ``.strip()`` keeps this aligned with
+        # ``apibible_configured()`` — a whitespace-only key is
+        # truthy but just as unusable upstream.
+        if not (api_key or "").strip():
             raise ProviderConfigError(
                 "API_BIBLE_KEY not configured."
             )

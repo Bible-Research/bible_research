@@ -140,8 +140,9 @@ book-list calls through `bibles_api`.
 
 API.Bible text responses carry a `meta` block with FUMS fields the
 frontend must report (license requirement). The API.Bible client
-needs `API_BIBLE_KEY` (settings/`config.yaml`) — an unset OR EMPTY
-key counts as unconfigured (`apibible_configured()`): the client
+needs `API_BIBLE_KEY` (settings/`config.yaml`) — an unset, empty,
+or whitespace-only key counts as unconfigured
+(`apibible_configured()`): the client
 raises `ProviderConfigError` (a `ValueError` subclass → 502
 `provider_error`, Sentry `internal_error` at error level) and the
 translations listing omits NIV entirely, marked `degraded` +

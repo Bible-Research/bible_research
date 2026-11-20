@@ -919,6 +919,15 @@ class ApiBibleUnconfiguredKeyTests(TestCase):
             with self.assertRaises(ProviderConfigError):
                 ApiBibleClient(api_key=None)
 
+    def test_whitespace_key_is_unconfigured(self):
+        """A whitespace-only key is truthy but unusable — the
+        constructor and ``apibible_configured`` agree it is
+        unconfigured rather than letting it 401 upstream."""
+        with override_settings(API_BIBLE_KEY="   "):
+            self.assertFalse(apibible_configured())
+            with self.assertRaises(ProviderConfigError):
+                ApiBibleClient(api_key=None)
+
     def test_config_error_maps_to_provider_error(self):
         fields = provider_error_fields(
             ProviderConfigError("API_BIBLE_KEY not configured.")
@@ -960,6 +969,12 @@ class ApiBibleUnconfiguredKeyTests(TestCase):
         with an empty key 502s — now with a fixed, honest
         message instead of ``(ValueError)``."""
         from django.urls import reverse
+        from bible.services.apibible import client as apibible_client
+        # The module-global singleton could already hold a real
+        # client if an earlier test built one — reset it so the
+        # empty-key path is the one under test regardless of
+        # ordering.
+        apibible_client._default_client = None
         client = APIClient()
         with override_settings(API_BIBLE_KEY=""):
             resp = client.get(
