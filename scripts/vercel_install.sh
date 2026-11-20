@@ -30,7 +30,7 @@ cd "$(dirname "$0")/.."
 # into that interpreter's environment and resolves wheels
 # for ITS version, so no .python-version cross-check is
 # needed (the preset built the venv from that pin).
-PYBIN=".vercel/python/.venv/bin/python"
+PYBIN="$PWD/.vercel/python/.venv/bin/python"
 if [ ! -x "$PYBIN" ]; then
   echo "vercel_install: preset venv missing — deps may" \
     "land outside the vendored venv" >&2

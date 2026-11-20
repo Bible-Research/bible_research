@@ -12,10 +12,10 @@ cd "$(dirname "$0")/.."
 # vercel_install.sh installs requirements into the preset's
 # own venv (.vercel/python/.venv) — use that interpreter
 # explicitly rather than relying on it staying on PATH.
-PYBIN=".vercel/python/.venv/bin/python"
+PYBIN="$PWD/.vercel/python/.venv/bin/python"
 if [ ! -x "$PYBIN" ]; then
-  echo "vercel_build: preset venv missing — deps may" \
-    "land outside the vendored venv" >&2
+  echo "vercel_build: preset venv missing — manage.py runs" \
+    "under PATH python (deps may be absent)" >&2
   PYBIN="$(command -v python3 || true)"
 fi
 [ -n "$PYBIN" ] || {
@@ -24,6 +24,8 @@ fi
 }
 
 # Apply migrations, but never against a non-staging database.
+# Never add `set -x` here — the traced assignments below would
+# print the credential-bearing DATABASE_STAGING_URL.
 # On Vercel previews settings.py pins DATABASE_STAGING_URL;
 # the var may live inside the DOTENV payload rather than as a
 # real env var, so resolve it through the repo's own .env
@@ -49,7 +51,7 @@ from urllib.parse import urlparse
 try:
     print(urlparse(
         os.environ["DATABASE_STAGING_URL"]
-    ).path.lstrip("/"))
+    ).path.strip("/"))
 except Exception:
     print("")
 ')
