@@ -5,12 +5,19 @@
 # requirements are already installed and the `DOTENV` project
 # env var supplies DATABASE_STAGING_URL/DB_SSL_CERT.
 set -e
+# PYBIN below is relative — pin cwd to the repo root so it
+# resolves regardless of where buildCommand is invoked.
+cd "$(dirname "$0")/.."
 
 # vercel_install.sh installs requirements into the preset's
 # own venv (.vercel/python/.venv) — use that interpreter
 # explicitly rather than relying on it staying on PATH.
 PYBIN=".vercel/python/.venv/bin/python"
-[ -x "$PYBIN" ] || PYBIN="$(command -v python3)"
+if [ ! -x "$PYBIN" ]; then
+  echo "vercel_build: preset venv missing — deps may" \
+    "land outside the vendored venv" >&2
+  PYBIN="$(command -v python3 || true)"
+fi
 [ -n "$PYBIN" ] || {
   echo "vercel_build: no venv python / python3 found" >&2
   exit 1

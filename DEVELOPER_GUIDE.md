@@ -2738,10 +2738,13 @@ branches never build — prod stays GAE-only) and serves it at
 `manage.py` → `WSGI_APPLICATION` and collectstatics
 automatically; dependencies come from
 `scripts/vercel_install.sh` (the project's Install
-Command), which pins `uv pip install` to `.python-version`
-— the preset's own installer ignores it and resolves
-wheels for its newest CPython, which the pinned runtime
-cannot import.
+Command), which installs requirements into the preset's
+own `.vercel/python/.venv` — the preset creates it from
+`.python-version` before installCommand runs, probes it for
+`DJANGO_SETTINGS_MODULE`, and vendors it into the function
+bundle. Deps installed anywhere else (e.g. a `--target`
+dir) leave the probe without Django and the build fails
+with `[DJANGO_SETTINGS_FAILED]`.
 `scripts/vercel_build.sh` (the project's Build Command)
 additionally runs `migrate` — so every staging deploy also
 brings `stagingdb`'s schema up to date — then collectstatics

@@ -31,12 +31,17 @@ cd "$(dirname "$0")/.."
 # for ITS version, so no .python-version cross-check is
 # needed (the preset built the venv from that pin).
 PYBIN=".vercel/python/.venv/bin/python"
-[ -x "$PYBIN" ] || PYBIN="$(command -v python3)"
+if [ ! -x "$PYBIN" ]; then
+  echo "vercel_install: preset venv missing — deps may" \
+    "land outside the vendored venv" >&2
+  PYBIN="$(command -v python3 || true)"
+fi
 [ -n "$PYBIN" ] || {
   echo "vercel_install: no venv python / python3 found" >&2
   exit 1
 }
 echo "vercel_install: python=$PYBIN"
+"$PYBIN" -c 'import sys; print(sys.executable)'
 "$PYBIN" -c 'import sys; print(sys.version)'
 
 if command -v uv >/dev/null 2>&1 && \

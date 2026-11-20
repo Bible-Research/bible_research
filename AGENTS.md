@@ -577,10 +577,12 @@ Universal rules — follow exactly:
   stays GAE-only). Vercel's Django preset auto-detects
   `manage.py` → `WSGI_APPLICATION` and runs collectstatic
   itself; `scripts/vercel_install.sh` is the Install
-  Command, pinning `uv pip install` to `.python-version`
-  (the preset's installer ignores it and resolves wheels
-  for its newest CPython, which the pinned runtime cannot
-  import);
+  Command, installing requirements into the preset's own
+  `.vercel/python/.venv` — created from `.python-version`
+  before installCommand runs, probed for
+  `DJANGO_SETTINGS_MODULE`, and vendored into the function
+  bundle (deps installed anywhere else break the build at
+  the settings probe);
   `scripts/vercel_build.sh` additionally applies migrations
   (refuses non-`stagingdb` `DATABASE_STAGING_URL`s) so
   `stagingdb`'s schema tracks `staging`.
