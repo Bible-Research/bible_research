@@ -1251,6 +1251,35 @@ class NoteCreateViewTest(TestCase):
         self.assertEqual(note.verses.count(), 1)
         self.assertEqual(note.verses.first().verse, 16)
 
+    def test_create_note_resolves_stored_book_alias(self):
+        """'Song of Solomon' resolves rows stored as
+        'Song of Songs' — the seed file uses the latter while
+        clients send the canonical name."""
+        Verse.objects.create(
+            book='Song of Songs',
+            chapter=1,
+            verse=1,
+            dbt_book_id='SNG',
+        )
+        payload = {
+            'note_text': 'A note on Song of Solomon 1:1',
+            'tag': self.tag.id,
+            'verse_references': [
+                {
+                    'book': 'Song of Solomon',
+                    'chapter': 1,
+                    'verse': 1,
+                },
+            ],
+        }
+        resp = self.client.post(self.URL, payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        note = Note.objects.get(user=self.user)
+        self.assertEqual(note.verses.count(), 1)
+        self.assertEqual(
+            note.verses.first().book, 'Song of Songs'
+        )
+
     def test_create_ignores_client_tag_position(self):
         """tag_position is read-only on write: a client-supplied
         value is ignored (ordering is owned by reorder/move)."""
@@ -1499,6 +1528,50 @@ class LinkedNotesTest(TestCase):
         data = resp.json()
         self.assertEqual(data['count'], 0)
         self.assertEqual(data['results'], [])
+
+    def test_canonical_name_matches_stored_alias(self):
+        """A note on a verse stored as 'Song of Songs' is found
+        when the request uses the canonical client name
+        'Song of Solomon'."""
+        sng, _ = Verse.objects.get_or_create(
+            book='Song of Songs',
+            chapter=1,
+            verse=1,
+            defaults={'dbt_book_id': 'SNG'},
+        )
+        self._note(self.user, 'On SNG 1:1', [sng])
+        resp = self._post([
+            {
+                'book': 'Song of Solomon',
+                'chapter': 1,
+                'verse': 1,
+            },
+        ])
+        data = resp.json()
+        self.assertEqual(data['count'], 1)
+        self.assertEqual(
+            data['results'][0]['note_text'], 'On SNG 1:1'
+        )
+
+    def test_stored_alias_name_still_matches(self):
+        """The reverse direction keeps working: a request naming
+        the stored spelling 'Song of Songs' finds the same
+        note."""
+        sng, _ = Verse.objects.get_or_create(
+            book='Song of Songs',
+            chapter=1,
+            verse=1,
+            defaults={'dbt_book_id': 'SNG'},
+        )
+        self._note(self.user, 'On SNG 1:1', [sng])
+        resp = self._post([
+            {
+                'book': 'Song of Songs',
+                'chapter': 1,
+                'verse': 1,
+            },
+        ])
+        self.assertEqual(resp.json()['count'], 1)
 
     def test_book_name_matching_is_case_insensitive(self):
         self._note(self.user, 'Lowercase book', [self.v316])

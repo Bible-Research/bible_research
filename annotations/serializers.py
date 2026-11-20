@@ -82,7 +82,13 @@ def dedupe_verse_refs(verse_refs):
 def resolve_verse_refs(verse_refs):
     """Batch-fetch every Verse referenced by *verse_refs*.
 
-    Returns a dict keyed by ``(book.lower(), chapter, verse)``.
+    Returns a dict keyed by ``(book.lower(), chapter, verse)``
+    using the caller's spelling — stored rows may carry a
+    different-but-equivalent name ('Song of Songs' in the seed
+    file vs the canonical 'Song of Solomon' clients send), so a
+    ref whose book resolves to a DBT book id also matches on
+    ``dbt_book_id``. Refs whose book resolves to no id keep the
+    plain ``book__iexact`` match for unseeded/legacy rows.
     Raises ValidationError listing any refs that do not resolve.
     Book lookup is case-insensitive; when legacy duplicate Verse
     rows exist the last fetch wins rather than raising
@@ -98,18 +104,43 @@ def resolve_verse_refs(verse_refs):
     if not unique_keys:
         return {}
 
+    book_ids = {}
+    for book, _chapter, _verse in unique_keys:
+        if book not in book_ids:
+            book_ids[book] = get_dbt_book_id(book)
+
     query = Q()
     for book, chapter, verse in unique_keys:
-        query |= Q(
-            book__iexact=book,
-            chapter=chapter,
-            verse=verse,
-        )
+        book_id = book_ids[book]
+        clause = Q(chapter=chapter, verse=verse)
+        if book_id:
+            clause &= (
+                Q(book__iexact=book)
+                | Q(dbt_book_id__iexact=book_id)
+            )
+        else:
+            clause &= Q(book__iexact=book)
+        query |= clause
     fetched = Verse.objects.filter(query)
-    verse_map = {
-        (v.book.lower(), v.chapter, v.verse): v
-        for v in fetched
-    }
+
+    # Caller spellings grouped by resolved book id so a ref
+    # named 'song of solomon' maps onto a row stored as
+    # 'Song of Songs'.
+    inputs_by_book_id = {}
+    for book, book_id in book_ids.items():
+        if book_id:
+            inputs_by_book_id.setdefault(book_id, []).append(book)
+
+    verse_map = {}
+    for v in fetched:
+        direct = (v.book.lower(), v.chapter, v.verse)
+        if direct in unique_keys:
+            verse_map[direct] = v
+        stored_id = (v.dbt_book_id or '').upper()
+        for book in inputs_by_book_id.get(stored_id, ()):
+            key = (book, v.chapter, v.verse)
+            if key in unique_keys:
+                verse_map[key] = v
     missing = unique_keys - set(verse_map.keys())
     if missing:
         missing_str = ', '.join(
@@ -546,7 +577,15 @@ class NoteSerializer(serializers.ModelSerializer):
 
         dbt_book_id = verses[0].dbt_book_id
         chapter = verses[0].chapter
-        book_name = verses[0].book
+        # Stored rows can carry an alias spelling ('Song of
+        # Songs'); report the canonical title so clients see
+        # the same name they submitted ('Song of Solomon').
+        # Rows with an empty or unresolvable dbt_book_id keep
+        # their stored name.
+        try:
+            book_name = get_book_name_from_id(dbt_book_id)
+        except ValueError:
+            book_name = verses[0].book
 
         verse_numbers = [v.verse for v in verses]
 
