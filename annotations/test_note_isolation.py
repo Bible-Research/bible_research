@@ -223,6 +223,47 @@ class NoteIsolationTest(TestCase):
                 want = [notes[k].id for k in keys]
                 self.assertEqual(ids, want, f'ordering={ordering}')
 
+    def test_verse_ordering_maps_stored_book_alias(self):
+        """?ordering=verse maps the stored 'Song of Songs'
+        spelling to SNG's canonical order — without the alias
+        mapping the note would sort at the default 999, behind
+        Revelation."""
+        tag = Tag.objects.create(user=self.user, name='AliasTag')
+        specs = [
+            ('gen', 'Genesis', 1, 1),
+            ('rev', 'Revelation', 1, 1),
+            ('sng', 'Song of Songs', 1, 1),
+        ]
+        notes = {}
+        for key, book, chapter, vnum in specs:
+            verse, _ = Verse.objects.get_or_create(
+                book=book,
+                chapter=chapter,
+                verse=vnum,
+                defaults={'dbt_book_id': {
+                    'gen': 'GEN', 'rev': 'REV', 'sng': 'SNG',
+                }[key]},
+            )
+            note = Note.objects.create(
+                user=self.user, tag=tag,
+                note_text=f'order {key}',
+            )
+            NoteVerse.objects.create(note=note, verse=verse)
+            notes[key] = note
+
+        with patch(
+            'bible.services.providers.get_default_dbt_client',
+            side_effect=ValueError('DBT disabled in tests'),
+        ):
+            resp = self.client.get(
+                self.LIST_URL,
+                {'tag_id': tag.id, 'ordering': 'verse'},
+            )
+        self.assertEqual(resp.status_code, 200)
+        ids = [n['id'] for n in resp.json()['results']]
+        want = [notes[k].id for k in ('gen', 'sng', 'rev')]
+        self.assertEqual(ids, want)
+
     def test_untagged_order_index(self):
         """GET order-index/?tag_id=untagged resolves the
         sentinel — notes with no tag, matching GET /notes/ and

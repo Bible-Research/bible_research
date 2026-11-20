@@ -103,6 +103,27 @@ def test_engkjv_uses_bundled_english_structure(
 
 
 @pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+def test_engkjv_bundled_structure_covers_song_of_songs(
+    mock_get_client, client
+):
+    """The bundled verse file spells the book 'Song of Songs'
+    while the canonical name is 'Song of Solomon' — the
+    lookup normalizes through the book id so SNG still reports
+    its 8 chapters (and no other book resolves empty)."""
+    response = client.get(STRUCTURE_URL, {'fileset_id': 'ENGKJV'})
+
+    assert response.status_code == status.HTTP_200_OK
+    books = response.json()['books']
+    by_id = {b['book_id']: b for b in books}
+    assert by_id['SNG']['name'] == 'Song of Solomon'
+    assert by_id['SNG']['testament'] == 'OT'
+    assert by_id['SNG']['chapters'] == list(range(1, 9))
+    assert all(b['chapters'] for b in books)
+    mock_get_client.return_value.get_books.assert_not_called()
+
+
+@pytest.mark.django_db
 @patch('bible.services.structure.get_default_dbt_client')
 def test_sword_fileset_gets_canonical_names(
     mock_get_client, client

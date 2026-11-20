@@ -780,18 +780,38 @@ class NoteViewSet(viewsets.ModelViewSet):
         to -created_at and '-custom' to created_at. The verse/
         created orderings are unchanged.
         """
-        from bible.utils.bible_books import BOOK_ORDER_MAP
+        from bible.utils.bible_books import (
+            BOOK_ORDER_MAP,
+            _BOOK_ALIASES,
+            _book_title,
+        )
         from django.db.models import Min, Case, When, IntegerField
 
         if ordering_param in ['verse', '-verse']:
-            # Annotate with first verse info
+            # Annotate with first verse info. Stored book names
+            # can differ from the canonical BOOK_ORDER_MAP
+            # titles ('Song of Songs' rows vs 'Song of Solomon')
+            # — the alias spellings from _BOOK_ALIASES must map
+            # to the same order or those notes sink to 999.
+            alias_titles = {}
+            for alias, canonical in _BOOK_ALIASES.items():
+                canonical_title = _book_title(canonical)
+                if canonical_title in BOOK_ORDER_MAP:
+                    alias_titles.setdefault(
+                        canonical_title, set()
+                    ).add(_book_title(alias))
             queryset = queryset.annotate(
                 first_book=Min('verses__book'),
                 first_chapter=Min('verses__chapter'),
                 first_verse=Min('verses__verse'),
                 book_order=Case(
                     *[
-                        When(first_book=book, then=order)
+                        When(
+                            first_book__in={
+                                book, *alias_titles.get(book, ())
+                            },
+                            then=order,
+                        )
                         for book, order in BOOK_ORDER_MAP.items()
                     ],
                     default=999,
@@ -1144,11 +1164,25 @@ class NoteViewSet(viewsets.ModelViewSet):
 
         query = Q()
         for ref in serializer.validated_data['verse_references']:
-            query |= Q(
+            clause = Q(
                 verses__book__iexact=ref['book'],
                 verses__chapter=ref['chapter'],
                 verses__verse=ref['verse'],
             )
+            book_id = get_dbt_book_id(ref['book'])
+            if book_id:
+                # Stored rows may spell the book differently
+                # ('Song of Songs' vs the client's canonical
+                # 'Song of Solomon') — also match on the
+                # canonical book id. chapter/verse stay inside
+                # each OR branch so a split multi-valued join
+                # cannot smear coordinates across refs.
+                clause |= Q(
+                    verses__dbt_book_id=book_id,
+                    verses__chapter=ref['chapter'],
+                    verses__verse=ref['verse'],
+                )
+            query |= clause
         notes = (
             Note.objects
             .filter(user=user)
@@ -1349,11 +1383,22 @@ class NoteViewSet(viewsets.ModelViewSet):
             verses = list(note.verses.all())
             book = chapter = verse_start = verse_end = None
             if verses:
-                book = verses[0].book
-                chapter = verses[0].chapter
+                first = verses[0]
+                book = first.book
+                try:
+                    # Canonical title over the stored spelling —
+                    # 'Song of Songs' rows label as 'Song of
+                    # Solomon' (same rule as NoteSerializer).
+                    book = get_book_name_from_id(
+                        first.dbt_book_id
+                    )
+                except ValueError:
+                    pass
+                chapter = first.chapter
                 block = [
                     v.verse for v in verses
-                    if v.book == book and v.chapter == chapter
+                    if v.book == first.book
+                    and v.chapter == chapter
                 ]
                 verse_start = min(block)
                 verse_end = max(block)
