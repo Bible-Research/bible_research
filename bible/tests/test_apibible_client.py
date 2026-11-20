@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient, APIRequestFactory
 
@@ -14,6 +15,7 @@ from bible.serializers import BiblePassageSerializer
 from bible.services.apibible.client import (
     ApiBibleClient,
     _parse_chapter_content,
+    apibible_configured,
 )
 from bible.services.apibible.registry import (
     APIBIBLE_TRANSLATIONS,
@@ -22,6 +24,7 @@ from bible.services.apibible.registry import (
     get_apibible_translation_listing,
     is_apibible_fileset,
 )
+from bible.services.providers import ApiBibleProvider
 from bible.services.search_grouping import (
     _parse_apibible_verse_ref,
     normalize_apibible_verse,
@@ -29,6 +32,8 @@ from bible.services.search_grouping import (
 from bible.views import AudioTimestampView, BibleSearchView
 from bible.utils.provider_errors import (
     PassageNotFoundError,
+    ProviderConfigError,
+    is_upstream_failure,
     provider_error_fields,
 )
 
@@ -889,3 +894,154 @@ class ApiBibleSearchViewTests(TestCase):
 
         self.assertEqual(resp.status_code, 400)
         mock_get.assert_not_called()
+
+
+# ============================================================
+# Unconfigured API_BIBLE_KEY — the provider must degrade, not
+# 502 every request (Sentry REACTIVE-BIBLE-WEB-P / -Q: prod ran
+# with an empty API_BIBLE_KEY and every API.Bible-backed
+# endpoint answered ``provider_error``).
+# ============================================================
+
+class ApiBibleUnconfiguredKeyTests(TestCase):
+    def test_missing_key_raises_provider_config_error(self):
+        """The client signals a config failure with a dedicated
+        type, not a bare ``ValueError``."""
+        with override_settings(API_BIBLE_KEY=None):
+            with self.assertRaises(ProviderConfigError):
+                ApiBibleClient(api_key=None)
+
+    def test_empty_key_is_unconfigured(self):
+        """An empty-string key (the prod ``env-file`` state)
+        is just as unconfigured as a missing one."""
+        with override_settings(API_BIBLE_KEY=""):
+            self.assertFalse(apibible_configured())
+            with self.assertRaises(ProviderConfigError):
+                ApiBibleClient(api_key=None)
+
+    def test_config_error_maps_to_provider_error(self):
+        fields = provider_error_fields(
+            ProviderConfigError("API_BIBLE_KEY not configured.")
+        )
+        self.assertEqual(fields["error_code"], "provider_error")
+        # A fixed, credential-free message — never ``str(exc)``
+        # or the bare class name.
+        self.assertNotIn("ProviderConfigError", fields["error"])
+
+    def test_is_upstream_failure_false_for_config_error(self):
+        """A missing key is our bug — it must route to
+        error-level ``internal_error``, not the upstream
+        warning trend."""
+        self.assertFalse(
+            is_upstream_failure(
+                ProviderConfigError("nope")
+            )
+        )
+
+    def test_provider_listing_empty_when_unconfigured(self):
+        """The catalog must not advertise a translation whose
+        every request can only 502."""
+        with override_settings(API_BIBLE_KEY=""):
+            listing = ApiBibleProvider().translation_listing()
+        self.assertEqual(listing, [])
+
+    def test_provider_listing_empty_when_key_none(self):
+        with override_settings(API_BIBLE_KEY=None):
+            listing = ApiBibleProvider().translation_listing()
+        self.assertEqual(listing, [])
+
+    def test_provider_listing_still_works_with_key(self):
+        listing = ApiBibleProvider().translation_listing("eng")
+        self.assertEqual(len(listing), 1)
+        self.assertEqual(listing[0]["abbr"], "NIV")
+
+    @patch(
+        "bible.services.providers.get_esv_translation_listing"
+    )
+    @patch("bible.services.providers.get_default_sword_client")
+    @patch("bible.services.providers.get_default_dbt_client")
+    def test_service_degrades_when_unconfigured(
+        self, mock_dbt, mock_sword, mock_esv
+    ):
+        """``get_live_translations`` omits NIV and marks the
+        response degraded (never cached) while the key is
+        unset — so the listing recovers the moment the key
+        is configured."""
+        mock_dbt.return_value.get_bibles.return_value = {
+            "data": []
+        }
+        mock_sword.return_value \
+            .get_translation_listing.return_value = []
+        mock_esv.return_value = []
+
+        from bible.services.translation_service import (
+            TranslationService,
+        )
+        with override_settings(API_BIBLE_KEY=""):
+            translations, degraded = (
+                TranslationService.get_live_translations("eng")
+            )
+        self.assertTrue(degraded)
+        abbrs = [t["abbr"] for t in translations]
+        self.assertNotIn("NIV", abbrs)
+
+    @patch(
+        "bible.services.providers.get_esv_translation_listing"
+    )
+    @patch("bible.services.providers.get_default_sword_client")
+    @patch("bible.services.providers.get_default_dbt_client")
+    def test_service_not_degraded_when_configured(
+        self, mock_dbt, mock_sword, mock_esv
+    ):
+        mock_dbt.return_value.get_bibles.return_value = {
+            "data": []
+        }
+        mock_sword.return_value \
+            .get_translation_listing.return_value = []
+        mock_esv.return_value = []
+
+        from bible.services.translation_service import (
+            TranslationService,
+        )
+        translations, degraded = (
+            TranslationService.get_live_translations("eng")
+        )
+        self.assertFalse(degraded)
+        abbrs = [t["abbr"] for t in translations]
+        self.assertIn("NIV", abbrs)
+
+
+class ApiBibleUnconfiguredKeyEndpointTests(TestCase):
+    """The translations endpoint must not advertise NIV — and
+    must not cache the NIV-less body — while the key is
+    unset."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="nivkeytest",
+            email="nivkey@test.local",
+            password="x",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        # The view caches non-degraded bodies for 6h — earlier
+        # tests may have filled the key under test.
+        cache.clear()
+
+    @patch("bible.services.providers.get_default_dbt_client")
+    def test_translations_omits_niv_and_no_store(self, mock_dbt):
+        from django.urls import reverse
+        mock_dbt.return_value.get_bibles.return_value = {
+            "data": []
+        }
+        with override_settings(API_BIBLE_KEY=""):
+            resp = self.client.get(
+                reverse("translation-list"),
+                {"language_iso": "eng"},
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        abbrs = [t["abbr"] for t in body["results"]]
+        self.assertNotIn("NIV", abbrs)
+        self.assertTrue(body["degraded"])
+        self.assertEqual(resp["Cache-Control"], "no-store")
