@@ -1986,7 +1986,9 @@ Some DBT audio filesets — the Latvian 1953 LVR (`LATLVRN1DA`,
 Speech-to-Text V1 (the only tier with a 60 min/month free
 allowance) and writes `timestamps_generated/` artifacts into
 the audio bucket. The `/api/v1/bible/timestamps/` contract is
-unchanged: `DbtProvider.get_timestamps` falls back to the
+unchanged: `DBTClient.get_timestamps` retries a transient
+transport failure (timeout, dropped connection) once before
+failing, and `DbtProvider.get_timestamps` falls back to the
 generated artifact when DBT answers empty (or fails) for a
 fileset registered in
 `bible/services/dbt/timestamps_registry.py`

@@ -32,6 +32,21 @@ from bible.utils.provider_errors import is_upstream_failure
 # pin a GAE worker indefinitely. Matches the ESV/API.Bible clients.
 _REQUEST_TIMEOUT_SECONDS = 10
 
+# Transport failures that mean "the upstream socket broke" rather
+# than "the upstream answered" — a stalled read or a dropped
+# connection is usually a transient blip at b4.dbt.io, so
+# idempotent GETs may retry it before surfacing a 502. HTTP error
+# responses (raise_for_status → HTTPError) are definitive upstream
+# answers and are never retried.
+_TRANSIENT_TRANSPORT_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
+# One retry — a persistent outage still answers after the second
+# attempt, so the worst case adds ~10s on top of the first.
+_TRANSIENT_MAX_ATTEMPTS = 2
+
 
 def _log_request_error(context, exc):
     """Log a failed upstream call without exception text.
@@ -404,6 +419,9 @@ class DBTClient:
         Uses requests directly instead of the generated
         API client to avoid a deserialization bug in the
         V4AudioTimestampsData model (missing BookId type).
+        Transient transport failures (timeout, dropped
+        connection) are retried once — see
+        ``_TRANSIENT_TRANSPORT_ERRORS``.
 
         Args:
             fileset_id: Audio fileset ID
@@ -423,18 +441,40 @@ class DBTClient:
             f"{fileset_id}/{book}/{chapter}"
         )
 
-        try:
-            response = self.session.get(
-                url, params=params,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            _log_request_error("DBT timestamps request error", e)
-            _reraise_credential_free(
-                "DBT timestamps request failed", e
-            )
+        # Transient transport failures (ReadTimeout, dropped
+        # connection) are retried once — this endpoint backs
+        # verse-highlighting in the app, and a single stalled
+        # b4.dbt.io socket used to surface as a 502 +
+        # ``provider_error`` with no second chance.
+        for attempt in range(_TRANSIENT_MAX_ATTEMPTS):
+            try:
+                response = self.session.get(
+                    url, params=params,
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+                return response.json()
+            except _TRANSIENT_TRANSPORT_ERRORS as e:
+                _log_request_error(
+                    "DBT timestamps request error", e
+                )
+                if attempt + 1 < _TRANSIENT_MAX_ATTEMPTS:
+                    logger.info(
+                        "Retrying timestamps request after "
+                        "transient %s",
+                        type(e).__name__,
+                    )
+                    continue
+                _reraise_credential_free(
+                    "DBT timestamps request failed", e
+                )
+            except requests.exceptions.RequestException as e:
+                _log_request_error(
+                    "DBT timestamps request error", e
+                )
+                _reraise_credential_free(
+                    "DBT timestamps request failed", e
+                )
 
     def get_copyright(
         self,
