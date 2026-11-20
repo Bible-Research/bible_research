@@ -117,6 +117,9 @@ mode via SSML marks — see `audio_mode_for_fileset` in
 no DBT timestamps (Latvian `LATLVR*`/`LATBSLP*`) whose verse
 timestamps we generate via Cloud STT
 (`generate_audio_timestamps`, `bible/services/google_stt/`).
+`DBTClient.get_timestamps` retries a transient transport
+failure (timeout, dropped connection — see
+`_TRANSIENT_TRANSPORT_ERRORS`) once before failing.
 `DbtProvider.get_timestamps` falls back to the
 `timestamps_generated/` GCS artifact when DBT answers empty or
 fails; `-opus16` ids strip the suffix to the base fileset.
