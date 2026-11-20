@@ -127,6 +127,25 @@ def test_get_timestamps_retries_transient_conn_error(dbt_client):
     assert result == {"data": []}
 
 
+def test_get_timestamps_retries_chunked_encoding(dbt_client):
+    """A connection lost mid-body (ChunkedEncodingError) is the
+    most common dropped-connection flavor — it is retried."""
+    mock_response = Mock()
+    mock_response.json.return_value = {"data": []}
+    mock_response.raise_for_status = Mock()
+    dbt_client.session.get.side_effect = [
+        requests.exceptions.ChunkedEncodingError(
+            "connection broken mid-body"
+        ),
+        mock_response,
+    ]
+
+    result = dbt_client.get_timestamps("ENGESVN1DA", "LUK", "22")
+
+    assert dbt_client.session.get.call_count == 2
+    assert result == {"data": []}
+
+
 def test_get_timestamps_timeout_exhausts_retry(dbt_client):
     """Both attempts failing re-raises a credential-free copy —
     a real outage still surfaces as ``provider_error``."""
@@ -158,6 +177,20 @@ def test_get_timestamps_no_retry_on_http_error(dbt_client):
     dbt_client.session.get.side_effect = original
 
     with pytest.raises(requests.exceptions.HTTPError):
+        dbt_client.get_timestamps("ENGESVN1DA", "LUK", "22")
+
+    assert dbt_client.session.get.call_count == 1
+
+
+def test_get_timestamps_no_retry_on_client_side_error(dbt_client):
+    """Non-transient RequestExceptions (e.g. TooManyRedirects —
+    the response arrived, the redirect chain is our-side
+    handling) are not retried."""
+    dbt_client.session.get.side_effect = (
+        requests.exceptions.TooManyRedirects("redirect loop")
+    )
+
+    with pytest.raises(requests.exceptions.TooManyRedirects):
         dbt_client.get_timestamps("ENGESVN1DA", "LUK", "22")
 
     assert dbt_client.session.get.call_count == 1

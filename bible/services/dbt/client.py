@@ -34,16 +34,18 @@ _REQUEST_TIMEOUT_SECONDS = 10
 
 # Transport failures that mean "the upstream socket broke" rather
 # than "the upstream answered" — a stalled read or a dropped
-# connection is usually a transient blip at b4.dbt.io, so
+# connection (including ChunkedEncodingError, a connection lost
+# mid-body) is usually a transient blip at b4.dbt.io, so
 # idempotent GETs may retry it before surfacing a 502. HTTP error
 # responses (raise_for_status → HTTPError) are definitive upstream
 # answers and are never retried.
 _TRANSIENT_TRANSPORT_ERRORS = (
+    requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
 )
 
-# One retry — a persistent outage still answers after the second
+# One retry — a persistent outage still fails after the second
 # attempt, so the worst case adds ~10s on top of the first.
 _TRANSIENT_MAX_ATTEMPTS = 2
 
@@ -461,8 +463,9 @@ class DBTClient:
                 if attempt + 1 < _TRANSIENT_MAX_ATTEMPTS:
                     logger.info(
                         "Retrying timestamps request after "
-                        "transient %s",
+                        "transient %s (%s %s %s)",
                         type(e).__name__,
+                        fileset_id, book, chapter,
                     )
                     continue
                 _reraise_credential_free(
