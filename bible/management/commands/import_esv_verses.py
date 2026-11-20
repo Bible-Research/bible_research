@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
 
 from bible.models import Verse
 from bible.utils.bible_books import get_dbt_book_id
@@ -48,6 +49,12 @@ def populate_verses():
     }
     to_create = []
     for book, book_data in data.items():
+        dbt_book_id = get_dbt_book_id(book)
+        if dbt_book_id is None:
+            raise ValueError(
+                f'No DBT book id for {book!r} in '
+                'esv_bible_verses.json'
+            )
         chapters = book_data['chapters']
 
         for chapter, chapter_data in chapters.items():
@@ -61,6 +68,7 @@ def populate_verses():
                     book=book,
                     chapter=int(chapter),
                     verse=verse,
-                    dbt_book_id=get_dbt_book_id(book),
+                    dbt_book_id=dbt_book_id,
                 ))
-    Verse.objects.bulk_create(to_create)
+    with transaction.atomic():
+        Verse.objects.bulk_create(to_create, ignore_conflicts=True)
