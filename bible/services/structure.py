@@ -56,6 +56,7 @@ from bible.utils.bible_books import (
     _BIBLE_BOOKS,
     _book_title,
     get_book_name_from_id,
+    get_dbt_book_id,
 )
 from bible.utils.provider_errors import (
     capture_provider_exception,
@@ -220,15 +221,25 @@ def _bundled_books():
 
     Chapter counts come from ``esv_bible_verses.json`` — only
     the chapter count matters here, and it is identical between
-    the ESV and KJV versifications.
+    the ESV and KJV versifications. JSON keys are resolved
+    through ``get_dbt_book_id`` so a spelling in the file that
+    differs from the canonical title ('Song of Songs' vs
+    'Song of Solomon') still lands on the right book code.
     """
     with open(_ESV_VERSES_PATH) as handle:
         verse_map = json.load(handle)
+    chapters_by_code = {}
+    for title, book_data in verse_map.items():
+        book_id = get_dbt_book_id(title)
+        if book_id:
+            chapters_by_code[book_id] = (
+                book_data.get('chapters') or {}
+            )
     rows = []
     for name, code, testament in _BIBLE_BOOKS:
         title = _book_title(name)
         chapters = list(range(1, len(
-            (verse_map.get(title) or {}).get('chapters') or {}
+            chapters_by_code.get(code) or {}
         ) + 1))
         rows.append({
             'book_id': code,
