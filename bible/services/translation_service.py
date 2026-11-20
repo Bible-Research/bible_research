@@ -41,14 +41,18 @@ class TranslationService:
                 Defaults to None.
 
         Returns:
-            tuple: ``(translations, dbt_failed)`` — the processed
+            tuple: ``(translations, degraded)`` — the processed
                 translation list without video/audio-stream
                 filesets, and a flag that is ``True`` when the
-                live DBT fetch failed and the list only contains
-                static registry entries. The view surfaces the
-                flag as ``degraded`` so a DBT outage degrades the
-                response instead of breaking it; a truly fatal
-                error (registry/processing failure) still
+                catalog is incomplete: the live DBT fetch failed
+                (the list then only contains static registry
+                entries) or ``API_BIBLE_KEY`` is unconfigured
+                (the API.Bible entries are suppressed — every
+                request to that provider could only 502). The
+                view surfaces the flag as ``degraded`` so a
+                partial catalog degrades the response instead
+                of breaking it — and is never cached; a truly
+                fatal error (registry/processing failure) still
                 propagates to the view's 502 path.
         """
         logger.info(

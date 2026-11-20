@@ -21,12 +21,15 @@ APIBIBLE_BASE_URL = "https://api.scripture.api.bible/v1"
 def apibible_configured() -> bool:
     """True when ``API_BIBLE_KEY`` holds a usable credential.
 
-    An empty string is as unconfigured as a missing key — the
-    shared ``env-file`` secret once carried ``API_BIBLE_KEY=``
-    (empty), which 502'd every API.Bible-backed endpoint with a
-    bare ``ValueError`` (Sentry REACTIVE-BIBLE-WEB-P/-Q).
+    An empty or whitespace-only string is as unconfigured as a
+    missing key — the shared ``env-file`` secret once carried
+    ``API_BIBLE_KEY=`` (empty), which 502'd every
+    API.Bible-backed endpoint with a bare ``ValueError``
+    (Sentry REACTIVE-BIBLE-WEB-P/-Q).
     """
-    return bool(getattr(settings, "API_BIBLE_KEY", None))
+    return bool(
+        (getattr(settings, "API_BIBLE_KEY", None) or '').strip()
+    )
 
 
 # Paragraph styles that mark a non-verse heading in API.Bible

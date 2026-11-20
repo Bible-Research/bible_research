@@ -955,6 +955,28 @@ class ApiBibleUnconfiguredKeyTests(TestCase):
         self.assertEqual(len(listing), 1)
         self.assertEqual(listing[0]["abbr"], "NIV")
 
+    def test_passage_endpoint_502_config_message(self):
+        """The incident's exact symptom: an NIV chapter request
+        with an empty key 502s — now with a fixed, honest
+        message instead of ``(ValueError)``."""
+        from django.urls import reverse
+        client = APIClient()
+        with override_settings(API_BIBLE_KEY=""):
+            resp = client.get(
+                reverse("bible-passage"),
+                {
+                    "passage": "John 3",
+                    "fileset_id": "ENGNIV_API",
+                },
+            )
+        self.assertEqual(resp.status_code, 502)
+        body = resp.json()
+        self.assertEqual(body["error_code"], "provider_error")
+        self.assertEqual(
+            body["error"], "Bible provider is not configured"
+        )
+        self.assertNotIn("ValueError", body["error"])
+
     @patch(
         "bible.services.providers.get_esv_translation_listing"
     )
