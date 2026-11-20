@@ -551,7 +551,8 @@ class AudioTimestampView(APIView):
             location=OpenApiParameter.QUERY,
             description=(
                 'Bible/fileset id (e.g. ENGESV, LVSGLU8, '
-                'ENGNIV_API) or a listing abbr (GLU8, NIV). '
+                'ENGNIV_API) or a listing abbr (GLU8, NIV, '
+                'ESV). '
                 'Named ``bible_id`` for historical reasons — '
                 'it accepts the same id space as '
                 '``fileset_id`` on the other endpoints.'
@@ -958,7 +959,7 @@ class BibleSearchView(APIView):
             location=OpenApiParameter.QUERY,
             description=(
                 'Fileset ID (e.g. ENGESV, LVSGLU8, ENGNIV_API) '
-                'or a listing abbr (GLU8, NIV).'
+                'or a listing abbr (GLU8, NIV, ESV).'
             ),
             required=True,
         ),

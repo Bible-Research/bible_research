@@ -11,6 +11,7 @@ from bible.services.esv.client import (
     _parse_passage,
 )
 from bible.services.esv.registry import (
+    canonical_esv_fileset_id,
     get_esv_translation_listing,
     is_esv_fileset,
 )
@@ -50,6 +51,17 @@ class ESVRegistryTests(TestCase):
     def test_is_esv_fileset_false_for_unknown(self):
         self.assertFalse(is_esv_fileset("ENGESV"))
         self.assertFalse(is_esv_fileset("LVSGLU8"))
+
+    def test_abbr_canonicalizes_like_sibling_registries(self):
+        """The listing abbr resolves to the registry key,
+        mirroring ``GLU8`` -> ``LVSGLU8`` (SWORD) and ``NIV`` ->
+        ``ENGNIV_API`` (API.Bible). The frontend sends the
+        listing abbr to endpoints that document abbr support
+        (structure, copyright), so ``ESV`` must route too."""
+        self.assertEqual(
+            canonical_esv_fileset_id("ESV"), "ENGESV_API"
+        )
+        self.assertTrue(is_esv_fileset("esv"))
 
     def test_translation_listing_shape(self):
         listing = get_esv_translation_listing()

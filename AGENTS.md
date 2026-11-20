@@ -51,6 +51,11 @@ serializer only validates input. Dispatch order:
    modules via pysword (`bible/services/sword/client.py`).
 4. Everything else → DBT API v4 via `bible/services/dbt/client.py`.
 
+Registry listing abbrs canonicalize to their text fileset id —
+`ESV`→`ENGESV_API`, `GLU8`→`LVSGLU8`, `NIV`→`ENGNIV_API` — so the
+endpoints that accept abbrs (structure, copyright) dispatch them
+through the same order.
+
 Copyright routing uses the same facade: ESV/SWORD ids (and abbrs)
 answer from registry `license` metadata, API.Bible ids fetch the
 live statement (audio fileset ids read the audio bible's entry),
