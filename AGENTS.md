@@ -145,8 +145,12 @@ book-list calls through `bibles_api`.
 
 API.Bible text responses carry a `meta` block with FUMS fields the
 frontend must report (license requirement). The API.Bible client
-needs `API_BIBLE_KEY` (settings/`config.yaml`); the registry and
-translations listing work without it.
+needs `API_BIBLE_KEY` (settings/`config.yaml`); registry helpers
+work without it, but `ApiBibleProvider.translation_listing`
+returns nothing while the key is unset — an unservable
+translation is never advertised (every request would 502
+`provider_error` anyway). NIV reappears automatically once a
+key is configured.
 
 Book-name handling lives in `bible/utils/bible_books.py`
 (`get_dbt_book_id`, `get_book_name_from_id`, `get_testament`). There

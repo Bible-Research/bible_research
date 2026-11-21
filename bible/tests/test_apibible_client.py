@@ -22,6 +22,7 @@ from bible.services.apibible.registry import (
     get_apibible_translation_listing,
     is_apibible_fileset,
 )
+from bible.services.providers import ApiBibleProvider
 from bible.services.search_grouping import (
     _parse_apibible_verse_ref,
     normalize_apibible_verse,
@@ -693,7 +694,7 @@ class ApiBibleSerializerRoutingTests(TestCase):
 
 
 # ============================================================
-# Translations endpoint includes NIV (no API key needed)
+# Translations endpoint lists NIV only when a key can serve it
 # ============================================================
 
 class ApiBibleTranslationsEndpointTests(TestCase):
@@ -731,6 +732,41 @@ class ApiBibleTranslationsEndpointTests(TestCase):
         fileset_ids = [f["id"] for f in niv_entry["filesets"]]
         self.assertIn("ENGNIV_API", fileset_ids)
         self.assertIn("ENGNIVC1DA", fileset_ids)
+
+    @override_settings(API_BIBLE_KEY="")
+    @patch(
+        "bible.services.providers."
+        "get_default_dbt_client"
+    )
+    def test_translations_endpoint_hides_niv_without_key(
+        self, mock_dbt
+    ):
+        """An empty ``API_BIBLE_KEY`` makes every API.Bible
+        request fail at client construction — the listing must
+        not advertise a translation the backend cannot serve."""
+        mock_dbt.return_value.get_bibles.return_value = {
+            "data": []
+        }
+        from django.urls import reverse
+        url = reverse("translation-list")
+        resp = self.client.get(
+            url, {"language_iso": "eng"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        abbrs = [t["abbr"] for t in resp.json()["results"]]
+        self.assertNotIn("NIV", abbrs)
+
+    @override_settings(API_BIBLE_KEY=None)
+    def test_provider_listing_empty_without_key(self):
+        self.assertEqual(
+            ApiBibleProvider().translation_listing(), []
+        )
+
+    @override_settings(API_BIBLE_KEY="")
+    def test_provider_listing_empty_with_blank_key(self):
+        self.assertEqual(
+            ApiBibleProvider().translation_listing(), []
+        )
 
 
 # ============================================================

@@ -742,6 +742,14 @@ class ApiBibleProvider(Provider):
         }
 
     def translation_listing(self, language_iso=None):
+        # The registry helpers work without an API_BIBLE_KEY,
+        # but without one every API.Bible request fails at
+        # client construction (provider_error). Advertising the
+        # translation would let users select a fileset that can
+        # only fail — NIV reappears automatically once a key is
+        # configured.
+        if not getattr(settings, 'API_BIBLE_KEY', None):
+            return []
         return _filter_by_iso(
             get_apibible_translation_listing(), language_iso
         )

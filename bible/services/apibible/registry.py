@@ -4,6 +4,9 @@ Synthetic fileset ids mirror the ESV/SWORD convention so existing
 callers route on ``fileset_id`` without knowing which upstream
 provider serves the request. Every helper here works without an
 ``API_BIBLE_KEY`` configured — only the HTTP client needs the key.
+(``ApiBibleProvider.translation_listing`` still omits these
+entries while the key is unset: an unservable translation must
+not be advertised.)
 """
 APIBIBLE_TRANSLATIONS = {
     "ENGNIV_API": {
