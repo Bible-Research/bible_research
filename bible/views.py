@@ -591,7 +591,7 @@ class CopyrightView(VercelEdgeCacheMixin, APIView):
 
         try:
             # Non-DBT ids resolve through the facade: ESV/SWORD
-            # (and abbrs like GLU8/NIV) answer from registry
+            # (and abbrs like ESV/GLU8/NIV) answer from registry
             # license metadata instead of 404ing through DBT;
             # API.Bible still fetches the live copyright
             # statement; everything else proxies DBT.
