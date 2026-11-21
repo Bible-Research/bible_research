@@ -14,6 +14,7 @@ import pytest
 from bible.services import chapter_cache
 from bible.services.providers import (
     ApiBibleProvider,
+    ESVProvider,
     _CachingProvider,
     _concrete_provider,
     get_passage_body,
@@ -151,6 +152,30 @@ def test_sword_aliases_share_one_entry(mock_get):
 
     mock_get.return_value.get_chapter_verses\
         .assert_called_once_with('GLU8', 'JHN', 3)
+
+
+@patch('bible.services.providers.get_default_esv_client')
+def test_esv_abbr_shares_canonical_entry(mock_get):
+    """``ESV`` routes to ``ESVProvider`` under the canonical
+    ``ENGESV_API`` id — the abbr shares its chapter cache
+    entry and verse budget group."""
+    mock_get.return_value.get_chapter_with_headings.\
+        return_value = {
+            'verses': _verses(1, 2),
+            'headings': [],
+        }
+
+    provider = provider_for('ESV')
+    assert isinstance(
+        _concrete_provider(provider), ESVProvider
+    )
+    assert provider.fileset_id == 'ENGESV_API'
+
+    provider_for('ESV').get_chapter('JHN', 3)
+    provider_for('ENGESV_API').get_chapter('JHN', 3)
+
+    mock_get.return_value.get_chapter_with_headings\
+        .assert_called_once_with('JHN', 3)
 
 
 @patch('bible.services.providers.get_default_esv_client')

@@ -291,6 +291,21 @@ def test_sword_id_and_abbr_answer_from_registry_license(
 
 
 @pytest.mark.django_db
+def test_esv_abbr_copyright_echoes_canonical_id(client):
+    """``bible_id=ESV`` answers from the ESV registry license
+    like ``ENGESV_API`` — but unlike ``GLU8``/``NIV`` the
+    ``id`` field echoes the canonical id, because
+    ``provider_for`` constructs ``ESVProvider`` with it."""
+    response = client.get(COPYRIGHT_URL, {'bible_id': 'ESV'})
+
+    assert response.status_code == status.HTTP_200_OK
+    entry = response.json()['data'][0]
+    assert entry['id'] == 'ENGESV_API'
+    assert entry['copyright']
+    assert entry['type'] == 'text_plain'
+
+
+@pytest.mark.django_db
 @patch('bible.services.providers.get_default_apibible_client')
 def test_apibible_abbr_canonicalizes_to_text_bible(
     mock_get_client, client

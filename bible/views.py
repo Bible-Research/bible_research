@@ -219,8 +219,8 @@ class BiblePassageView(APIView):
           (e.g., 'John 3:16', 'John 3:16-18', 'John 3:16,18')
         - response_format: 'text' or 'audio' (default: 'text')
         - fileset_id: DBT fileset ID (e.g. ENGESV) or bundled SWORD id
-          (e.g. LVSGLU8). SWORD translations also accept listing ``abbr``
-          (e.g. GLU8 for Latvian Glück).
+          (e.g. LVSGLU8). Registry translations also accept listing
+          ``abbr`` (ESV, GLU8, NIV).
 
     Examples:
         /api/v1/bible/?passage=John+3&fileset_id=ENGESV
@@ -551,7 +551,7 @@ class AudioTimestampView(APIView):
             location=OpenApiParameter.QUERY,
             description=(
                 'Bible/fileset id (e.g. ENGESV, LVSGLU8, '
-                'ENGNIV_API) or a listing abbr (GLU8, NIV). '
+                'ENGNIV_API) or a listing abbr (ESV, GLU8, NIV). '
                 'Named ``bible_id`` for historical reasons — '
                 'it accepts the same id space as '
                 '``fileset_id`` on the other endpoints.'
@@ -591,7 +591,7 @@ class CopyrightView(VercelEdgeCacheMixin, APIView):
 
         try:
             # Non-DBT ids resolve through the facade: ESV/SWORD
-            # (and abbrs like GLU8/NIV) answer from registry
+            # (and abbrs like ESV/GLU8/NIV) answer from registry
             # license metadata instead of 404ing through DBT;
             # API.Bible still fetches the live copyright
             # statement; everything else proxies DBT.
@@ -958,7 +958,7 @@ class BibleSearchView(APIView):
             location=OpenApiParameter.QUERY,
             description=(
                 'Fileset ID (e.g. ENGESV, LVSGLU8, ENGNIV_API) '
-                'or a listing abbr (GLU8, NIV).'
+                'or a listing abbr (ESV, GLU8, NIV).'
             ),
             required=True,
         ),

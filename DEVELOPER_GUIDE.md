@@ -89,7 +89,7 @@ once per page through a context-shared cache instead of one
 provider call per note.
 
 Non-DBT copyright ids resolve through the same facade: ESV and
-SWORD filesets (and abbrs like `GLU8`) answer from registry
+SWORD filesets (and abbrs like `ESV`/`GLU8`) answer from registry
 license metadata, API.Bible filesets fetch the live statement
 from the matching text/audio bible (an unconfigured
 `API_BIBLE_KEY` degrades to the registry `license` instead of
@@ -1243,7 +1243,7 @@ uses it to decide whether a shared note is editable.
   `notes/move/` stay strictly per-tag.
 - `fileset_id` (optional): Bible translation used to enrich
   each note's `verses[].text` — same provider routing as the
-  passage endpoint (`ENGESV_API` → ESV API, SWORD ids like
+  passage endpoint (`ENGESV_API`/`ESV` → ESV API, SWORD ids like
   `LVSGLU8` → local module, `ENGNIV_API`/`NIV` → API.Bible,
   anything else → DBT) via `provider_for(fileset_id)`.
   Enrichment is batched: the whole chapter is fetched once per

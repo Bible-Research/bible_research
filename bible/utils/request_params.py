@@ -10,7 +10,7 @@ import re
 # Fileset ids are routing keys: DBT ids (``ENGESVN2DA``,
 # ``LATBSLN1DA-opus16``), synthetic registry ids
 # (``LVSGLU8C1DA``, ``ENGNIV_API``) and listing abbrs
-# (``GLU8``, ``NIV``).
+# (``ESV``, ``GLU8``, ``NIV``).
 FILESET_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 # ``bible_id`` on the copyright endpoint takes the same id space

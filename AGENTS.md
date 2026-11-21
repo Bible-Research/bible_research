@@ -33,7 +33,10 @@ All API routes live under `/api/v1/` (see `bible_research/urls.py`).
 ## Provider routing (core business logic)
 
 Every passage/audio request carries a `fileset_id` that selects the
-provider. All routing goes through the facade in
+provider — registry listing abbrs (`ESV`, `NIV`, `GLU8`)
+canonicalize to their fileset ids in each registry's
+`canonical_*_fileset_id`, so either form routes identically. All
+routing goes through the facade in
 `bible/services/providers.py` — `provider_for(fileset_id)` returns
 the provider object and callers use its uniform surface
 (`get_chapter`, `get_passage`, `get_audio`, `get_timestamps`,
