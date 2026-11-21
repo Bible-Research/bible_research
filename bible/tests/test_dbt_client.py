@@ -194,3 +194,74 @@ def test_request_errors_hide_url_credential(dbt_client, call):
     assert 'key=' not in str(exc.value)
     assert 'SECRET' not in str(exc.value)
     assert exc.value.response is resp
+
+
+@pytest.mark.parametrize(
+    "transient_error",
+    [
+        requests.exceptions.ReadTimeout("read timed out"),
+        requests.exceptions.ConnectTimeout("connect timed out"),
+        requests.exceptions.ConnectionError("connection reset"),
+    ],
+)
+def test_get_timestamps_retries_transient_errors(
+    dbt_client, transient_error
+):
+    """A transient transport failure (no response received) on
+    the timestamps call must be retried once — a momentary DBT
+    blip should not surface as a 502 when the replayed request
+    succeeds. The call is a read-only GET, so replay is safe.
+    """
+    mock_response = Mock()
+    mock_response.json.return_value = {
+        "data": [{"verse_start": 1, "timestamp": 0.0}]
+    }
+    mock_response.raise_for_status = Mock()
+    dbt_client.session.get.side_effect = [
+        transient_error,
+        mock_response,
+    ]
+
+    result = dbt_client.get_timestamps("X", "JHN", "3")
+
+    assert dbt_client.session.get.call_count == 2
+    assert result == {
+        "data": [{"verse_start": 1, "timestamp": 0.0}]
+    }
+
+
+def test_get_timestamps_transient_retry_exhausted(dbt_client):
+    """When both attempts hit a transient transport failure the
+    last error re-raises credential-free — the credential in
+    the request URL must never reach logs/Sentry."""
+    dbt_client.session.get.side_effect = (
+        requests.exceptions.ReadTimeout(
+            "HTTPSConnectionPool: Read timed out for url: "
+            "https://b4.dbt.io/api/timestamps/X/JHN/3?key=SECRET"
+        )
+    )
+
+    with pytest.raises(requests.exceptions.ReadTimeout) as exc:
+        dbt_client.get_timestamps("X", "JHN", "3")
+
+    assert dbt_client.session.get.call_count == 2
+    assert 'key=' not in str(exc.value)
+    assert 'SECRET' not in str(exc.value)
+
+
+def test_get_timestamps_no_retry_on_http_error(dbt_client):
+    """A received error response is a definitive upstream
+    answer, not a transient blip — ``raise_for_status``
+    failures must not be replayed."""
+    resp = Mock()
+    resp.status_code = 500
+    err = requests.exceptions.HTTPError("500 Server Error")
+    err.response = resp
+    mock_response = Mock()
+    mock_response.raise_for_status.side_effect = err
+    dbt_client.session.get.return_value = mock_response
+
+    with pytest.raises(requests.exceptions.HTTPError):
+        dbt_client.get_timestamps("X", "JHN", "3")
+
+    assert dbt_client.session.get.call_count == 1
