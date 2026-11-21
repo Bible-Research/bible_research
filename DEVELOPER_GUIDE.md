@@ -573,7 +573,12 @@ surface upstream failures with the
 same `error`/`error_code` fields and the same HTTP status mapping
 (`429`/`404`/`502`). Timestamp 404s for missing coverage ("not
 yet generated" GCS artifacts, empty API.Bible timecodes) carry
-`error_code: "not_found"`. Raw exception text is never embedded
+`error_code: "not_found"`. Before a 502 can surface, the DBT
+timestamps call replays a transient transport failure once
+(`Timeout`/`ConnectionError` — no response received; a received
+error response is a definitive answer and is never retried) —
+the request is a read-only GET, so the replay is safe. Raw
+exception text is never embedded
 in `error` because it can contain request URLs with credentials.
 
 **Client error response** (invalid input): returns `400` with an

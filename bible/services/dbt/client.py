@@ -32,6 +32,15 @@ from bible.utils.provider_errors import is_upstream_failure
 # pin a GAE worker indefinitely. Matches the ESV/API.Bible clients.
 _REQUEST_TIMEOUT_SECONDS = 10
 
+# Transport failures where the request never got a definitive
+# upstream answer — safe to replay on a read-only GET. A
+# received error response (HTTPError from raise_for_status)
+# is NOT transient: the upstream answered, so do not retry.
+_TRANSIENT_REQUEST_ERRORS = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+)
+
 
 def _log_request_error(context, exc):
     """Log a failed upstream call without exception text.
@@ -423,18 +432,30 @@ class DBTClient:
             f"{fileset_id}/{book}/{chapter}"
         )
 
-        try:
-            response = self.session.get(
-                url, params=params,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            _log_request_error("DBT timestamps request error", e)
-            _reraise_credential_free(
-                "DBT timestamps request failed", e
-            )
+        # One immediate replay absorbs a transient ReadTimeout —
+        # DBT occasionally stalls on an otherwise healthy route,
+        # and a 502 here only degrades verse highlighting anyway.
+        # The call is a read-only GET, so replaying is safe.
+        for attempt in range(2):
+            try:
+                response = self.session.get(
+                    url, params=params,
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                _log_request_error(
+                    "DBT timestamps request error", e
+                )
+                if (
+                    attempt == 0
+                    and isinstance(e, _TRANSIENT_REQUEST_ERRORS)
+                ):
+                    continue
+                _reraise_credential_free(
+                    "DBT timestamps request failed", e
+                )
 
     def get_copyright(
         self,
