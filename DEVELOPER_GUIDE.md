@@ -89,7 +89,7 @@ once per page through a context-shared cache instead of one
 provider call per note.
 
 Non-DBT copyright ids resolve through the same facade: ESV and
-SWORD filesets (and abbrs like `GLU8`) answer from registry
+SWORD filesets (and abbrs like `ESV`/`GLU8`) answer from registry
 license metadata, API.Bible filesets fetch the live statement
 from the matching text/audio bible, and everything else
 proxies DBT.

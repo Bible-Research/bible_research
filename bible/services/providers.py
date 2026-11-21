@@ -490,7 +490,9 @@ class _TracedProvider:
 
 
 class ESVProvider(Provider):
-    """api.esv.org text/audio (``ENGESV_API``).
+    """api.esv.org text/audio (``ENGESV_API``; the listing
+    abbr ``ESV`` canonicalizes before construction, so
+    ``self.fileset_id`` is always the registry id).
 
     Timestamps fall through to the DBT endpoint (upstream
     behaviour the old view inline branch also relied on)."""
