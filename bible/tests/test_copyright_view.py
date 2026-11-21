@@ -362,6 +362,76 @@ def test_apibible_copyright_falls_back_to_copyright_key(
     )
 
 
+# --- unconfigured API.Bible client (Sentry REACTIVE-BIBLE-WEB-P) --
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_apibible_client')
+def test_apibible_missing_key_answers_registry_license(
+    mock_get_client, client
+):
+    """When ``API_BIBLE_KEY`` is not configured the client
+    factory raises ``ValueError`` — copyright must degrade to
+    the registry ``license`` (like ESV/SWORD) instead of
+    502ing."""
+    mock_get_client.side_effect = ValueError(
+        'API_BIBLE_KEY not configured.'
+    )
+
+    for bible_id in ('ENGNIV_API', 'NIV'):
+        response = client.get(
+            COPYRIGHT_URL, {'bible_id': bible_id}
+        )
+        assert response.status_code == status.HTTP_200_OK
+        entry = response.json()['data'][0]
+        assert entry['id'] == bible_id
+        assert entry['type'] == 'text_plain'
+        assert entry['copyright'] == (
+            get_apibible_meta('ENGNIV_API')['license']
+        )
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_apibible_client')
+def test_apibible_missing_key_audio_fileset_type(
+    mock_get_client, client
+):
+    """The license fallback keeps ``type: "audio"`` for the
+    audio fileset id."""
+    mock_get_client.side_effect = ValueError(
+        'API_BIBLE_KEY not configured.'
+    )
+
+    response = client.get(
+        COPYRIGHT_URL, {'bible_id': 'ENGNIVC1DA'}
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    entry = response.json()['data'][0]
+    assert entry['id'] == 'ENGNIVC1DA'
+    assert entry['type'] == 'audio'
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_apibible_client')
+def test_apibible_upstream_failure_still_502s(
+    mock_get_client, client
+):
+    """Only the unconfigured-client ``ValueError`` degrades —
+    a failure inside ``get_bible`` with a working client is a
+    real provider error."""
+    mock_get_client.return_value.get_bible.side_effect = (
+        ConnectionError('upstream unreachable')
+    )
+
+    response = client.get(
+        COPYRIGHT_URL, {'bible_id': 'ENGNIV_API'}
+    )
+
+    assert response.status_code == status.HTTP_502_BAD_GATEWAY
+    assert response.json()['error_code'] == 'provider_error'
+
+
 # --- response caching (S7 / copyright #3) ------------------------
 
 

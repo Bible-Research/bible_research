@@ -248,13 +248,14 @@ class Provider:
         raise NotImplementedError
 
 
-def _registry_copyright(fileset_id, license_text):
+def _registry_copyright(fileset_id, license_text,
+                        entry_type='text_plain'):
     """One flattened copyright row for a registry-served id —
     same shape the API.Bible branch returns from its live
     ``get_bible`` call."""
     return [{
         'id': fileset_id,
-        'type': 'text_plain',
+        'type': entry_type,
         'size': 'C',
         'copyright': license_text,
         'copyright_date': '',
@@ -653,7 +654,23 @@ class ApiBibleProvider(Provider):
             and self.fileset_id.strip().upper()
             == self._meta['audio_fileset_id'].upper()
         )
-        bible = get_default_apibible_client().get_bible(
+        try:
+            client = get_default_apibible_client()
+        except ValueError:
+            # ``API_BIBLE_KEY`` unset — the client cannot be
+            # built, so every upstream call would fail. Answer
+            # from the registry ``license`` the way the
+            # ESV/SWORD branches always do instead of 502ing.
+            logger.warning(
+                "API.Bible client unconfigured; serving "
+                "registry license for %s", self.fileset_id,
+            )
+            return _registry_copyright(
+                self.fileset_id,
+                self._meta['license'],
+                entry_type='audio' if is_audio else 'text_plain',
+            )
+        bible = client.get_bible(
             self._meta['audio_bible_id'] if is_audio
             else self._meta['bible_id']
         )
