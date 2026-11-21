@@ -11,10 +11,23 @@ ESV_TRANSLATIONS = {
 
 
 def canonical_esv_fileset_id(fileset_id: str) -> "str | None":
+    """Return the registry key for a fileset id or listing abbr.
+
+    The abbr ``ESV`` resolves like the SWORD registry's
+    ``GLU8`` -> ``LVSGLU8`` and the API.Bible registry's
+    ``NIV`` -> ``ENGNIV_API`` handling — the translations
+    listing serves ``abbr: ESV`` for ``ENGESV_API``, and
+    callers pass that abbr back as ``fileset_id``.
+    """
     if not fileset_id:
         return None
     key = fileset_id.strip().upper()
-    return key if key in ESV_TRANSLATIONS else None
+    if key in ESV_TRANSLATIONS:
+        return key
+    for fid, meta in ESV_TRANSLATIONS.items():
+        if meta["abbr"].upper() == key:
+            return fid
+    return None
 
 
 def is_esv_fileset(fileset_id: str) -> bool:

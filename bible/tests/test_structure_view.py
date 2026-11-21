@@ -215,6 +215,36 @@ def test_provider_without_surface_uses_canonical_fallback(
 @pytest.mark.django_db
 @patch('bible.services.providers.get_default_dbt_client')
 @patch('bible.services.structure.get_default_dbt_client')
+def test_esv_listing_abbr_uses_canonical_fallback(
+    mock_structure_client, mock_provider_client, client
+):
+    """The translations listing serves ``abbr: ESV`` for
+    ``ENGESV_API`` — the abbr must resolve like ``GLU8``/``NIV``
+    instead of falling through to a DBT lookup that 404s."""
+    mock_structure_client.return_value.get_books.return_value = {
+        'data': [_dbt_book('GEN', 'Genesis', 50, 'OT')]
+    }
+
+    response = client.get(STRUCTURE_URL, {'fileset_id': 'ESV'})
+
+    assert response.status_code == status.HTTP_200_OK
+    books = response.json()['books']
+    assert books == [{
+        'book_id': 'GEN',
+        'name': 'Genesis',
+        'name_short': 'Genesis',
+        'testament': 'OT',
+        'chapters': list(range(1, 51)),
+    }]
+    mock_structure_client.return_value.get_books\
+        .assert_called_once_with('ENGESV')
+    # The DBT provider path must never see the abbr.
+    mock_provider_client.return_value.get_books.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch('bible.services.providers.get_default_dbt_client')
+@patch('bible.services.structure.get_default_dbt_client')
 def test_fileset_bible_resolution_via_listing(
     mock_structure_client, mock_provider_client, client
 ):

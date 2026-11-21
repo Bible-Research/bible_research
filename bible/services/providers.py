@@ -134,8 +134,14 @@ def provider_for(fileset_id):
     spans only cover real upstream calls, not cache hits.
     """
     if is_esv_fileset(fileset_id):
+        # Construct with the canonical id so the listing abbr
+        # (``ESV``) behaves identically to ``ENGESV_API``
+        # downstream — e.g. the ``get_timestamps`` delegation
+        # to ``DbtProvider(self.fileset_id)``.
         return _CachingProvider(
-            _TracedProvider(ESVProvider(fileset_id))
+            _TracedProvider(
+                ESVProvider(canonical_esv_fileset_id(fileset_id))
+            )
         )
     if is_apibible_fileset(fileset_id):
         return _TracedProvider(ApiBibleProvider(fileset_id))

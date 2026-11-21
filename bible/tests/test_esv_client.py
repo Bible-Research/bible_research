@@ -11,6 +11,7 @@ from bible.services.esv.client import (
     _parse_passage,
 )
 from bible.services.esv.registry import (
+    canonical_esv_fileset_id,
     get_esv_translation_listing,
     is_esv_fileset,
 )
@@ -50,6 +51,16 @@ class ESVRegistryTests(TestCase):
     def test_is_esv_fileset_false_for_unknown(self):
         self.assertFalse(is_esv_fileset("ENGESV"))
         self.assertFalse(is_esv_fileset("LVSGLU8"))
+
+    def test_canonical_id_resolves_listing_abbr(self):
+        """The listing abbr ``ESV`` canonicalizes like SWORD's
+        ``GLU8`` and API.Bible's ``NIV`` — the translations
+        listing serves ``abbr: ESV`` for ``ENGESV_API``."""
+        self.assertTrue(is_esv_fileset("ESV"))
+        self.assertTrue(is_esv_fileset("esv"))
+        self.assertEqual(
+            canonical_esv_fileset_id("ESV"), "ENGESV_API"
+        )
 
     def test_translation_listing_shape(self):
         listing = get_esv_translation_listing()
