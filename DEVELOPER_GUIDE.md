@@ -91,8 +91,9 @@ provider call per note.
 Non-DBT copyright ids resolve through the same facade: ESV and
 SWORD filesets (and abbrs like `GLU8`) answer from registry
 license metadata, API.Bible filesets fetch the live statement
-from the matching text/audio bible, and everything else
-proxies DBT.
+from the matching text/audio bible (an unconfigured
+`API_BIBLE_KEY` degrades to the registry `license` instead of
+502ing), and everything else proxies DBT.
 
 ### Caching
 

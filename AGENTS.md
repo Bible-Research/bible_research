@@ -53,8 +53,10 @@ serializer only validates input. Dispatch order:
 
 Copyright routing uses the same facade: ESV/SWORD ids (and abbrs)
 answer from registry `license` metadata, API.Bible ids fetch the
-live statement (audio fileset ids read the audio bible's entry),
-other ids proxy DBT. Structure routing (`/bible/structure/`)
+live statement (audio fileset ids read the audio bible's entry;
+an unconfigured `API_BIBLE_KEY` degrades to the registry
+`license`), other ids proxy DBT. Structure routing
+(`/bible/structure/`)
 goes through `bible/services/structure.py`: DBT filesets read
 their own bible via `GET /bibles/{id}/book?verify_content=true`,
 SWORD reads the local module + canonical-language names,
