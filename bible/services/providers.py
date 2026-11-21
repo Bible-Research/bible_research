@@ -252,7 +252,8 @@ def _registry_copyright(fileset_id, license_text,
                         entry_type='text_plain'):
     """One flattened copyright row for a registry-served id —
     same shape the API.Bible branch returns from its live
-    ``get_bible`` call."""
+    ``get_bible`` call. ``entry_type`` mirrors that branch's
+    ``type`` field (``audio`` for ``*DA`` audio filesets)."""
     return [{
         'id': fileset_id,
         'type': entry_type,
