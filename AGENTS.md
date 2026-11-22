@@ -609,24 +609,27 @@ Universal rules — follow exactly:
   the main checkout; remove the worktree + branch once the PR
   merges green. Full workflow: workspace `../AGENTS.md`
   "Repo-specific rules".
-- `terraform/scheduler.tf`: the *monthly* Google TTS Cloud
-  Scheduler stays intentionally commented out — do NOT enable it.
-  The `daily-edge-audio` job IS enabled: it triggers `all-jobs`
-  daily with a `jobs:run` container-args override of `--only
-  generate_edge_audio`, so the monthly `dom:3` entry cannot
-  piggyback on the trigger. The `eom-stt-timestamps` job IS also
-  enabled: it fires a plain `jobs:run` on days 28-31 and the
-  `last_day_of_month` predicate gates it to the real last day —
-  a future `daily` JOBS entry would ALSO run on 28-31 via this
-  trigger (review JOBS when adding entries).
+- `terraform/scheduler.tf`: NO Cloud Scheduler trigger is live —
+  the *monthly* Google TTS job, `daily-edge-audio` and
+  `eom-stt-timestamps` all stay intentionally commented out (do
+  NOT enable them), and the `note-translations-audit` trigger
+  was deleted with the note-translation pipeline's Terraform.
+  If a trigger is ever re-enabled, remember a plain `jobs:run`
+  fires every JOBS entry whose schedule predicate matches that
+  day — `daily-edge-audio` used a `--only` container-args
+  override so the `dom:3` entry could not piggyback, while a
+  bare trigger on days 28-31 runs every `last_day_of_month`
+  entry (and would also run a future `daily` entry — review
+  JOBS when adding entries).
 - `terraform/all_jobs.tf`: the single `all-jobs` Cloud Run Job
   replaced the per-task `audio-generator` job (it reuses that SA and
   image repo, both still named `audio-generator`). Sub-jobs are
   listed in the `JOBS` table of
   `bible/management/commands/run_all_jobs.py` —
   `generate_chapter_audio` (`dom:3`, unscheduled),
-  `generate_audio_timestamps` (`last_day_of_month`, started by
-  the `eom-stt-timestamps` scheduler — spends the month's STT
+  `generate_audio_timestamps` (`last_day_of_month`, formerly
+  started by the `eom-stt-timestamps` scheduler — spends the
+  month's STT
   free minutes before they reset on the 1st; NOTE: output is
   currently LOW quality — GLU8 is only a proxy reference text
   since DBT has no LVR/NLI text, so artifacts land at
@@ -634,8 +637,8 @@ Universal rules — follow exactly:
   a matching Latvian text is licensable — see
   DEVELOPER_GUIDE "Generated Timestamps"),
   `generate_gemini_audio` (`manual`), `generate_edge_audio`
-  (`manual`; started only by the daily scheduler's `--only`
-  override — the Everita voice) and `repair_audio_files`
+  (`manual`; formerly started only by the daily scheduler's
+  `--only` override — the Everita voice) and `repair_audio_files`
   (`manual`; manifest-driven artifact repair — see below).
   Generated artifacts land under
   `audio_gemini/` and `audio_edge/` in the audio bucket (GCS

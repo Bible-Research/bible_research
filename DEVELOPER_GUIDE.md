@@ -2430,10 +2430,11 @@ translation).
 - `translate_notes [--user U] [--note-id ID] [--dry-run]` —
   backfill/repair; runs the same worker inline per note.
 - `check_note_translations` — monthly coverage audit (last
-  day of month via `run_all_jobs` JOBS + the
-  `note-translations-audit` Cloud Scheduler trigger); emits
-  ONE Sentry `capture_message` when per-language misses
-  exist, logs-only on a clean run.
+  day of month via `run_all_jobs` JOBS); emits ONE Sentry
+  `capture_message` when per-language misses exist, logs-only
+  on a clean run. Its `note-translations-audit` Cloud
+  Scheduler trigger was removed with the pipeline's
+  Terraform.
 
 **Settings** (config.yaml / .env, via
 `_audio_settings_source`): `NOTE_TARGET_LANGUAGES`,
@@ -2441,11 +2442,13 @@ translation).
 `google-llm`/`gemini-*` map to v3 models),
 `NOTE_TRANSLATE_MAX_CHARS`, `TASKS_INVOKER_SA_EMAIL`,
 `TASK_QUEUE_ID`, `TASK_QUEUE_LOCATION`, `APP_BASE_URL`.
-Terraform (`terraform/note_translations.tf`) enables
+The pipeline's Terraform (`terraform/note_translations.tf` —
+deleted when the feature was shut off) enabled
 `translate.googleapis.com`/`cloudtasks.googleapis.com`,
-creates the queue, `tasks-invoker` SA, TokenCreator for the
-Cloud Tasks service agent, and grants the appspot runtime SA
-`cloudtasks.enqueuer` + `cloudtranslate.user`.
+created the queue, `tasks-invoker` SA, TokenCreator for the
+Cloud Tasks service agent, and granted the appspot runtime SA
+`cloudtasks.enqueuer` + `cloudtranslate.user`. The APIs stay
+enabled in GCP (`disable_on_destroy = false`).
 
 ---
 
