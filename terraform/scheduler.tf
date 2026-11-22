@@ -1,11 +1,14 @@
 # ============================================================================
-# SCHEDULER RESOURCES — CURRENTLY DISABLED
+# SCHEDULER RESOURCES — NO LIVE TRIGGERS
 # ============================================================================
-# ``daily-edge-audio`` below was DISABLED on 2026-10-31 per user
-# request — it was the only scheduled trigger of ``all-jobs`` (Edge
-# read-aloud TTS, lv-LV-EveritaNeural, artifacts under
-# ``audio_edge/``). To re-enable: uncomment the resource and
-# outputs.tf output, then `terraform apply`.
+# No Cloud Scheduler trigger is live. ``daily-edge-audio`` below
+# was DISABLED on 2026-10-31 per user request (Edge read-aloud
+# TTS, lv-LV-EveritaNeural, artifacts under ``audio_edge/``). To
+# re-enable: uncomment the resource and outputs.tf output, then
+# `terraform apply`. The ``note-translations-audit`` trigger —
+# the last live one — was removed entirely together with the
+# note-translation pipeline's Terraform (the deleted
+# note_translations.tf).
 #
 # It must not be a plain trigger: the JOBS table in
 # bible/management/commands/run_all_jobs.py also contains the
