@@ -75,7 +75,13 @@ def enqueue(note_id, source_hash):
     worker already stamps ``failed`` rows, so a failure is
     logged, not raised: a credential-less environment (e.g.
     Vercel, where no GCP auth exists) must not 500 the write.
+
+    A no-op when the pipeline is disabled (empty
+    ``NOTE_TARGET_LANGUAGES``) — no Cloud Task may be created
+    then; the queue may not even exist.
     """
+    if not note_translation_languages(''):
+        return
     if getattr(settings, 'IS_GCP_ENVIRONMENT', False):
         _enqueue_cloud_task(note_id, source_hash)
     else:
@@ -328,8 +334,13 @@ def retranslate_failed(note):
     """Re-mark a note's ``failed`` rows ``pending`` and re-enqueue.
 
     Returns the number of rows re-pended (0 → nothing enqueued —
-    entries in other states stay untouched).
+    entries in other states stay untouched). A no-op returning
+    0 when the pipeline is disabled (empty
+    ``NOTE_TARGET_LANGUAGES``): rows stay ``failed`` and no
+    Cloud Task is created — the queue may not exist.
     """
+    if not note_translation_languages(note.note_text, note):
+        return 0
     source_hash = hash_note_text(note.note_text)
     requeued = note.translations.filter(
         status=NoteTranslation.STATUS_FAILED,

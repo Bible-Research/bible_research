@@ -11,6 +11,17 @@ description: >
 
 # Note-translation ops runbook
 
+> **PIPELINE DISABLED 2026-11-23** — `NOTE_TARGET_LANGUAGES`
+> is forced `[]` in `bible_research/settings.py` (overriding
+> `env-file`'s `en,lv`), so nothing in this runbook runs: no
+> enqueues, no Translate calls, no new `pending` rows, and
+> `retranslate` answers `{"requeued": 0}`. The Cloud Tasks
+> queue is being torn down by a parallel terraform change.
+> Everything below is kept for a future re-enable — restore
+> the env/config lookup in settings first. `?lang=` serving
+> of existing `ready`/`source` rows and the verify endpoint
+> still work.
+
 Pipeline: note create/edit → `transaction.on_commit` upserts
 `pending` `NoteTranslation` rows for `NOTE_TARGET_LANGUAGES`
 → Cloud Tasks POSTs `POST /api/v1/tasks/translate-note/` (OIDC

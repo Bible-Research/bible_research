@@ -1429,7 +1429,9 @@ Authorization: Token <your-token>
 Owner-only retry of `failed` translation rows: re-marks them
 `pending` and enqueues a fresh run (idempotent via
 `source_hash`); rows in other states are untouched.
-Non-owners get 404. Response: `{"requeued": <count>}`.
+Non-owners get 404. Response: `{"requeued": <count>}` —
+`0` while the pipeline is disabled (empty
+`NOTE_TARGET_LANGUAGES`), with no rows touched.
 
 #### Translate-Note Task Worker
 ```
@@ -1444,7 +1446,9 @@ newer edit superseded the run) or an over-cap note returns
 retries (queue `note-translations`, max 5 attempts, 5
 concurrent dispatches). Local dev never reaches this route —
 `enqueue()` runs the worker inline when
-`IS_GCP_ENVIRONMENT` is false.
+`IS_GCP_ENVIRONMENT` is false. While the pipeline is disabled
+the worker 204s without translating (empty
+`NOTE_TARGET_LANGUAGES`) — in-flight tasks are harmless.
 
 #### Update Note
 ```
@@ -2377,11 +2381,24 @@ and a re-run resumes with the remainder.
 
 ### Note Translations (Cloud Translation + Cloud Tasks)
 
+> **DISABLED 2026-11-23** — `NOTE_TARGET_LANGUAGES` is forced
+> to `[]` in `bible_research/settings.py` (overriding the
+> `env-file`/`config.yaml` value), so the write→enqueue→
+> translate pipeline below never runs: no `pending` rows, no
+> Cloud Tasks, no Cloud Translation calls. Serving keeps
+> working: existing `ready`/`source` rows still answer
+> `?lang=`, the verify endpoint still works, and
+> `/notes/<id>/retranslate/` answers `{"requeued": 0}`.
+> To re-enable: restore the env/config lookup for
+> `NOTE_TARGET_LANGUAGES` in settings (delete the forced
+> assignment) and redeploy.
+
 Public notes are mixed-language (EN/LV); a `public` note is
 only useful to readers of its source language, so every note
 write enqueues an eager machine translation into each
 `NOTE_TARGET_LANGUAGES` code (default `['en', 'lv']` —
-emptying the setting is the kill switch).
+emptying the setting is the kill switch, and it is currently
+forced empty — see the banner above).
 
 **Pipeline** (`annotations/services/`):
 
@@ -2436,7 +2453,8 @@ translation).
   exist, logs-only on a clean run.
 
 **Settings** (config.yaml / .env, via
-`_audio_settings_source`): `NOTE_TARGET_LANGUAGES`,
+`_audio_settings_source`): `NOTE_TARGET_LANGUAGES`
+(currently force-overridden to `[]` in settings — disabled),
 `NOTE_TRANSLATION_ENGINE` (`google-nmt` default; future
 `google-llm`/`gemini-*` map to v3 models),
 `NOTE_TRANSLATE_MAX_CHARS`, `TASKS_INVOKER_SA_EMAIL`,
@@ -2779,9 +2797,10 @@ API_BIBLE_KEY=<…>
 Optionally add `SENTRY_DSN=<…>` to report staging errors to
 the `bible-research-api` Sentry project — events carry
 `environment:staging` on Vercel previews. The note-translation
-pipeline is force-disabled on Vercel (`VERCEL` set →
-`settings.NOTE_TARGET_LANGUAGES = []`) — serverless has no
-Google credentials, so writes would stamp `failed` rows.
+pipeline is force-disabled everywhere
+(`settings.NOTE_TARGET_LANGUAGES = []` since 2026-11 — see
+"Note Translations"); the earlier `VERCEL`-only forcing is
+now redundant but kept as a safety net.
 
 Serverless functions have no GCP credentials, so GCS-backed
 features (generated audio, image attachments) cannot work on

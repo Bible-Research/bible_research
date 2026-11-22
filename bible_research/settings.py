@@ -536,6 +536,16 @@ if os.environ.get('VERCEL'):
     # Vercel serverless has no Google credentials — Cloud
     # Translation/Tasks calls would 500 on every note write.
     NOTE_TARGET_LANGUAGES = []
+# PIPELINE DISABLED 2026-11-23: the note-translation feature
+# is shut off — Cloud Translation must never be called and
+# the Cloud Tasks queue is being torn down — so targets are
+# forced empty here regardless of the env/config lookup above
+# (prod's env-file still sets "en,lv"). Existing
+# NoteTranslation rows keep serving via ?lang= and the verify
+# endpoint; no new pending rows, enqueues, or Translate calls
+# happen while this is empty. To re-enable: delete this
+# forced assignment — the lookup above applies again.
+NOTE_TARGET_LANGUAGES = []
 # Engine provenance stamped on every NoteTranslation row; the
 # v3 general/nmt model is the MVP default ('google-llm' /
 # 'gemini-…' are future config flips, not code changes).

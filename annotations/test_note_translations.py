@@ -178,6 +178,7 @@ class _BaseCase(TestCase):
         }, format='json')
 
 
+@override_settings(NOTE_TARGET_LANGUAGES=['en', 'lv'])
 class EnqueueHooksTest(_BaseCase):
     """Task 2.4: perform_create/update/bulk enqueue behavior."""
 
@@ -256,6 +257,7 @@ class EnqueueHooksTest(_BaseCase):
         self.assertEqual(self.view_enqueue.call_count, 2)
 
 
+@override_settings(NOTE_TARGET_LANGUAGES=['en', 'lv'])
 class LocalInlineWorkerTest(_BaseCase):
     """Task 2.2: local dev runs the worker inline — no GCP."""
 
@@ -277,6 +279,7 @@ class LocalInlineWorkerTest(_BaseCase):
         self.assertIn('[lv-out]', rows['en'].text)
 
 
+@override_settings(NOTE_TARGET_LANGUAGES=['en', 'lv'])
 class WorkerEndpointTest(_BaseCase):
     """Task 2.3: OIDC auth boundary + stale-hash no-op."""
 
@@ -562,6 +565,7 @@ class VerifyEndpointTest(_BaseCase):
         )
 
 
+@override_settings(NOTE_TARGET_LANGUAGES=['en', 'lv'])
 class RetranslateEndpointTest(_BaseCase):
     """Task 3.3: owner retry of failed rows."""
 
@@ -600,7 +604,23 @@ class RetranslateEndpointTest(_BaseCase):
         api.force_authenticate(user=self.other)
         self.assertEqual(api.post(self.url).status_code, 404)
 
+    @override_settings(NOTE_TARGET_LANGUAGES=[])
+    def test_pipeline_disabled_returns_zero(self):
+        """Pipeline off: ``requeued`` is 0, nothing is enqueued,
+        and ``failed`` rows stay ``failed`` — no Cloud Task may
+        be created (the queue may not exist)."""
+        with patch(
+            'annotations.services.tasks.enqueue'
+        ) as enq:
+            resp = self.api.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['requeued'], 0)
+        enq.assert_not_called()
+        self.failed.refresh_from_db()
+        self.assertEqual(self.failed.status, 'failed')
 
+
+@override_settings(NOTE_TARGET_LANGUAGES=['en', 'lv'])
 class TranslateNotesCommandTest(_BaseCase):
     """Task 4.4: translate_notes --user scoping."""
 
@@ -639,6 +659,7 @@ class TranslateNotesCommandTest(_BaseCase):
             call_command('translate_notes', '--tag', 'TAGnope')
 
 
+@override_settings(NOTE_TARGET_LANGUAGES=['en', 'lv'])
 class CheckNoteTranslationsTest(_BaseCase):
     """Task 4.5: coverage audit Sentry behavior."""
 
@@ -674,3 +695,33 @@ class CheckNoteTranslationsTest(_BaseCase):
         args, kwargs = cap.call_args
         self.assertIn('lv=1', args[0])
         self.assertEqual(kwargs.get('level'), 'error')
+
+
+class PipelineDisabledTest(TestCase):
+    """Empty ``NOTE_TARGET_LANGUAGES`` — the kill switch the
+    disabled pipeline relies on."""
+
+    @override_settings(NOTE_TARGET_LANGUAGES=[])
+    def test_enqueue_runs_nothing_off_gcp(self):
+        """``enqueue`` no-ops before the GCP/inline branch —
+        no Cloud Task and no inline worker."""
+        with patch.object(
+            note_tasks, '_enqueue_cloud_task'
+        ) as cloud, patch.object(
+            note_tasks, 'run_translation_task'
+        ) as worker:
+            note_tasks.enqueue('NOTX', 'h')
+        cloud.assert_not_called()
+        worker.assert_not_called()
+
+    @override_settings(
+        NOTE_TARGET_LANGUAGES=[], IS_GCP_ENVIRONMENT=True,
+    )
+    def test_enqueue_never_creates_cloud_task_on_gcp(self):
+        """Deployed on GCP the guard still fires first — no
+        Cloud Task is created while the pipeline is off."""
+        with patch.object(
+            note_tasks, '_enqueue_cloud_task'
+        ) as cloud:
+            note_tasks.enqueue('NOTX', 'h')
+        cloud.assert_not_called()
