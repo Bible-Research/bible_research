@@ -17,7 +17,11 @@ tests run on SQLite.
 
 - `bible/` — passage text, audio, search, translations, timestamps.
 - `annotations/` — notes, tags, comments, images, reading
-  positions, and the note-translation pipeline
+  positions, and the note-translation pipeline — DISABLED
+  2026-11 (`NOTE_TARGET_LANGUAGES` forced `[]` in settings, so
+  nothing enqueues or calls Cloud Translation; existing
+  `NoteTranslation` rows still serve via `?lang=`/verify).
+  Code kept for re-enable:
   (`services/translation_service.py` TipTap→Cloud Translation,
   `services/tasks.py` Cloud Tasks enqueue + inline local worker,
   `views_tasks.py` OIDC-protected worker endpoint,
@@ -187,6 +191,8 @@ stored rows on the client-supplied name must go through
   owner-only, `notes/<id>/retranslate/` POST owner-only)
 - `tasks/translate-note/` — Cloud Tasks worker endpoint,
   AllowAny + explicit OIDC verification, never user tokens
+  (inert while the pipeline is disabled — no-ops on empty
+  `NOTE_TARGET_LANGUAGES`)
 - `reading-positions/`
 - `notes/<note_pk>/comments/`, `notes/<note_pk>/images/`,
   `notes/<note_pk>/comments/<comment_pk>/images/`
