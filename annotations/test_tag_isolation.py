@@ -106,6 +106,7 @@ class TagIsolationTest(TestCase):
             set(resp.json()),
             {
                 'id', 'name', 'parent_tag', 'public',
+                'published',
                 'note_count', 'created_at', 'updated_at',
             },
         )

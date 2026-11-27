@@ -150,6 +150,7 @@ class UserSerializer(serializers.ModelSerializer):
     Used for retrieving user information.
     """
     account_kind = serializers.SerializerMethodField()
+    can_publish = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -159,8 +160,11 @@ class UserSerializer(serializers.ModelSerializer):
             'email',
             'date_joined',
             'account_kind',
+            'can_publish',
         ]
-        read_only_fields = ['id', 'date_joined', 'account_kind']
+        read_only_fields = [
+            'id', 'date_joined', 'account_kind', 'can_publish',
+        ]
 
     def get_account_kind(self, obj):
         """``guest`` for the legacy read-only account,
@@ -169,3 +173,11 @@ class UserSerializer(serializers.ModelSerializer):
         if obj.username == 'guest':
             return 'guest'
         return 'registered'
+
+    def get_can_publish(self, obj):
+        """True when the user holds the
+        ``annotations.publish_note`` permission (directly or
+        via a group) — drives the publish-toggle gate in the
+        UI. False for the read-only ``guest`` account unless an
+        admin granted it explicitly."""
+        return obj.has_perm('annotations.publish_note')

@@ -43,7 +43,7 @@ class RegisterUserTest(TestCase):
         self.assertEqual(
             set(response.data['user'].keys()),
             {'id', 'username', 'email', 'date_joined',
-             'account_kind'},
+             'account_kind', 'can_publish'},
         )
         self.assertEqual(
             response.data['user']['account_kind'], 'registered'
@@ -286,7 +286,7 @@ class CurrentUserTest(TestCase):
         self.assertEqual(
             set(response.data.keys()),
             {'id', 'username', 'email', 'date_joined',
-             'account_kind'},
+             'account_kind', 'can_publish'},
         )
         self.assertEqual(response.data['username'], 'meuser')
         self.assertEqual(response.data['email'], 'me@example.com')

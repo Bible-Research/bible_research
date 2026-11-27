@@ -189,6 +189,23 @@ stored rows on the client-supplied name must go through
   serving on detail+list,
   `notes/<id>/translations/<lang>/verify/` POST|DELETE
   owner-only, `notes/<id>/retranslate/` POST owner-only)
+- Note sharing: `notes/<id>/share/` POST, `notes/<id>/share/
+  <username>/` DELETE, `notes/<id>/shares/` GET (owner-only,
+  silent-200 username resolution, `share` throttle scope),
+  `notes/shared-with-me/` GET, `notes/?published=true` and
+  `notes/?q=` (anonymous public directory, `notes-search`
+  throttle on `q`), `notes/<id>/bookmark/` POST|DELETE,
+  `notes/bookmarks/` GET, `notes/<id>/copy/` POST
+- Tag sharing: `tags/<id>/share/` POST, `tags/<id>/share/
+  <username>/` DELETE, `tags/<id>/shares/` GET,
+  `tags/<id>/set-published/` POST (publish-gated cascade),
+  `tags/<id>/copy/` POST. `published` on Note/Tag means
+  directory-listed and implies `public`; writes require the
+  `annotations.publish_note` Meta permission (400, never
+  403), `GET /users/me/` reports `can_publish`. Grants
+  (`NoteShare`/`TagShare`, `SavedNote` bookmarks) resolve
+  live inside `get_accessible_notes_qs`; `note_text_plain`
+  backs `?q=` and is maintained on every write path.
 - `tasks/translate-note/` — Cloud Tasks worker endpoint,
   AllowAny + explicit OIDC verification, never user tokens
   (inert while the pipeline is disabled — no-ops on empty
