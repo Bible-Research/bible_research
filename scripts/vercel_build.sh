@@ -6,11 +6,10 @@
 # env var supplies DATABASE_STAGING_URL/DB_SSL_CERT.
 set -e
 
-# The custom installCommand drops wheels into the flat target
-# dir `.vercel_python_packages`, which nothing puts on
-# sys.path for plain `python3` invocations during the build
-# (the preset only wires it into the function bundle).
-export PYTHONPATH="$PWD/.vercel_python_packages${PYTHONPATH:+:$PYTHONPATH}"
+# Dependencies live in the preset's build venv (populated by
+# scripts/vercel_install.sh); the preset puts that venv's
+# bin first on PATH, so plain `python3` here already
+# resolves to an interpreter that can import them.
 
 # Apply migrations, but never against a non-staging database.
 # On Vercel previews settings.py pins DATABASE_STAGING_URL;
@@ -28,8 +27,8 @@ fi
 # an empty real env var would otherwise shadow a valid
 # DOTENV-carried URL (load_dotenv uses setdefault).
 export DATABASE_STAGING_URL
-# Stdlib parsing — dj_database_url lives in
-# .vercel_python_packages, which may not be importable here.
+# Stdlib parsing — avoids importing dj_database_url from
+# the venv so the guard stays dependency-free.
 # Print the resolved DB name (not a credential) so a refusal
 # log distinguishes "var unset" from "wrong database".
 DB_NAME=$(python3 -c '
