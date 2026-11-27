@@ -16,6 +16,7 @@ from bible.services.esv.registry import (
     is_esv_fileset,
 )
 from bible.serializers import BiblePassageSerializer
+from bible.utils.provider_errors import ProviderConfigError
 
 User = get_user_model()
 
@@ -458,7 +459,7 @@ class ESVClientSearchTests(TestCase):
         """Search method should raise ValueError if no API key
         is set — neither an explicit key nor a configured
         ``ESV_KEY`` (the pytest conftest provides a dummy)."""
-        with self.assertRaises(ValueError) as context:
+        with self.assertRaises(ProviderConfigError) as context:
             ESVClient(api_key=None)
 
         self.assertIn("ESV_KEY not configured", str(context.exception))

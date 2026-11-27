@@ -8,11 +8,27 @@ from typing import Any, Dict, List, Optional
 import requests
 from django.conf import settings
 
-from bible.utils.provider_errors import PassageNotFoundError
+from bible.utils.provider_errors import (
+    PassageNotFoundError,
+    ProviderConfigError,
+)
 
 logger = logging.getLogger(__name__)
 
 APIBIBLE_BASE_URL = "https://api.scripture.api.bible/v1"
+
+
+def apibible_configured() -> bool:
+    """True when ``API_BIBLE_KEY`` holds a usable credential.
+
+    An empty or whitespace-only string is as unconfigured as a
+    missing key — the shared ``env-file`` secret once carried
+    ``API_BIBLE_KEY=`` (empty), which 502'd every
+    API.Bible-backed endpoint (Sentry REACTIVE-BIBLE-WEB-P/-Q).
+    """
+    return bool(
+        (getattr(settings, "API_BIBLE_KEY", None) or '').strip()
+    )
 
 # Paragraph styles that mark a non-verse heading in API.Bible
 # JSON content: s*/ms* = section headings, mr/r = parallel
@@ -49,8 +65,13 @@ class ApiBibleClient:
 
     def __init__(self, api_key=None):
         api_key = api_key or getattr(settings, "API_BIBLE_KEY", None)
-        if not api_key:
-            raise ValueError("API_BIBLE_KEY not configured.")
+        # ``.strip()`` keeps this aligned with
+        # ``apibible_configured()`` — a whitespace-only key is
+        # truthy but just as unusable upstream.
+        if not (api_key or "").strip():
+            raise ProviderConfigError(
+                "API_BIBLE_KEY not configured."
+            )
         self.api_key = api_key
         self.session = requests.Session()
         self.session.headers.update({"api-key": api_key})

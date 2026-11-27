@@ -25,7 +25,10 @@ from openapi_client.configuration import Configuration
 from openapi_client.api_client import ApiClient
 from openapi_client.exceptions import ApiException
 
-from bible.utils.provider_errors import is_upstream_failure
+from bible.utils.provider_errors import (
+    ProviderConfigError,
+    is_upstream_failure,
+)
 
 
 # Bound every upstream call so a stalled b4.dbt.io socket cannot
@@ -33,12 +36,15 @@ from bible.utils.provider_errors import is_upstream_failure
 _REQUEST_TIMEOUT_SECONDS = 10
 
 # Transport failures where the request never got a definitive
-# upstream answer — safe to replay on a read-only GET. A
-# received error response (HTTPError from raise_for_status)
-# is NOT transient: the upstream answered, so do not retry.
+# upstream answer — safe to replay on a read-only GET. That
+# includes ChunkedEncodingError (connection lost mid-body), the
+# most common dropped-connection flavor. A received error
+# response (HTTPError from raise_for_status) is NOT transient:
+# the upstream answered, so do not retry.
 _TRANSIENT_REQUEST_ERRORS = (
     requests.exceptions.Timeout,
     requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
 )
 
 
@@ -112,7 +118,9 @@ class DBTClient:
         api_key = api_key or getattr(settings, 'DBT_KEY', None)
 
         if not api_key:
-            raise ValueError("DBT_KEY not found in settings.")
+            raise ProviderConfigError(
+                "DBT_KEY not found in settings."
+            )
 
         self.api_key = api_key
         self.base_url = "https://b4.dbt.io/api"

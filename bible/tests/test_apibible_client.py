@@ -14,7 +14,9 @@ from bible.serializers import BiblePassageSerializer
 from bible.services.apibible.client import (
     ApiBibleClient,
     _parse_chapter_content,
+    apibible_configured,
 )
+from bible.utils.provider_errors import ProviderConfigError
 from bible.services.apibible.registry import (
     APIBIBLE_TRANSLATIONS,
     canonical_apibible_fileset_id,
@@ -430,11 +432,23 @@ class ApiBibleClientSessionTests(TestCase):
 
     @override_settings(API_BIBLE_KEY=None)
     def test_missing_key_raises(self):
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(ProviderConfigError) as ctx:
             ApiBibleClient(api_key=None)
         self.assertIn(
             "API_BIBLE_KEY not configured", str(ctx.exception)
         )
+
+    @override_settings(API_BIBLE_KEY="   ")
+    def test_whitespace_key_counts_as_unconfigured(self):
+        """A whitespace-only key is truthy but just as unusable
+        — construction must reject it like an unset key."""
+        self.assertFalse(apibible_configured())
+        with self.assertRaises(ProviderConfigError):
+            ApiBibleClient(api_key=None)
+
+    @override_settings(API_BIBLE_KEY="real-key")
+    def test_apibible_configured_with_key(self):
+        self.assertTrue(apibible_configured())
 
     def test_get_chapter_calls_correct_url_and_params(self):
         client = ApiBibleClient(api_key="test-key")

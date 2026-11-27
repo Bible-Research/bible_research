@@ -45,6 +45,7 @@ from google.api_core import exceptions as gcs_exceptions
 
 from bible.services import chapter_cache
 from bible.services.apibible.client import (
+    apibible_configured,
     get_default_apibible_client,
 )
 from bible.services.apibible.registry import (
@@ -748,7 +749,7 @@ class ApiBibleProvider(Provider):
         # translation would let users select a fileset that can
         # only fail — NIV reappears automatically once a key is
         # configured.
-        if not getattr(settings, 'API_BIBLE_KEY', None):
+        if not apibible_configured():
             return []
         return _filter_by_iso(
             get_apibible_translation_listing(), language_iso

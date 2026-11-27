@@ -202,6 +202,9 @@ def test_request_errors_hide_url_credential(dbt_client, call):
         requests.exceptions.ReadTimeout("read timed out"),
         requests.exceptions.ConnectTimeout("connect timed out"),
         requests.exceptions.ConnectionError("connection reset"),
+        requests.exceptions.ChunkedEncodingError(
+            "connection broken mid-body"
+        ),
     ],
 )
 def test_get_timestamps_retries_transient_errors(

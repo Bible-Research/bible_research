@@ -375,3 +375,32 @@ class ExcCodeStatusTests(TestCase):
 
         fields = provider_error_fields(GrpcStyleError('x'))
         self.assertEqual(fields['error_code'], 'provider_error')
+
+
+class ProviderConfigErrorTests(TestCase):
+    """A missing provider credential surfaces a fixed
+    "not configured" message — never the bare ``ValueError``
+    class name a client used to raise."""
+
+    def test_config_error_maps_to_fixed_message(self):
+        from bible.utils.provider_errors import (
+            ProviderConfigError,
+            provider_error_fields,
+        )
+        fields = provider_error_fields(
+            ProviderConfigError("API_BIBLE_KEY not configured.")
+        )
+        self.assertEqual(fields['error_code'], 'provider_error')
+        self.assertEqual(
+            fields['error'], 'Bible provider is not configured'
+        )
+
+    def test_config_error_is_still_a_value_error(self):
+        """Callers that caught the old ``ValueError`` keep
+        working — the dedicated type only subclasses it."""
+        from bible.utils.provider_errors import (
+            ProviderConfigError,
+        )
+        self.assertTrue(
+            issubclass(ProviderConfigError, ValueError)
+        )
