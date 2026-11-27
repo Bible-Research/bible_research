@@ -2768,10 +2768,13 @@ branches never build — prod stays GAE-only) and serves it at
 `manage.py` → `WSGI_APPLICATION` and collectstatics
 automatically; dependencies come from
 `scripts/vercel_install.sh` (the project's Install
-Command), which pins `uv pip install` to `.python-version`
-— the preset's own installer ignores it and resolves
-wheels for its newest CPython, which the pinned runtime
-cannot import.
+Command), which `uv pip install`s into the preset's build
+venv (`$VERCEL_PYTHON_VENV_PATH` →
+`.vercel/python/.venv`) — the preset's post-build hooks
+and `_vendor` bundling see only that venv's
+site-packages, while its own installer resolves wheels
+for its newest CPython, which the pinned runtime cannot
+import.
 `scripts/vercel_build.sh` (the project's Build Command)
 additionally runs `migrate` — so every staging deploy also
 brings `stagingdb`'s schema up to date — then collectstatics

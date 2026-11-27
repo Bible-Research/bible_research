@@ -33,10 +33,10 @@ PYMM="$(echo "$PYVER" | cut -d. -f1-2)"
 VENV="${VERCEL_PYTHON_VENV_PATH:-$PWD/.vercel/python/.venv}"
 VENV_PY="$VENV/bin/python"
 
-# Only a numeric X.Y pin is supported below — a name or
-# major-only pin must fail loudly rather than resolve the
-# newest interpreter and reproduce the drift bug this
-# script exists to fix.
+# The pin no longer selects the install interpreter — the
+# venv does — but keep requiring a numeric X.Y so a bad
+# `.python-version` fails loudly instead of silently
+# degrading the mismatch warning below.
 case "$PYMM" in
   [0-9]*.[0-9]*) ;;
   *)
@@ -115,6 +115,21 @@ print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"; then
   "$PY" -m pip --version >/dev/null 2>&1 || continue
   if "$PY" -m pip install \
        --target "$SITE" \
+       -r requirements.txt; then
+    exit 0
+  fi
+done
+
+# uv can exist off PATH — the preset installs its own
+# under ~/.local/bin or /usr/local/bin. Probe the known
+# locations before paying for a download.
+for UV_BIN in \
+  "$HOME/.local/bin/uv" \
+  "$HOME/.cargo/bin/uv" \
+  /usr/local/bin/uv
+do
+  if [ -x "$UV_BIN" ] && "$UV_BIN" pip install \
+       --python "$VENV_PY" \
        -r requirements.txt; then
     exit 0
   fi

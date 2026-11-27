@@ -598,7 +598,7 @@ Universal rules — follow exactly:
   post-build hooks and `_vendor` bundling see only that
   venv's site-packages, while its own installer resolves
   wheels for its newest CPython, which the pinned runtime
-  cannot import);
+  cannot import;
   `scripts/vercel_build.sh` additionally applies migrations
   (refuses non-`stagingdb` `DATABASE_STAGING_URL`s) so
   `stagingdb`'s schema tracks `staging`.
