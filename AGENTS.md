@@ -154,7 +154,11 @@ work without it, but `ApiBibleProvider.translation_listing`
 returns nothing while the key is unset — an unservable
 translation is never advertised (every request would 502
 `provider_error` anyway). NIV reappears automatically once a
-key is configured.
+key is configured. `ESVProvider.translation_listing` gates the
+same way on `ESV_KEY`; while either key is missing the
+`/bible/translations/` response reports `degraded: true` +
+`no-store` and the endpoint's cache key includes the
+configured-key state.
 
 Book-name handling lives in `bible/utils/bible_books.py`
 (`get_dbt_book_id`, `get_book_name_from_id`, `get_testament`). There

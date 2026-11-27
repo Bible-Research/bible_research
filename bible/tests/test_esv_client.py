@@ -15,6 +15,7 @@ from bible.services.esv.registry import (
     get_esv_translation_listing,
     is_esv_fileset,
 )
+from bible.services.providers import ESVProvider
 from bible.serializers import BiblePassageSerializer
 from bible.utils.provider_errors import ProviderConfigError
 
@@ -290,6 +291,37 @@ class ESVTranslationsEndpointTests(TestCase):
         ]
         self.assertIn("ENGESV_API", fileset_ids)
 
+    @override_settings(ESV_KEY="")
+    @patch(
+        "bible.services.providers."
+        "get_default_dbt_client"
+    )
+    def test_translations_endpoint_hides_esv_without_key(
+        self, mock_dbt
+    ):
+        """An unusable ``ESV_KEY`` makes every ESV request fail
+        at client construction — the listing must not
+        advertise a translation the backend cannot serve."""
+        mock_dbt.return_value.get_bibles.return_value = {
+            "data": []
+        }
+        from django.urls import reverse
+        url = reverse("translation-list")
+        resp = self.client.get(
+            url, {"language_iso": "eng"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        abbrs = [t["abbr"] for t in body["results"]]
+        self.assertNotIn("ESV", abbrs)
+        self.assertTrue(body["degraded"])
+
+    @override_settings(ESV_KEY="")
+    def test_provider_listing_empty_without_key(self):
+        self.assertEqual(
+            ESVProvider().translation_listing(), []
+        )
+
 
 # ============================================================
 # Commit 2 — structured headings parse
@@ -464,6 +496,23 @@ class ESVClientSearchTests(TestCase):
             ESVClient(api_key=None)
 
         self.assertIn("ESV_KEY not configured", str(context.exception))
+
+    @override_settings(ESV_KEY="   ")
+    def test_whitespace_key_counts_as_unconfigured(self):
+        """A whitespace-only key is truthy but unusable — same
+        rejection as an unset key, and it must not ship
+        padding in the ``Authorization`` header."""
+        with self.assertRaises(ProviderConfigError):
+            ESVClient(api_key=None)
+
+    def test_padded_key_is_stripped(self):
+        """A credential with surrounding whitespace is stored
+        stripped — padding must not reach the header."""
+        client = ESVClient(api_key="  padded-key  ")
+        self.assertEqual(
+            client.session.headers["Authorization"],
+            "Token padded-key",
+        )
 
 
 # ============================================================

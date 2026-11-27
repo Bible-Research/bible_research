@@ -430,6 +430,15 @@ class ApiBibleClientSessionTests(TestCase):
             client.session.headers["api-key"], "test-key"
         )
 
+    def test_padded_key_is_stripped(self):
+        """A credential with surrounding whitespace is stored
+        stripped — padding must not reach the ``api-key``
+        header."""
+        client = ApiBibleClient(api_key="  padded-key  ")
+        self.assertEqual(
+            client.session.headers["api-key"], "padded-key"
+        )
+
     @override_settings(API_BIBLE_KEY=None)
     def test_missing_key_raises(self):
         with self.assertRaises(ProviderConfigError) as ctx:
@@ -775,6 +784,35 @@ class ApiBibleTranslationsEndpointTests(TestCase):
         # the key is configured.
         self.assertTrue(body["degraded"])
         self.assertEqual(resp["Cache-Control"], "no-store")
+
+    @patch(
+        "bible.services.providers."
+        "get_default_dbt_client"
+    )
+    def test_translations_cache_respects_key_state(
+        self, mock_dbt
+    ):
+        """A body cached while ``API_BIBLE_KEY`` was set must
+        not be served once the key is unset — the cache key
+        encodes the configured state."""
+        mock_dbt.return_value.get_bibles.return_value = {
+            "data": []
+        }
+        from django.urls import reverse
+        url = reverse("translation-list")
+        with override_settings(API_BIBLE_KEY="k"):
+            healthy = self.client.get(
+                url, {"language_iso": "eng"}
+            )
+            self.assertFalse(healthy.json()["degraded"])
+        with override_settings(API_BIBLE_KEY=""):
+            degraded = self.client.get(
+                url, {"language_iso": "eng"}
+            )
+            self.assertTrue(degraded.json()["degraded"])
+            self.assertEqual(
+                degraded["Cache-Control"], "no-store"
+            )
 
     @override_settings(API_BIBLE_KEY=None)
     def test_provider_listing_empty_without_key(self):

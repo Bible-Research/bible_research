@@ -57,7 +57,10 @@ from bible.services.dbt.client import get_default_dbt_client
 from bible.services.dbt.timestamps_registry import (
     generated_timestamps_base_id,
 )
-from bible.services.esv.client import get_default_esv_client
+from bible.services.esv.client import (
+    esv_configured,
+    get_default_esv_client,
+)
 from bible.services.esv.registry import (
     canonical_esv_fileset_id,
     get_esv_translation_listing,
@@ -580,6 +583,12 @@ class ESVProvider(Provider):
         }
 
     def translation_listing(self, language_iso=None):
+        # Same rule as the API.Bible branch below: with no
+        # usable ESV_KEY every ESV request fails at client
+        # construction, so the translation must not be
+        # advertised. It reappears once a key is configured.
+        if not esv_configured():
+            return []
         return _filter_by_iso(
             get_esv_translation_listing(), language_iso
         )
@@ -1410,6 +1419,7 @@ def get_passage_body(data):
         'response_format', data.get('format', 'text')
     )
 
+    provider = None
     try:
         # ``provider_for`` sits inside the try so a config-level
         # failure raised while resolving the provider (e.g. a
@@ -1500,6 +1510,7 @@ def get_passage_body(data):
                 'fileset_id': fileset_id,
                 'provider': (
                     type(_concrete_provider(provider)).__name__
+                    if provider is not None else None
                 ),
                 'endpoint': 'bible/passage',
             },

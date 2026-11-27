@@ -23,6 +23,15 @@ ESV_SEARCH_BASE_URL = "https://api.esv.org/v3/passage/search/"
 _ESV_MAX_VERSES_PER_CHAPTER = 200
 
 
+def esv_configured() -> bool:
+    """True when ``ESV_KEY`` holds a usable credential —
+    empty or whitespace-only counts as unconfigured (same
+    rule as ``apibible_configured()``)."""
+    return bool(
+        (getattr(settings, "ESV_KEY", None) or '').strip()
+    )
+
+
 class ESVClient:
     def __init__(self, api_key=None):
         api_key = api_key or getattr(settings, "ESV_KEY", None)
