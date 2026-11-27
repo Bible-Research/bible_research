@@ -13,6 +13,7 @@ from rest_framework.test import APIClient
 
 from bible.utils.provider_errors import (
     PassageNotFoundError,
+    ProviderConfigError,
     capture_internal_exception,
     capture_provider_exception,
     is_upstream_failure,
@@ -270,6 +271,16 @@ class UpstreamClassificationTests(TestCase):
         self.assertFalse(is_upstream_failure(TypeError('x')))
         self.assertFalse(
             is_upstream_failure(RuntimeError('x'))
+        )
+
+    def test_provider_config_error_is_not_upstream(self):
+        """A missing credential is our deployment bug — it must
+        stay error-level ``internal_error``, never warning-level
+        provider trend noise."""
+        self.assertFalse(
+            is_upstream_failure(
+                ProviderConfigError('API_BIBLE_KEY not configured.')
+            )
         )
 
     @patch('sentry_sdk.new_scope')

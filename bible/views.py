@@ -40,10 +40,13 @@ from bible.utils.request_params import (
     is_valid_language_iso,
     is_valid_search_cursor,
 )
+from bible.services.apibible.client import apibible_configured
+from bible.services.esv.client import esv_configured
 from bible.services.feature_flags import (
     is_sword_search_enabled,
 )
 from bible.services.providers import (
+    ApiBibleProvider,
     DbtProvider,
     _concrete_provider,
     get_passage_body,
@@ -506,8 +509,12 @@ class AudioTimestampView(APIView):
                 "chapter must be a positive integer."
             )
 
-        provider = provider_for(fileset_id)
+        provider = None
         try:
+            # ``provider_for`` resolves inside the try so a
+            # failure while picking the provider (e.g. a
+            # missing credential) maps to provider_error too.
+            provider = provider_for(fileset_id)
             # Convert book name to DBT book ID
             # (e.g. "John" -> "JHN")
             book_id = get_dbt_book_id(book)
@@ -601,24 +608,39 @@ class CopyrightView(VercelEdgeCacheMixin, APIView):
             # _CachingProvider so the class component still
             # distinguishes it) and the raw id.
             concrete = _concrete_provider(provider)
+            # An unconfigured API.Bible client degrades to the
+            # registry license — a valid but transitional
+            # answer: caching it server-side or downstream
+            # would keep serving it after API_BIBLE_KEY is
+            # restored, so it gets the degraded-body posture
+            # (no-store, never marked for the Vercel edge).
+            unconfigured = (
+                isinstance(concrete, ApiBibleProvider)
+                and not apibible_configured()
+            )
             cache_key = (
                 f"v1:copyright:"
                 f"{type(concrete).__name__}:{bible_id}"
             )
-            cached = cache.get(cache_key)
+            cached = None if unconfigured else (
+                cache.get(cache_key)
+            )
             if cached is not None:
                 response = Response(cached)
             else:
                 data = provider.get_copyright()
                 body = {"data": data}
-                cache.set(
-                    cache_key, body,
-                    _COPYRIGHT_CACHE_TTL_SECONDS,
-                )
+                if not unconfigured:
+                    cache.set(
+                        cache_key, body,
+                        _COPYRIGHT_CACHE_TTL_SECONDS,
+                    )
                 response = Response(body)
             response['Cache-Control'] = (
-                f"public, max-age="
-                f"{_COPYRIGHT_CACHE_TTL_SECONDS}"
+                'no-store' if unconfigured else (
+                    f"public, max-age="
+                    f"{_COPYRIGHT_CACHE_TTL_SECONDS}"
+                )
             )
             return response
         except Exception as e:
@@ -862,8 +884,12 @@ class BibleSearchView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        provider = provider_for(fileset_id)
+        provider = None
         try:
+            # ``provider_for`` resolves inside the try so a
+            # failure while picking the provider (e.g. a
+            # missing credential) maps to provider_error too.
+            provider = provider_for(fileset_id)
             # Provider dispatch lives in the facade — grouped
             # mode skips pagination parsing entirely (``page``
             # is meaningless there).
@@ -1095,10 +1121,14 @@ class TranslationListView(VercelEdgeCacheMixin, APIView):
 
         # The cache key covers every input that changes the
         # output: the iso filter (case-insensitive; ''/missing
-        # both mean "all").
+        # both mean "all") and which registry-backed
+        # translations are servable — a just-unset
+        # API_BIBLE_KEY/ESV_KEY must not keep serving a cached
+        # NIV/ESV entry every request would 502 on.
         cache_key = (
             f"v1:translations:"
-            f"{(language_iso or '').lower() or 'all'}"
+            f"{(language_iso or '').lower() or 'all'}:"
+            f"{apibible_configured()}:{esv_configured()}"
         )
         cached = cache.get(cache_key)
         if cached is not None:
@@ -1140,13 +1170,20 @@ class TranslationListView(VercelEdgeCacheMixin, APIView):
             )
             body = {
                 'results': response_data,
-                'degraded': dbt_failed,
+                'degraded': (
+                    dbt_failed
+                    or not apibible_configured()
+                    or not esv_configured()
+                ),
             }
             # Degraded responses are intentionally cached neither
             # server-side nor downstream — they must recover as
-            # soon as DBT does.
+            # soon as DBT does, or as soon as API_BIBLE_KEY/
+            # ESV_KEY is configured (an unconfigured key hides
+            # that provider's entries — see
+            # ``translation_listing``).
             response = Response(body)
-            if dbt_failed:
+            if body['degraded']:
                 response['Cache-Control'] = 'no-store'
             else:
                 cache.set(

@@ -31,6 +31,21 @@ class PassageNotFoundError(ValueError):
         self.client_message = client_message
 
 
+class ProviderConfigError(ValueError):
+    """A provider's required credential/config is missing.
+
+    Raised by provider clients at construction when their key
+    setting is unset or empty (``API_BIBLE_KEY``/``ESV_KEY``/
+    ``DBT_KEY``). Subclasses ``ValueError`` for backward
+    compatibility with callers that caught the previous type.
+    A missing key is a deployment bug on our side, not an
+    upstream outage — ``is_upstream_failure`` already routes it
+    to error-level ``internal_error``, and
+    ``provider_error_fields`` surfaces a fixed message rather
+    than the bare ``ValueError`` class name.
+    """
+
+
 class InvalidSearchCursorError(ValueError):
     """The ``cursor`` query param is not a decodable scan
     position — a client-input failure (400
@@ -117,6 +132,14 @@ def provider_error_fields(
     if status:
         return {
             'error': f'Bible provider error (HTTP {status})',
+            'error_code': 'provider_error',
+        }
+    if isinstance(exc, ProviderConfigError):
+        # A missing credential is a deployment-side outage,
+        # not a failed request — say so instead of leaking
+        # the bare ``ValueError`` class name.
+        return {
+            'error': 'Bible provider is not configured',
             'error_code': 'provider_error',
         }
     return {

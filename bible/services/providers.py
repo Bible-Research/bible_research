@@ -45,6 +45,7 @@ from google.api_core import exceptions as gcs_exceptions
 
 from bible.services import chapter_cache
 from bible.services.apibible.client import (
+    apibible_configured,
     get_default_apibible_client,
 )
 from bible.services.apibible.registry import (
@@ -56,7 +57,10 @@ from bible.services.dbt.client import get_default_dbt_client
 from bible.services.dbt.timestamps_registry import (
     generated_timestamps_base_id,
 )
-from bible.services.esv.client import get_default_esv_client
+from bible.services.esv.client import (
+    esv_configured,
+    get_default_esv_client,
+)
 from bible.services.esv.registry import (
     canonical_esv_fileset_id,
     get_esv_translation_listing,
@@ -95,6 +99,7 @@ from bible.utils.bible_books import (
 from bible.utils.provider_errors import (
     InvalidSearchCursorError,
     PassageNotFoundError,
+    ProviderConfigError,
     TimestampsNotGeneratedError,
     capture_internal_exception,
     capture_provider_exception,
@@ -578,6 +583,12 @@ class ESVProvider(Provider):
         }
 
     def translation_listing(self, language_iso=None):
+        # Same rule as the API.Bible branch below: with no
+        # usable ESV_KEY every ESV request fails at client
+        # construction, so the translation must not be
+        # advertised. It reappears once a key is configured.
+        if not esv_configured():
+            return []
         return _filter_by_iso(
             get_esv_translation_listing(), language_iso
         )
@@ -665,7 +676,7 @@ class ApiBibleProvider(Provider):
         )
         try:
             client = get_default_apibible_client()
-        except ValueError:
+        except ProviderConfigError:
             # ``API_BIBLE_KEY`` unset — the client cannot be
             # built, so every upstream call would fail. Answer
             # from the registry ``license`` the way the
@@ -748,7 +759,7 @@ class ApiBibleProvider(Provider):
         # translation would let users select a fileset that can
         # only fail — NIV reappears automatically once a key is
         # configured.
-        if not getattr(settings, 'API_BIBLE_KEY', None):
+        if not apibible_configured():
             return []
         return _filter_by_iso(
             get_apibible_translation_listing(), language_iso
@@ -1408,8 +1419,15 @@ def get_passage_body(data):
         'response_format', data.get('format', 'text')
     )
 
-    provider = provider_for(fileset_id)
+    provider = None
     try:
+        # ``provider_for`` sits inside the try so a config-level
+        # failure raised while resolving the provider (e.g. a
+        # missing credential, now a ``ProviderConfigError``
+        # ValueError) classifies through the provider-error
+        # mapping below instead of escaping to the view's
+        # client-input ``except ValueError`` → 400.
+        provider = provider_for(fileset_id)
         payload = provider.get_passage(
             book_id, chapter, response_format,
             verse_start=verse_start, verse_end=verse_end,
@@ -1492,6 +1510,7 @@ def get_passage_body(data):
                 'fileset_id': fileset_id,
                 'provider': (
                     type(_concrete_provider(provider)).__name__
+                    if provider is not None else None
                 ),
                 'endpoint': 'bible/passage',
             },

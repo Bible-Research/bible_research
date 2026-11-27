@@ -1,7 +1,9 @@
 import pytest
 import requests
 from unittest.mock import Mock
+from django.test import override_settings
 from bible.services.dbt.client import DBTClient
+from bible.utils.provider_errors import ProviderConfigError
 
 
 @pytest.fixture
@@ -10,6 +12,24 @@ def dbt_client():
     client = DBTClient()
     client.session = Mock()
     return client
+
+
+@override_settings(DBT_KEY=None)
+def test_missing_key_raises_provider_config_error():
+    """An unset ``DBT_KEY`` must surface as a
+    ``ProviderConfigError`` (still a ``ValueError``) so the
+    client response reads "provider is not configured" instead
+    of leaking the bare class name."""
+    with pytest.raises(ProviderConfigError):
+        DBTClient()
+
+
+@override_settings(DBT_KEY="   ")
+def test_whitespace_key_raises_provider_config_error():
+    """A whitespace-only key is truthy but unusable — same
+    rejection as an unset key."""
+    with pytest.raises(ProviderConfigError):
+        DBTClient()
 
 
 def test_ssl_verification_enabled(dbt_client):
@@ -202,6 +222,9 @@ def test_request_errors_hide_url_credential(dbt_client, call):
         requests.exceptions.ReadTimeout("read timed out"),
         requests.exceptions.ConnectTimeout("connect timed out"),
         requests.exceptions.ConnectionError("connection reset"),
+        requests.exceptions.ChunkedEncodingError(
+            "connection broken mid-body"
+        ),
     ],
 )
 def test_get_timestamps_retries_transient_errors(

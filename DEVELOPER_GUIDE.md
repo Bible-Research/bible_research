@@ -103,14 +103,20 @@ Memcached/Redis if a second instance is ever added). It backs
 DRF throttling and these provider-data caches:
 
 - `GET /api/v1/bible/translations/` — the whole response is
-  cached per `language_iso` for 6 h and carries
-  `Cache-Control: public, max-age=21600`. A DBT outage returns
-  the registry-only list with `"degraded": true`, which is
-  never cached (`Cache-Control: no-store`). Error responses
-  are not cached either.
+  cached per `language_iso` (plus which of
+  `API_BIBLE_KEY`/`ESV_KEY` is configured) for 6 h and
+  carries `Cache-Control: public, max-age=21600`. A DBT
+  outage — or a missing provider key, which hides that
+  provider's registry entries — returns the remainder with
+  `"degraded": true`, which is never cached
+  (`Cache-Control: no-store`). Error responses are not
+  cached either.
 - `GET /api/v1/bible/copyright/` — cached per
   `(provider, bible_id)` for 24 h (copyright text is static)
-  with `Cache-Control: public, max-age=86400`.
+  with `Cache-Control: public, max-age=86400`. The
+  unconfigured-`API_BIBLE_KEY` registry-license fallback is
+  never cached (`no-store`) so the live statement resumes
+  as soon as the key is restored.
 - `GET /api/v1/bible/structure/` — the resolved
   `{books: [...]}` body is cached per `fileset_id` for 24 h
   with `Cache-Control: public, max-age=86400`; the canonical
@@ -769,8 +775,12 @@ list with bundled registry translations (ESV API, API.Bible NIV,
 SWORD), deduplicated by `abbr`. If the DBT fetch fails the
 request still returns `200` with the registry-only list and
 `"degraded": true` (`Cache-Control: no-store`); any other
-failure keeps the `502`/`provider_error` contract. Successful
-responses are cached per `language_iso` for 6 h (see
+failure keeps the `502`/`provider_error` contract. A missing
+`API_BIBLE_KEY`/`ESV_KEY` is degraded the same way — the
+unservable provider's entries are omitted (see their
+`translation_listing` gates) rather than advertised.
+Successful responses are cached per `language_iso` (plus
+which registry keys are configured) for 6 h (see
 *Caching*); the DBT listing itself is truncated at 500 rows.
 
 **Normalized options** — each translation also carries
@@ -2117,12 +2127,13 @@ verses = client.get_verses(
 **Authentication**: `api-key` header (never a query param);
 read from `settings.API_BIBLE_KEY` (`config.yaml` locally,
 Secret Manager / env in prod). `ApiBibleClient` raises
-`ValueError` at construction when the key is unset — the NIV
-filesets degrade to `provider_error` responses until a key is
-configured, and `ApiBibleProvider.translation_listing` omits
-NIV from `/bible/translations/` entirely while the key is
-missing so clients never offer a translation that can only
-fail.
+`ProviderConfigError` (a `ValueError`) at construction when the
+key is unset or blank — the NIV filesets degrade to a fixed
+"Bible provider is not configured" `provider_error` response
+until a key is configured, and
+`ApiBibleProvider.translation_listing` omits NIV from
+`/bible/translations/` entirely while the key is missing so
+clients never offer a translation that can only fail.
 
 **Endpoints Used**:
 - `GET /bibles/{bible_id}/chapters/{BOOK}.{n}` - chapter text

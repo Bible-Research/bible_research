@@ -9,6 +9,7 @@ import requests
 from django.conf import settings
 
 from bible.utils.bible_books import get_book_name_from_id
+from bible.utils.provider_errors import ProviderConfigError
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +23,24 @@ ESV_SEARCH_BASE_URL = "https://api.esv.org/v3/passage/search/"
 _ESV_MAX_VERSES_PER_CHAPTER = 200
 
 
+def esv_configured() -> bool:
+    """True when ``ESV_KEY`` holds a usable credential —
+    empty or whitespace-only counts as unconfigured (same
+    rule as ``apibible_configured()``)."""
+    return bool(
+        (getattr(settings, "ESV_KEY", None) or '').strip()
+    )
+
+
 class ESVClient:
     def __init__(self, api_key=None):
         api_key = api_key or getattr(settings, "ESV_KEY", None)
+        # A whitespace-only key is truthy but just as unusable
+        # upstream — and padding must not ship in the
+        # ``Authorization`` header.
+        api_key = (api_key or "").strip()
         if not api_key:
-            raise ValueError("ESV_KEY not configured.")
+            raise ProviderConfigError("ESV_KEY not configured.")
         self.api_key = api_key
         self.session = requests.Session()
         self.session.headers.update(
