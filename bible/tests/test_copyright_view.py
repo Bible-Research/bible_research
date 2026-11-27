@@ -415,10 +415,12 @@ def test_apibible_missing_key_answers_registry_license(
 @pytest.mark.django_db
 @patch('bible.services.providers.get_default_apibible_client')
 def test_apibible_missing_key_audio_fileset_type(
-    mock_get_client, client
+    mock_get_client, client, settings
 ):
     """The license fallback keeps ``type: "audio"`` for the
-    audio fileset id."""
+    audio fileset id — same transitional no-store posture as
+    the text filesets."""
+    settings.API_BIBLE_KEY = ''
     mock_get_client.side_effect = ProviderConfigError(
         'API_BIBLE_KEY not configured.'
     )
@@ -428,6 +430,7 @@ def test_apibible_missing_key_audio_fileset_type(
     )
 
     assert response.status_code == status.HTTP_200_OK
+    assert response['Cache-Control'] == 'no-store'
     entry = response.json()['data'][0]
     assert entry['id'] == 'ENGNIVC1DA'
     assert entry['type'] == 'audio'

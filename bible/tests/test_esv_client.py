@@ -315,6 +315,7 @@ class ESVTranslationsEndpointTests(TestCase):
         abbrs = [t["abbr"] for t in body["results"]]
         self.assertNotIn("ESV", abbrs)
         self.assertTrue(body["degraded"])
+        self.assertEqual(resp["Cache-Control"], "no-store")
 
     @override_settings(ESV_KEY="")
     def test_provider_listing_empty_without_key(self):
