@@ -2117,12 +2117,13 @@ verses = client.get_verses(
 **Authentication**: `api-key` header (never a query param);
 read from `settings.API_BIBLE_KEY` (`config.yaml` locally,
 Secret Manager / env in prod). `ApiBibleClient` raises
-`ValueError` at construction when the key is unset — the NIV
-filesets degrade to `provider_error` responses until a key is
-configured, and `ApiBibleProvider.translation_listing` omits
-NIV from `/bible/translations/` entirely while the key is
-missing so clients never offer a translation that can only
-fail.
+`ProviderConfigError` (a `ValueError`) at construction when the
+key is unset or blank — the NIV filesets degrade to a fixed
+"Bible provider is not configured" `provider_error` response
+until a key is configured, and
+`ApiBibleProvider.translation_listing` omits NIV from
+`/bible/translations/` entirely while the key is missing so
+clients never offer a translation that can only fail.
 
 **Endpoints Used**:
 - `GET /bibles/{bible_id}/chapters/{BOOK}.{n}` - chapter text

@@ -26,6 +26,10 @@ _ESV_MAX_VERSES_PER_CHAPTER = 200
 class ESVClient:
     def __init__(self, api_key=None):
         api_key = api_key or getattr(settings, "ESV_KEY", None)
+        # A whitespace-only key is truthy but just as unusable
+        # upstream — and padding must not ship in the
+        # ``Authorization`` header.
+        api_key = (api_key or "").strip()
         if not api_key:
             raise ProviderConfigError("ESV_KEY not configured.")
         self.api_key = api_key

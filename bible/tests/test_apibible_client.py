@@ -16,7 +16,6 @@ from bible.services.apibible.client import (
     _parse_chapter_content,
     apibible_configured,
 )
-from bible.utils.provider_errors import ProviderConfigError
 from bible.services.apibible.registry import (
     APIBIBLE_TRANSLATIONS,
     canonical_apibible_fileset_id,
@@ -32,6 +31,7 @@ from bible.services.search_grouping import (
 from bible.views import AudioTimestampView, BibleSearchView
 from bible.utils.provider_errors import (
     PassageNotFoundError,
+    ProviderConfigError,
     provider_error_fields,
 )
 
@@ -767,8 +767,14 @@ class ApiBibleTranslationsEndpointTests(TestCase):
             url, {"language_iso": "eng"}
         )
         self.assertEqual(resp.status_code, 200)
-        abbrs = [t["abbr"] for t in resp.json()["results"]]
+        body = resp.json()
+        abbrs = [t["abbr"] for t in body["results"]]
         self.assertNotIn("NIV", abbrs)
+        # A key-less listing is degraded: it must not cache
+        # server-side or downstream so NIV reappears as soon as
+        # the key is configured.
+        self.assertTrue(body["degraded"])
+        self.assertEqual(resp["Cache-Control"], "no-store")
 
     @override_settings(API_BIBLE_KEY=None)
     def test_provider_listing_empty_without_key(self):
@@ -778,6 +784,12 @@ class ApiBibleTranslationsEndpointTests(TestCase):
 
     @override_settings(API_BIBLE_KEY="")
     def test_provider_listing_empty_with_blank_key(self):
+        self.assertEqual(
+            ApiBibleProvider().translation_listing(), []
+        )
+
+    @override_settings(API_BIBLE_KEY="   ")
+    def test_provider_listing_empty_with_whitespace_key(self):
         self.assertEqual(
             ApiBibleProvider().translation_listing(), []
         )

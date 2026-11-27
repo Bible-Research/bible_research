@@ -5,6 +5,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from bible.services.apibible.registry import get_apibible_meta
+from bible.utils.provider_errors import ProviderConfigError
 
 
 COPYRIGHT_URL = reverse('bible-copyright')
@@ -386,10 +387,10 @@ def test_apibible_missing_key_answers_registry_license(
     mock_get_client, client
 ):
     """When ``API_BIBLE_KEY`` is not configured the client
-    factory raises ``ValueError`` — copyright must degrade to
-    the registry ``license`` (like ESV/SWORD) instead of
-    502ing."""
-    mock_get_client.side_effect = ValueError(
+    factory raises ``ProviderConfigError`` — copyright must
+    degrade to the registry ``license`` (like ESV/SWORD)
+    instead of 502ing."""
+    mock_get_client.side_effect = ProviderConfigError(
         'API_BIBLE_KEY not configured.'
     )
 
@@ -413,7 +414,7 @@ def test_apibible_missing_key_audio_fileset_type(
 ):
     """The license fallback keeps ``type: "audio"`` for the
     audio fileset id."""
-    mock_get_client.side_effect = ValueError(
+    mock_get_client.side_effect = ProviderConfigError(
         'API_BIBLE_KEY not configured.'
     )
 
@@ -436,9 +437,10 @@ def test_apibible_missing_key_audio_fileset_type(
 def test_apibible_upstream_failure_still_502s(
     mock_get_client, client, side_effect
 ):
-    """Only the unconfigured-client ``ValueError`` degrades —
-    a failure inside ``get_bible`` with a working client is a
-    real provider error, even another ``ValueError``."""
+    """Only the unconfigured-client ``ProviderConfigError``
+    degrades — a failure inside ``get_bible`` with a working
+    client is a real provider error, even another
+    ``ValueError``."""
     mock_get_client.return_value.get_bible.side_effect = (
         side_effect
     )

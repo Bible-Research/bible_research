@@ -40,6 +40,7 @@ from bible.utils.request_params import (
     is_valid_language_iso,
     is_valid_search_cursor,
 )
+from bible.services.apibible.client import apibible_configured
 from bible.services.feature_flags import (
     is_sword_search_enabled,
 )
@@ -1095,10 +1096,13 @@ class TranslationListView(VercelEdgeCacheMixin, APIView):
 
         # The cache key covers every input that changes the
         # output: the iso filter (case-insensitive; ''/missing
-        # both mean "all").
+        # both mean "all") and whether API.Bible entries are
+        # servable — a just-unset API_BIBLE_KEY must not keep
+        # serving a cached NIV entry every request would 502 on.
         cache_key = (
             f"v1:translations:"
-            f"{(language_iso or '').lower() or 'all'}"
+            f"{(language_iso or '').lower() or 'all'}:"
+            f"{apibible_configured()}"
         )
         cached = cache.get(cache_key)
         if cached is not None:
@@ -1140,13 +1144,17 @@ class TranslationListView(VercelEdgeCacheMixin, APIView):
             )
             body = {
                 'results': response_data,
-                'degraded': dbt_failed,
+                'degraded': (
+                    dbt_failed or not apibible_configured()
+                ),
             }
             # Degraded responses are intentionally cached neither
             # server-side nor downstream — they must recover as
-            # soon as DBT does.
+            # soon as DBT does, or as soon as API_BIBLE_KEY is
+            # configured (an unconfigured key hides API.Bible
+            # entries — see ``translation_listing``).
             response = Response(body)
-            if dbt_failed:
+            if body['degraded']:
                 response['Cache-Control'] = 'no-store'
             else:
                 cache.set(

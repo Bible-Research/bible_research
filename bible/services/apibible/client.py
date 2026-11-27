@@ -30,6 +30,7 @@ def apibible_configured() -> bool:
         (getattr(settings, "API_BIBLE_KEY", None) or '').strip()
     )
 
+
 # Paragraph styles that mark a non-verse heading in API.Bible
 # JSON content: s*/ms* = section headings, mr/r = parallel
 # references, d = descriptive title, sp = speaker,
@@ -67,8 +68,10 @@ class ApiBibleClient:
         api_key = api_key or getattr(settings, "API_BIBLE_KEY", None)
         # ``.strip()`` keeps this aligned with
         # ``apibible_configured()`` — a whitespace-only key is
-        # truthy but just as unusable upstream.
-        if not (api_key or "").strip():
+        # truthy but just as unusable upstream, and padding must
+        # not ship in the ``api-key`` header.
+        api_key = (api_key or "").strip()
+        if not api_key:
             raise ProviderConfigError(
                 "API_BIBLE_KEY not configured."
             )
@@ -315,7 +318,7 @@ def _parse_chapter_content(content: Any) -> Dict[str, Any]:
     seen_first_marker = False
 
     def flush_verse() -> None:
-        nonlocal current_verse, buf
+        nonlocal buf
         if current_verse is not None and buf:
             text = _normalise(" ".join(buf))
             if text:

@@ -456,9 +456,10 @@ class ESVClientSearchTests(TestCase):
 
     @override_settings(ESV_KEY=None)
     def test_search_requires_api_key(self):
-        """Search method should raise ValueError if no API key
-        is set — neither an explicit key nor a configured
-        ``ESV_KEY`` (the pytest conftest provides a dummy)."""
+        """Client construction should raise ProviderConfigError
+        if no API key is set — neither an explicit key nor a
+        configured ``ESV_KEY`` (the pytest conftest provides a
+        dummy)."""
         with self.assertRaises(ProviderConfigError) as context:
             ESVClient(api_key=None)
 

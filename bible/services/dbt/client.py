@@ -117,6 +117,10 @@ class DBTClient:
 
         api_key = api_key or getattr(settings, 'DBT_KEY', None)
 
+        # A whitespace-only key is truthy but just as unusable
+        # upstream — and padding must not ship in the ``?key=``
+        # query param.
+        api_key = (api_key or "").strip()
         if not api_key:
             raise ProviderConfigError(
                 "DBT_KEY not found in settings."

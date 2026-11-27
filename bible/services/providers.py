@@ -96,6 +96,7 @@ from bible.utils.bible_books import (
 from bible.utils.provider_errors import (
     InvalidSearchCursorError,
     PassageNotFoundError,
+    ProviderConfigError,
     TimestampsNotGeneratedError,
     capture_internal_exception,
     capture_provider_exception,
@@ -666,7 +667,7 @@ class ApiBibleProvider(Provider):
         )
         try:
             client = get_default_apibible_client()
-        except ValueError:
+        except ProviderConfigError:
             # ``API_BIBLE_KEY`` unset — the client cannot be
             # built, so every upstream call would fail. Answer
             # from the registry ``license`` the way the
@@ -1409,8 +1410,14 @@ def get_passage_body(data):
         'response_format', data.get('format', 'text')
     )
 
-    provider = provider_for(fileset_id)
     try:
+        # ``provider_for`` sits inside the try so a config-level
+        # failure raised while resolving the provider (e.g. a
+        # missing credential, now a ``ProviderConfigError``
+        # ValueError) classifies through the provider-error
+        # mapping below instead of escaping to the view's
+        # client-input ``except ValueError`` → 400.
+        provider = provider_for(fileset_id)
         payload = provider.get_passage(
             book_id, chapter, response_format,
             verse_start=verse_start, verse_end=verse_end,

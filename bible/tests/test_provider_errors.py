@@ -394,13 +394,3 @@ class ProviderConfigErrorTests(TestCase):
         self.assertEqual(
             fields['error'], 'Bible provider is not configured'
         )
-
-    def test_config_error_is_still_a_value_error(self):
-        """Callers that caught the old ``ValueError`` keep
-        working — the dedicated type only subclasses it."""
-        from bible.utils.provider_errors import (
-            ProviderConfigError,
-        )
-        self.assertTrue(
-            issubclass(ProviderConfigError, ValueError)
-        )

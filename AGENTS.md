@@ -250,7 +250,12 @@ miss on the passage endpoint) → HTTP 404, `search_disabled`
 row is disabled — a runtime kill switch toggled via Django
 admin, read-through-cached, missing row = enabled) → HTTP 403,
 anything else →
-`provider_error` → HTTP 502 (see `bible/views.py`). Note
+`provider_error` → HTTP 502 (see `bible/views.py`). One
+`provider_error` subtype is `ProviderConfigError` — a missing
+`API_BIBLE_KEY`/`ESV_KEY`/`DBT_KEY` raised at client
+construction, surfaced as the fixed "Bible provider is not
+configured" `error` text (still `provider_error`/502; being
+non-upstream it alerts at error-level `internal_error`). Note
 serialization degrades the same way — verse refs kept, `text`
 empty. Client-input 400/404s in `bible/views.py` are built by
 `bible/utils/error_responses.py` (`bad_request`/`not_found`,
