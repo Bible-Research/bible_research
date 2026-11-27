@@ -1,0 +1,181 @@
+name: Audio artifact audit
+
+# Weekly content-level audit of generated GCS audio. Runs
+# `audit_audio_files --deep` (the mode that hears clipping /
+# dead-silence defects like NUM.24:14 and GEN.18:28 — the
+# structural-only passes cannot) on GitHub infra: the prod
+# image deliberately lacks the miniaudio decoder and
+# DEVELOPER_GUIDE forbids wiring this command into
+# run_all_jobs / terraform schedulers.
+#
+# Suspect artifacts are reported two ways:
+#   - the JSON report is written to
+#     gs://{bucket}/manifests/audio-repair.json — the default
+#     manifest slot `repair_audio_files` consumes, so the
+#     repair loop stays manifest-driven;
+#   - a deduplicated GitHub issue (label `audio-audit`)
+#     collects the suspect list — that is the alert.
+# The run does NOT fail on suspects (a red weekly cron spams
+# while a backlog sits open); it fails only when the audit
+# itself cannot produce a report.
+#
+# Auth: WIF → github-deployer SA (roles/storage.admin already
+# covers bucket read/write — no terraform change needed).
+
+on:
+  schedule:
+    - cron: "17 5 * * 1" # Mondays 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+concurrency:
+  group: audio-audit
+
+env:
+  GCP_PROJECT_ID: bible-research-489314
+  WIF_PROVIDER: >-
+    projects/670506724494/locations/global/
+    workloadIdentityPools/github-actions/providers/github
+  DEPLOY_SA: >-
+    github-deployer@bible-research-489314.
+    iam.gserviceaccount.com
+  AUDIO_BUCKET: bible-research-489314-bible-audio
+  MANIFEST_OBJECT: manifests/audio-repair.json
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # Dev-only decoder required by --deep; deliberately
+          # absent from requirements.txt / the prod image.
+          pip install "miniaudio==1.73"
+
+      - name: Write minimal .env stub
+        run: |
+          cat > .env <<'ENVSTUB'
+          SECRET_KEY=ci-audio-audit-placeholder
+          DEBUG=False
+          DATABASE_URL=sqlite:///db.sqlite3
+          ENVSTUB
+
+      - name: Run deep audit and publish manifest
+        id: audit
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ env.GCP_PROJECT_ID }}
+          AUDIO_BUCKET_NAME: ${{ env.AUDIO_BUCKET }}
+        run: |
+          set +e
+          python manage.py audit_audio_files --deep --json \
+            --report \
+            "gs://${AUDIO_BUCKET}/${MANIFEST_OBJECT}" \
+            > audit-report.json 2> audit-stderr.log
+          set -e
+          cat audit-stderr.log
+          python - "$GITHUB_OUTPUT" <<'PYEOF'
+          import json, sys
+
+          try:
+              report = json.load(open("audit-report.json"))
+          except Exception:
+              print("suspects=-1", file=open(sys.argv[1], "a"))
+              sys.exit(0)
+          with open(sys.argv[1], "a") as out:
+              out.write(f"suspects={len(report.get('suspects') or [])}\n")
+              out.write(f"scanned={report['scanned']}\n")
+          PYEOF
+          if ! grep -q '^suspects=' "$GITHUB_OUTPUT"; then
+            echo "output capture failed" && exit 1
+          fi
+          grep '^suspects=-1' "$GITHUB_OUTPUT" && {
+            echo "audit produced no report — failure"; exit 1;
+          } || true
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-audit-report
+          path: audit-report.json
+
+      - name: Open or update tracking issue
+        if: steps.audit.outputs.suspects != '0' &&
+          steps.audit.outputs.suspects != '-1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUSPECTS: ${{ steps.audit.outputs.suspects }}
+          SCANNED: ${{ steps.audit.outputs.scanned }}
+        run: |
+          set -e
+          gh label create audio-audit \
+            --description "Automated audio artifact audit" \
+            --color bfd4f2 2>/dev/null || true
+
+          python - <<'PYEOF' > suspect-lines.txt
+          import json
+          report = json.load(open("audit-report.json"))
+          lines = [
+              "- `{}` — {}".format(
+                  e["name"],
+                  "; ".join(i["code"] for i in e["issues"]))
+              for e in report["results"] if e["issues"]
+          ]
+          lines += ["- `{}` — orphan_sidecar".format(n)
+                    for n in report["orphan_sidecars"]]
+          print("\n".join(lines) or "(none)")
+          PYEOF
+
+          {
+            echo "The weekly \`audit_audio_files --deep\` run"
+            echo "found **${SUSPECTS} suspect artifact(s)** out"
+            echo "of ${SCANNED} scanned."
+            echo ""
+            cat suspect-lines.txt
+            echo ""
+            echo "The manifest is at"
+            echo "\`gs://${AUDIO_BUCKET}/${MANIFEST_OBJECT}\` —"
+            echo "run \`python manage.py repair_audio_files"
+            echo "--apply\` (dry-run first), or follow the"
+            echo "fix-audio-artifact runbook. TTS regeneration"
+            echo "is non-deterministic; re-audit after repair."
+          } > issue-body.md
+
+          existing=$(gh issue list --state open \
+            --label audio-audit --limit 1 \
+            --json number --jq '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" \
+              --body-file issue-body.md
+            echo "commented on issue #$existing"
+          else
+            gh issue create \
+              --title \
+              "Audio audit: ${SUSPECTS} suspect artifact(s)" \
+              --label audio-audit \
+              --body-file issue-body.md
+          fi
