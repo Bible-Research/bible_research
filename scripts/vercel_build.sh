@@ -6,6 +6,11 @@
 # env var supplies DATABASE_STAGING_URL/DB_SSL_CERT.
 set -e
 
+# buildCommand runs at the repo root in practice; pin cwd
+# anyway so `manage.py` and the `bible_research.dotenv`
+# import resolve regardless.
+cd "$(dirname "$0")/.."
+
 # Dependencies live in the preset's build venv (populated by
 # scripts/vercel_install.sh); the preset puts that venv's
 # bin first on PATH, so plain `python3` here already

@@ -88,17 +88,19 @@ PIP3V="$(pip3 --version 2>/dev/null | sed -n \
 PIP3MM="$(echo "$PIP3V" | cut -d. -f1-2)"
 echo "vercel_install: pip3 python=${PIP3V:-absent}"
 if [ -n "$PIP3V" ] && [ "$PIP3MM" = "$VENV_MM" ] && \
-   pip3 install --target "$SITE" -r requirements.txt; then
+   pip3 install --upgrade --target "$SITE" \
+     -r requirements.txt; then
   exit 0
 fi
 
-# uv is not on PATH for installCommand — the preset
-# invokes its own binary by absolute path. Fall back to
-# pip on an interpreter matching the venv: a mismatched
-# one (e.g. a newer build) resolves unusable wheels.
-# uv-managed CPython lives under its own dirs (the runtime
-# traceback showed /uv/python/versions/...), not on PATH,
-# so glob those before the PATH names.
+# Reached when PATH uv is absent or its install failed —
+# the preset invokes its own binary by absolute path, so
+# PATH uv is not guaranteed. Fall back to pip on an
+# interpreter matching the venv: a mismatched one (e.g. a
+# newer build) resolves unusable wheels. uv-managed
+# CPython lives under its own dirs (the runtime traceback
+# showed /uv/python/versions/...), not on PATH, so glob
+# those before the PATH names.
 for PY in \
   /uv/python/versions/*/bin/"python$VENV_MM" \
   "$HOME"/.local/share/uv/python/*/bin/"python$VENV_MM" \
@@ -114,7 +116,7 @@ print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"; then
   [ "$PYV" = "$VENV_MM" ] || continue
   "$PY" -m pip --version >/dev/null 2>&1 || continue
   if "$PY" -m pip install \
-       --target "$SITE" \
+       --upgrade --target "$SITE" \
        -r requirements.txt; then
     exit 0
   fi
